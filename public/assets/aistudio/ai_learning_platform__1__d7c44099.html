@@ -1,0 +1,868 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aadesh AI Platform - Learn Anything with AI</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Google Fonts: Inter -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <!-- Canvas Confetti for certificate claim -->
+    <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
+
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        darkBg: '#090a0f',
+                        darkCard: '#131520',
+                        darkBorder: '#232738',
+                        accentViolet: '#8b5cf6',
+                        accentPurple: '#a855f7',
+                        accentIndigo: '#6366f1',
+                        accentGlow: 'rgba(168, 85, 247, 0.25)',
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                    },
+                    animation: {
+                        'pulse-glow': 'pulseGlow 4s ease-in-out infinite alternate',
+                        'float-slow': 'float 6s ease-in-out infinite',
+                        'float-delayed': 'float 7s ease-in-out 3s infinite',
+                    },
+                    keyframes: {
+                        pulseGlow: {
+                            '0%': { opacity: 0.4, transform: 'scale(1)' },
+                            '100%': { opacity: 0.8, transform: 'scale(1.15)' },
+                        },
+                        float: {
+                            '0%, 100%': { transform: 'translateY(0px)' },
+                            '50%': { transform: 'translateY(-15px)' },
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+
+    <style>
+        /* Custom Glassmorphic Styling & Utilities */
+        body {
+            background-color: #090a0f;
+            color: #f3f4f6;
+            font-family: 'Inter', sans-serif;
+            overflow-x: hidden;
+        }
+
+        .glass-card {
+            background: rgba(19, 21, 32, 0.65);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid rgba(139, 92, 246, 0.18);
+        }
+
+        .glass-card-hover {
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .glass-card-hover:hover {
+            border-color: rgba(168, 85, 247, 0.45);
+            box-shadow: 0 0 25px rgba(168, 85, 247, 0.2);
+            transform: translateY(-2px);
+        }
+
+        .glass-nav {
+            background: rgba(13, 14, 22, 0.75);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+
+        .purple-glow-btn {
+            background: linear-gradient(135deg, #8b5cf6 0%, #a855f7 50%, #6366f1 100%);
+            box-shadow: 0 0 20px rgba(168, 85, 247, 0.4);
+            transition: all 0.3s ease;
+        }
+
+        .purple-glow-btn:hover {
+            box-shadow: 0 0 30px rgba(168, 85, 247, 0.7);
+            transform: scale(1.02);
+        }
+
+        .text-gradient {
+            background: linear-gradient(135deg, #ffffff 30%, #c084fc 70%, #a855f7 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        /* Ambient Glowing Background Orbs */
+        .orb {
+            position: absolute;
+            border-radius: 50%;
+            filter: blur(90px);
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar {
+            width: 6px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #090a0f;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #2b2e4a;
+            border-radius: 3px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #8b5cf6;
+        }
+
+        .tab-btn.active {
+            background: rgba(139, 92, 246, 0.2);
+            color: #c084fc;
+            border-color: rgba(168, 85, 247, 0.4);
+        }
+    </style>
+</head>
+<body class="min-h-screen relative flex flex-col justify-between pb-24 md:pb-12">
+
+    <!-- Ambient Glowing Background Orbs (Replicating 3D visual aesthetic from mockup) -->
+    <div class="orb w-[350px] h-[350px] bg-purple-600/30 top-[-50px] left-[-100px] animate-pulse-glow"></div>
+    <div class="orb w-[450px] h-[450px] bg-indigo-600/20 top-[20%] right-[-150px] animate-float-slow"></div>
+    <div class="orb w-[300px] h-[300px] bg-violet-600/25 bottom-[10%] left-[20%] animate-float-delayed"></div>
+
+    <!-- MAIN HEADER NAVIGATION -->
+    <header class="sticky top-0 z-40 w-full glass-nav px-4 lg:px-8 py-3.5 flex items-center justify-between border-b border-white/10">
+        <div class="flex items-center space-x-3 cursor-pointer" onclick="switchTab('explore')">
+            <div class="w-10 h-10 rounded-xl purple-glow-btn flex items-center justify-center text-white font-bold text-xl">
+                <i class="fa-solid font-black fa-bolt"></i>
+            </div>
+            <div>
+                <span class="text-xl font-extrabold tracking-tight text-white flex items-center gap-1.5">
+                    Aadesh <span class="text-gradient">AI</span>
+                </span>
+                <span class="hidden md:inline-block text-[10px] uppercase font-semibold text-purple-400 bg-purple-950/80 px-2 py-0.5 rounded-full border border-purple-500/30 tracking-widest">
+                    v2.5 Next-Gen
+                </span>
+            </div>
+        </div>
+
+        <!-- Desktop Quick Search -->
+        <div class="hidden md:flex items-center relative w-1/3 max-w-md">
+            <i class="fa-solid fa-magnifying-glass absolute left-3.5 text-gray-400 text-sm"></i>
+            <input type="text" id="headerSearchInput" placeholder="Search topics, skills, certificates..." 
+                class="w-full bg-darkCard/80 border border-darkBorder focus:border-purple-500 text-sm rounded-xl pl-10 pr-4 py-2 text-gray-200 placeholder-gray-500 outline-none transition-all">
+        </div>
+
+        <!-- User Profile Snippet & Stats -->
+        <div class="flex items-center space-x-4">
+            <div class="hidden sm:flex items-center space-x-3 bg-darkCard/90 border border-darkBorder px-3 py-1.5 rounded-xl text-xs">
+                <span class="flex items-center gap-1 text-amber-400 font-semibold" title="Day Streak">
+                    <i class="fa-solid fa-fire text-amber-500"></i> 7 Days
+                </span>
+                <span class="w-[1px] h-3 bg-gray-700"></span>
+                <span class="flex items-center gap-1 text-purple-400 font-semibold" title="XP Points">
+                    <i class="fa-solid fa-bolt"></i> 2,450 XP
+                </span>
+            </div>
+
+            <div class="flex items-center space-x-2">
+                <div class="w-9 h-9 rounded-full bg-gradient-to-tr from-purple-500 to-indigo-500 p-[2px]">
+                    <img src="https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&auto=format&fit=crop&q=80" 
+                         alt="User Avatar" class="w-full h-full object-cover rounded-full"
+                         onerror="this.src='https://placehold.co/100x100/8b5cf6/ffffff?text=User'">
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- CONTENT CONTAINER -->
+    <main class="relative z-10 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-6 flex-grow w-full">
+
+        <!-- VIEW 1: EXPLORE & AI COURSE GENERATOR -->
+        <section id="view-explore" class="space-y-12">
+            
+            <!-- Hero Landing & Prompt Input -->
+            <div class="text-center py-6 md:py-10 space-y-6 relative">
+                
+                <div class="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-purple-900/30 border border-purple-500/30 text-purple-300 text-xs font-medium backdrop-blur-md mb-2">
+                    <i class="fa-solid fa-wand-magic-sparkles text-purple-400"></i>
+                    <span>AI-Powered Autonomous Curriculum Builder</span>
+                </div>
+
+                <h1 class="text-4xl sm:text-5xl md:text-6xl font-black tracking-tight text-white max-w-4xl mx-auto leading-tight">
+                    Learn Anything with <span class="text-gradient">Aadesh AI</span>
+                </h1>
+                
+                <p class="text-gray-400 text-base sm:text-lg max-w-2xl mx-auto font-normal">
+                    Generate personalized interactive courses on any skill, topic, or technology in seconds. Earn verifiable industry certificates.
+                </p>
+
+                <!-- Dynamic AI Prompt Input Box -->
+                <div class="max-w-2xl mx-auto relative group">
+                    <div class="absolute -inset-1 bg-gradient-to-r from-purple-600 via-indigo-600 to-violet-600 rounded-2xl blur opacity-30 group-hover:opacity-75 transition duration-500"></div>
+                    
+                    <div class="relative glass-card rounded-2xl p-2 flex items-center border border-purple-500/30 shadow-2xl">
+                        <div class="pl-3.5 pr-2 text-purple-400">
+                            <i class="fa-solid fa-magnifying-glass text-lg"></i>
+                        </div>
+                        <input type="text" id="aiPromptInput" 
+                            placeholder="What do you want to learn today? (e.g. Next.js 14 Masterclass, Prompt Engineering...)" 
+                            class="w-full bg-transparent text-gray-100 placeholder-gray-500 text-sm sm:text-base px-2 py-3 outline-none">
+                        
+                        <button onclick="generateAICourse()" id="generateBtn" 
+                            class="purple-glow-btn text-white font-semibold px-5 py-3 rounded-xl flex items-center gap-2 text-sm whitespace-nowrap cursor-pointer">
+                            <span>Generate</span>
+                            <i class="fa-solid fa-bolt text-xs"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Quick Prompt Tag Pills -->
+                <div class="flex flex-wrap items-center justify-center gap-2 pt-2 max-w-3xl mx-auto">
+                    <span class="text-xs text-gray-500 mr-1 font-medium">Try asking for:</span>
+                    <button onclick="quickPrompt('UI/UX Design Systems')" class="text-xs bg-darkCard/80 hover:bg-purple-900/40 text-gray-300 hover:text-purple-300 border border-darkBorder hover:border-purple-500/50 px-3 py-1.5 rounded-full transition-all flex items-center gap-1.5">
+                        <i class="fa-solid fa-palette text-purple-400 text-[10px]"></i> UI/UX Design Systems
+                    </button>
+                    <button onclick="quickPrompt('Fullstack React & Node.js')" class="text-xs bg-darkCard/80 hover:bg-purple-900/40 text-gray-300 hover:text-purple-300 border border-darkBorder hover:border-purple-500/50 px-3 py-1.5 rounded-full transition-all flex items-center gap-1.5">
+                        <i class="fa-brands fa-react text-blue-400 text-[10px]"></i> Fullstack React & Node
+                    </button>
+                    <button onclick="quickPrompt('Machine Learning Foundations')" class="text-xs bg-darkCard/80 hover:bg-purple-900/40 text-gray-300 hover:text-purple-300 border border-darkBorder hover:border-purple-500/50 px-3 py-1.5 rounded-full transition-all flex items-center gap-1.5">
+                        <i class="fa-solid fa-brain text-pink-400 text-[10px]"></i> Machine Learning
+                    </button>
+                    <button onclick="quickPrompt('Cybersecurity & Ethical Hacking')" class="text-xs bg-darkCard/80 hover:bg-purple-900/40 text-gray-300 hover:text-purple-300 border border-darkBorder hover:border-purple-500/50 px-3 py-1.5 rounded-full transition-all flex items-center gap-1.5">
+                        <i class="fa-solid fa-shield-halved text-emerald-400 text-[10px]"></i> Cybersecurity
+                    </button>
+                </div>
+            </div>
+
+            <!-- AI Course Generation Simulation Loading Section (Hidden by Default) -->
+            <div id="aiLoadingSection" class="hidden glass-card rounded-2xl p-8 max-w-2xl mx-auto text-center space-y-6 border border-purple-500/40">
+                <div class="relative w-20 h-20 mx-auto flex items-center justify-center">
+                    <div class="absolute inset-0 rounded-full border-4 border-purple-500/20 border-t-purple-500 animate-spin"></div>
+                    <i class="fa-solid fa-brain text-2xl text-purple-400 animate-pulse"></i>
+                </div>
+                <div>
+                    <h3 class="text-xl font-bold text-white mb-2" id="loadingTopicText">Synthesizing Custom Curriculum...</h3>
+                    <p class="text-sm text-gray-400" id="loadingStatusSub">Analyzing industry prerequisites and crafting modular lessons...</p>
+                </div>
+                <!-- Simulated Generation Progress Bar -->
+                <div class="w-full bg-darkBg rounded-full h-2 overflow-hidden border border-white/5">
+                    <div id="generationProgressBar" class="bg-gradient-to-r from-purple-500 to-indigo-500 h-full w-0 transition-all duration-300"></div>
+                </div>
+            </div>
+
+            <!-- Generated AI Course Result Preview Container -->
+            <div id="generatedCourseContainer" class="hidden glass-card rounded-2xl p-6 sm:p-8 max-w-4xl mx-auto border border-purple-500/40 shadow-2xl">
+                <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-darkBorder pb-6">
+                    <div>
+                        <div class="flex items-center gap-2 mb-2">
+                            <span class="text-xs font-semibold px-2.5 py-1 rounded-md bg-purple-900/50 text-purple-300 border border-purple-500/30">
+                                AI Generated Track
+                            </span>
+                            <span class="text-xs text-gray-400 flex items-center gap-1">
+                                <i class="fa-regular fa-clock"></i> 4 Modules • Approx 6 Hours
+                            </span>
+                        </div>
+                        <h2 class="text-2xl sm:text-3xl font-extrabold text-white" id="generatedTitle">UI/UX Design Systems Masterclass</h2>
+                        <p class="text-sm text-gray-400 mt-1" id="generatedDesc">Comprehensive step-by-step masterclass engineered to take you from foundational concepts to production implementation.</p>
+                    </div>
+                    <button onclick="enrollInGeneratedCourse()" class="purple-glow-btn text-white font-semibold px-6 py-3 rounded-xl flex items-center justify-center gap-2 text-sm whitespace-nowrap">
+                        <i class="fa-solid fa-circle-play"></i> Enroll & Start Course
+                    </button>
+                </div>
+
+                <!-- Generated Modules List -->
+                <div class="mt-6 space-y-4">
+                    <h4 class="text-xs font-bold uppercase tracking-wider text-gray-400">Curriculum Breakdown</h4>
+                    <div class="grid gap-3" id="modulesList">
+                        <!-- Dynamic modules rendered via JavaScript -->
+                    </div>
+                </div>
+            </div>
+
+            <!-- Trending AI Tracks / Recommended -->
+            <div class="space-y-6">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <h3 class="text-xl font-bold text-white flex items-center gap-2">
+                            <i class="fa-solid fa-fire text-purple-400"></i> Trending AI Curriculums
+                        </h3>
+                        <p class="text-xs text-gray-400">Popular AI-curated learning paths chosen by developers worldwide</p>
+                    </div>
+                    <button onclick="switchTab('courses')" class="text-xs text-purple-400 hover:text-purple-300 font-medium flex items-center gap-1">
+                        View All <i class="fa-solid fa-chevron-right text-[10px]"></i>
+                    </button>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6" id="trendingTracksGrid">
+                    <!-- Card 1 -->
+                    <div class="glass-card glass-card-hover rounded-2xl p-5 flex flex-col justify-between space-y-4">
+                        <div class="space-y-3">
+                            <div class="flex items-center justify-between">
+                                <span class="w-10 h-10 rounded-xl bg-purple-900/40 border border-purple-500/30 flex items-center justify-center text-purple-400 text-lg">
+                                    <i class="fa-solid fa-microchip"></i>
+                                </span>
+                                <span class="text-xs font-semibold text-emerald-400 bg-emerald-950/60 px-2.5 py-1 rounded-full border border-emerald-500/20">
+                                    Popular
+                                </span>
+                            </div>
+                            <h4 class="text-lg font-bold text-white">Generative AI & LLM Architecture</h4>
+                            <p class="text-xs text-gray-400 line-clamp-2">Master Transformers, RAG pipelines, fine-tuning Llama 3, and building autonomous AI agents.</p>
+                        </div>
+                        <div class="pt-2 border-t border-darkBorder flex items-center justify-between">
+                            <span class="text-xs text-gray-400">8 Modules • Certificate Included</span>
+                            <button onclick="startSpecificTrack('Generative AI & LLM Architecture')" class="text-xs font-semibold text-purple-400 hover:text-purple-300 flex items-center gap-1">
+                                Start <i class="fa-solid fa-arrow-right"></i>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Card 2 -->
+                    <div class="glass-card glass-card-hover rounded-2xl p-5 flex flex-col justify-between space-y-4">
+                        <div class="space-y-3">
+                            <div class="flex items-center justify-between">
+                                <span class="w-10 h-10 rounded-xl bg-indigo-900/40 border border-indigo-500/30 flex items-center justify-center text-indigo-400 text-lg">
+                                    <i class="fa-brands fa-react"></i>
+                                </span>
+                                <span class="text-xs font-semibold text-purple-300 bg-purple-950/60 px-2.5 py-1 rounded-full border border-purple-500/20">
+                                    Advanced
+                                </span>
+                            </div>
+                            <h4 class="text-lg font-bold text-white">React 19 & Next.js 14 App Router</h4>
+                            <p class="text-xs text-gray-400 line-clamp-2">Server Components, Actions, performance tuning, and scalable fullstack deployment.</p>
+                        </div>
+                        <div class="pt-2 border-t border-darkBorder flex items-center justify-between">
+                            <span class="text-xs text-gray-400">6 Modules • Hands-on Project</span>
+                            <button onclick="startSpecificTrack('React 19 & Next.js 14 App Router')" class="text-xs font-semibold text-purple-400 hover:text-purple-300 flex items-center gap-1">
+                                Start <i class="fa-solid fa-arrow-right"></i>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Card 3 -->
+                    <div class="glass-card glass-card-hover rounded-2xl p-5 flex flex-col justify-between space-y-4">
+                        <div class="space-y-3">
+                            <div class="flex items-center justify-between">
+                                <span class="w-10 h-10 rounded-xl bg-pink-900/40 border border-pink-500/30 flex items-center justify-center text-pink-400 text-lg">
+                                    <i class="fa-solid fa-cubes"></i>
+                                </span>
+                                <span class="text-xs font-semibold text-amber-400 bg-amber-950/60 px-2.5 py-1 rounded-full border border-amber-500/20">
+                                    Design
+                                </span>
+                            </div>
+                            <h4 class="text-lg font-bold text-white">Spatial UI & 3D Web Graphics</h4>
+                            <p class="text-xs text-gray-400 line-clamp-2">Three.js, WebGL shaders, and immersive glassmorphic interface engineering.</p>
+                        </div>
+                        <div class="pt-2 border-t border-darkBorder flex items-center justify-between">
+                            <span class="text-xs text-gray-400">5 Modules • Certificate</span>
+                            <button onclick="startSpecificTrack('Spatial UI & 3D Web Graphics')" class="text-xs font-semibold text-purple-400 hover:text-purple-300 flex items-center gap-1">
+                                Start <i class="fa-solid fa-arrow-right"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- VIEW 2: MY COURSES -->
+        <section id="view-courses" class="hidden space-y-6">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-darkBorder pb-4">
+                <div>
+                    <h2 class="text-2xl font-bold text-white">My Active Courses</h2>
+                    <p class="text-xs text-gray-400">Continue learning where you left off</p>
+                </div>
+                <div class="flex items-center gap-2">
+                    <button class="text-xs px-3 py-1.5 rounded-lg bg-purple-900/40 border border-purple-500/40 text-purple-300">All (3)</button>
+                    <button class="text-xs px-3 py-1.5 rounded-lg bg-darkCard border border-darkBorder text-gray-400 hover:text-white">In Progress</button>
+                    <button class="text-xs px-3 py-1.5 rounded-lg bg-darkCard border border-darkBorder text-gray-400 hover:text-white">Completed</button>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6" id="myCoursesList">
+                <!-- Active Course 1 -->
+                <div class="glass-card rounded-2xl p-6 border border-darkBorder space-y-4">
+                    <div class="flex justify-between items-start">
+                        <div>
+                            <span class="text-[10px] font-bold tracking-wider text-purple-400 uppercase bg-purple-950 px-2 py-0.5 rounded">Enrolled</span>
+                            <h3 class="text-lg font-bold text-white mt-1">Python Data Science & AI Bootcamp</h3>
+                        </div>
+                        <span class="text-sm font-bold text-purple-400">75%</span>
+                    </div>
+
+                    <!-- Progress Bar -->
+                    <div class="space-y-1.5">
+                        <div class="w-full bg-darkBg rounded-full h-2 overflow-hidden border border-white/5">
+                            <div class="bg-gradient-to-r from-purple-500 to-indigo-500 h-full w-[75%] rounded-full"></div>
+                        </div>
+                        <div class="flex justify-between text-[11px] text-gray-400">
+                            <span>Module 3 of 4: Neural Networks</span>
+                            <span>3.5 / 5.0 hrs</span>
+                        </div>
+                    </div>
+
+                    <div class="flex items-center justify-between pt-2">
+                        <div class="flex -space-x-2">
+                            <span class="w-6 h-6 rounded-full bg-purple-600/30 border border-purple-500 flex items-center justify-center text-[10px] text-purple-300"><i class="fa-solid fa-check"></i></span>
+                            <span class="w-6 h-6 rounded-full bg-purple-600/30 border border-purple-500 flex items-center justify-center text-[10px] text-purple-300"><i class="fa-solid fa-check"></i></span>
+                            <span class="w-6 h-6 rounded-full bg-purple-600/30 border border-purple-500 flex items-center justify-center text-[10px] text-purple-300"><i class="fa-solid fa-check"></i></span>
+                            <span class="w-6 h-6 rounded-full bg-darkCard border border-darkBorder flex items-center justify-center text-[10px] text-gray-500">4</span>
+                        </div>
+                        <button onclick="continueCourse('Python Data Science & AI Bootcamp')" class="purple-glow-btn text-white text-xs font-semibold px-4 py-2 rounded-xl flex items-center gap-1.5">
+                            <span>Resume</span>
+                            <i class="fa-solid fa-play text-[10px]"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Active Course 2 -->
+                <div class="glass-card rounded-2xl p-6 border border-darkBorder space-y-4">
+                    <div class="flex justify-between items-start">
+                        <div>
+                            <span class="text-[10px] font-bold tracking-wider text-purple-400 uppercase bg-purple-950 px-2 py-0.5 rounded">Enrolled</span>
+                            <h3 class="text-lg font-bold text-white mt-1">Fullstack Web Architecture</h3>
+                        </div>
+                        <span class="text-sm font-bold text-purple-400">40%</span>
+                    </div>
+
+                    <!-- Progress Bar -->
+                    <div class="space-y-1.5">
+                        <div class="w-full bg-darkBg rounded-full h-2 overflow-hidden border border-white/5">
+                            <div class="bg-gradient-to-r from-purple-500 to-indigo-500 h-full w-[40%] rounded-full"></div>
+                        </div>
+                        <div class="flex justify-between text-[11px] text-gray-400">
+                            <span>Module 2 of 5: REST & GraphQL API Engine</span>
+                            <span>2.0 / 5.0 hrs</span>
+                        </div>
+                    </div>
+
+                    <div class="flex items-center justify-between pt-2">
+                        <div class="flex -space-x-2">
+                            <span class="w-6 h-6 rounded-full bg-purple-600/30 border border-purple-500 flex items-center justify-center text-[10px] text-purple-300"><i class="fa-solid fa-check"></i></span>
+                            <span class="w-6 h-6 rounded-full bg-purple-600/30 border border-purple-500 flex items-center justify-center text-[10px] text-purple-300"><i class="fa-solid fa-check"></i></span>
+                            <span class="w-6 h-6 rounded-full bg-darkCard border border-darkBorder flex items-center justify-center text-[10px] text-gray-500">3</span>
+                        </div>
+                        <button onclick="continueCourse('Fullstack Web Architecture')" class="purple-glow-btn text-white text-xs font-semibold px-4 py-2 rounded-xl flex items-center gap-1.5">
+                            <span>Resume</span>
+                            <i class="fa-solid fa-play text-[10px]"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Completed Course -->
+                <div class="glass-card rounded-2xl p-6 border border-darkBorder space-y-4">
+                    <div class="flex justify-between items-start">
+                        <div>
+                            <span class="text-[10px] font-bold tracking-wider text-emerald-400 uppercase bg-emerald-950/80 px-2 py-0.5 rounded border border-emerald-500/30">Completed</span>
+                            <h3 class="text-lg font-bold text-white mt-1">UI/UX Design Systems & Figma Pro</h3>
+                        </div>
+                        <span class="text-sm font-bold text-emerald-400">100%</span>
+                    </div>
+
+                    <!-- Progress Bar -->
+                    <div class="space-y-1.5">
+                        <div class="w-full bg-darkBg rounded-full h-2 overflow-hidden border border-white/5">
+                            <div class="bg-emerald-500 h-full w-full rounded-full"></div>
+                        </div>
+                        <div class="flex justify-between text-[11px] text-gray-400">
+                            <span>All 4 Modules Passed</span>
+                            <span>Certificate Issued</span>
+                        </div>
+                    </div>
+
+                    <div class="flex items-center justify-between pt-2">
+                        <span class="text-xs text-gray-400 flex items-center gap-1.5">
+                            <i class="fa-solid fa-award text-amber-400"></i> Verifiable Credential
+                        </span>
+                        <button onclick="openCertificateModal('UI/UX Design Systems & Figma Pro')" class="bg-purple-900/40 hover:bg-purple-900/70 border border-purple-500/40 text-purple-200 text-xs font-semibold px-4 py-2 rounded-xl flex items-center gap-1.5 transition-all">
+                            <i class="fa-solid fa-certificate"></i> View Certificate
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- VIEW 3: CERTIFICATES -->
+        <section id="view-certificates" class="hidden space-y-6">
+            <div class="flex items-center justify-between border-b border-darkBorder pb-4">
+                <div>
+                    <h2 class="text-2xl font-bold text-white flex items-center gap-2">
+                        <i class="fa-solid fa-award text-amber-400"></i> My Certificates
+                    </h2>
+                    <p class="text-xs text-gray-400">Verifiable credentials generated upon curriculum completion</p>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                <!-- Certificate Card 1 -->
+                <div class="glass-card glass-card-hover rounded-2xl p-6 border border-purple-500/30 relative overflow-hidden group">
+                    <div class="absolute top-0 right-0 w-24 h-24 bg-purple-500/10 rounded-bl-full pointer-events-none"></div>
+                    <div class="space-y-4">
+                        <div class="flex items-center justify-between">
+                            <div class="w-12 h-12 rounded-xl bg-purple-900/40 border border-purple-500/30 flex items-center justify-center text-purple-400 text-xl">
+                                <i class="fa-solid fa-certificate"></i>
+                            </div>
+                            <span class="text-[11px] text-gray-400 bg-darkCard px-2.5 py-1 rounded-full border border-darkBorder">ID: AI-88492</span>
+                        </div>
+
+                        <div>
+                            <h3 class="text-lg font-bold text-white group-hover:text-purple-300 transition-colors">UI/UX Design Systems & Figma Pro</h3>
+                            <p class="text-xs text-gray-400 mt-1">Issued by Aadesh AI Platform • Nov 2024</p>
+                        </div>
+
+                        <div class="pt-3 border-t border-darkBorder flex items-center justify-between">
+                            <button onclick="openCertificateModal('UI/UX Design Systems & Figma Pro')" class="text-xs text-purple-400 font-semibold hover:underline flex items-center gap-1">
+                                Preview <i class="fa-solid fa-expand text-[10px]"></i>
+                            </button>
+                            <button onclick="downloadCertificate('UI/UX Design Systems & Figma Pro')" class="text-xs bg-purple-900/30 hover:bg-purple-900/60 border border-purple-500/30 text-purple-200 px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-all">
+                                <i class="fa-solid fa-download"></i> Download PDF
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Certificate Card 2 -->
+                <div class="glass-card glass-card-hover rounded-2xl p-6 border border-purple-500/30 relative overflow-hidden group">
+                    <div class="absolute top-0 right-0 w-24 h-24 bg-indigo-500/10 rounded-bl-full pointer-events-none"></div>
+                    <div class="space-y-4">
+                        <div class="flex items-center justify-between">
+                            <div class="w-12 h-12 rounded-xl bg-indigo-900/40 border border-indigo-500/30 flex items-center justify-center text-indigo-400 text-xl">
+                                <i class="fa-solid fa-microchip"></i>
+                            </div>
+                            <span class="text-[11px] text-gray-400 bg-darkCard px-2.5 py-1 rounded-full border border-darkBorder">ID: AI-99104</span>
+                        </div>
+
+                        <div>
+                            <h3 class="text-lg font-bold text-white group-hover:text-purple-300 transition-colors">Prompt Engineering Mastery</h3>
+                            <p class="text-xs text-gray-400 mt-1">Issued by Aadesh AI Platform • Oct 2024</p>
+                        </div>
+
+                        <div class="pt-3 border-t border-darkBorder flex items-center justify-between">
+                            <button onclick="openCertificateModal('Prompt Engineering Mastery')" class="text-xs text-purple-400 font-semibold hover:underline flex items-center gap-1">
+                                Preview <i class="fa-solid fa-expand text-[10px]"></i>
+                            </button>
+                            <button onclick="downloadCertificate('Prompt Engineering Mastery')" class="text-xs bg-purple-900/30 hover:bg-purple-900/60 border border-purple-500/30 text-purple-200 px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-all">
+                                <i class="fa-solid fa-download"></i> Download PDF
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- VIEW 4: PROFILE & STATS -->
+        <section id="view-profile" class="hidden space-y-6 max-w-4xl mx-auto">
+            <!-- Profile Hero -->
+            <div class="glass-card rounded-2xl p-6 sm:p-8 border border-purple-500/30 flex flex-col sm:flex-row items-center gap-6">
+                <div class="relative">
+                    <div class="w-24 h-24 rounded-full bg-gradient-to-tr from-purple-500 via-indigo-500 to-pink-500 p-1 shadow-xl">
+                        <img src="https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=200&auto=format&fit=crop&q=80" 
+                             alt="Profile Avatar" class="w-full h-full object-cover rounded-full"
+                             onerror="this.src='https://placehold.co/200x200/8b5cf6/ffffff?text=Alex'">
+                    </div>
+                    <span class="absolute bottom-1 right-1 w-6 h-6 rounded-full bg-emerald-500 border-2 border-darkBg flex items-center justify-center text-[10px] text-white" title="Active Now">
+                        <i class="fa-solid fa-bolt"></i>
+                    </span>
+                </div>
+
+                <div class="text-center sm:text-left space-y-2 flex-grow">
+                    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                        <div>
+                            <h2 class="text-2xl font-bold text-white">Alex Morgan</h2>
+                            <p class="text-xs text-purple-300 font-medium">AI & Frontend Architect Track</p>
+                        </div>
+                        <span class="px-3 py-1 bg-purple-950/80 border border-purple-500/40 text-purple-300 rounded-full text-xs font-semibold self-center sm:self-auto">
+                            Level 12 Scholar
+                        </span>
+                    </div>
+
+                    <p class="text-xs text-gray-400">Passionate developer using AI autonomous learning agents to master next-gen web technology stack.</p>
+
+                    <div class="pt-2 flex flex-wrap justify-center sm:justify-start gap-4 text-xs">
+                        <span class="text-gray-300"><strong class="text-white">7</strong> Active Streak</span>
+                        <span class="text-gray-300"><strong class="text-white">3</strong> Enrolled</span>
+                        <span class="text-gray-300"><strong class="text-white">2</strong> Certificates</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Stats & Achievements Grid -->
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                <div class="glass-card rounded-2xl p-5 border border-darkBorder space-y-2">
+                    <div class="text-purple-400 text-xl"><i class="fa-solid fa-fire"></i></div>
+                    <div class="text-2xl font-bold text-white">7 Days</div>
+                    <div class="text-xs text-gray-400">Learning Streak</div>
+                </div>
+                <div class="glass-card rounded-2xl p-5 border border-darkBorder space-y-2">
+                    <div class="text-indigo-400 text-xl"><i class="fa-solid fa-clock"></i></div>
+                    <div class="text-2xl font-bold text-white">18.5 Hours</div>
+                    <div class="text-xs text-gray-400">Time Spent Learning</div>
+                </div>
+                <div class="glass-card rounded-2xl p-5 border border-darkBorder space-y-2">
+                    <div class="text-amber-400 text-xl"><i class="fa-solid fa-trophy"></i></div>
+                    <div class="text-2xl font-bold text-white">2,450 XP</div>
+                    <div class="text-xs text-gray-400">Total Skill Points</div>
+                </div>
+            </div>
+        </section>
+
+    </main>
+
+    <!-- FLOATING BOTTOM NAVIGATION DOCK (Replicating Mobile/Glass Dock from Mockup) -->
+    <nav class="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 glass-nav rounded-2xl px-3 py-2 border border-purple-500/30 shadow-2xl flex items-center space-x-1 sm:space-x-2">
+        <button onclick="switchTab('explore')" id="tab-explore" class="tab-btn active px-4 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-2 transition-all text-gray-400 hover:text-white">
+            <i class="fa-solid fa-compass text-base"></i>
+            <span class="hidden sm:inline">Explore</span>
+        </button>
+
+        <button onclick="switchTab('courses')" id="tab-courses" class="tab-btn px-4 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-2 transition-all text-gray-400 hover:text-white">
+            <i class="fa-solid fa-book-open text-base"></i>
+            <span class="hidden sm:inline">Courses</span>
+        </button>
+
+        <button onclick="switchTab('certificates')" id="tab-certificates" class="tab-btn px-4 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-2 transition-all text-gray-400 hover:text-white">
+            <i class="fa-solid fa-award text-base"></i>
+            <span class="hidden sm:inline">Certificates</span>
+        </button>
+
+        <button onclick="switchTab('profile')" id="tab-profile" class="tab-btn px-4 py-2 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-2 transition-all text-gray-400 hover:text-white">
+            <i class="fa-solid fa-user text-base"></i>
+            <span class="hidden sm:inline">Profile</span>
+        </button>
+    </nav>
+
+    <!-- CERTIFICATE MODAL PREVIEW -->
+    <div id="certificateModal" class="fixed inset-0 z-50 hidden bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
+        <div class="glass-card rounded-3xl p-6 sm:p-8 max-w-2xl w-full border border-purple-500/50 shadow-2xl relative space-y-6">
+            <button onclick="closeCertificateModal()" class="absolute top-4 right-4 w-8 h-8 rounded-full bg-darkCard border border-darkBorder text-gray-400 hover:text-white flex items-center justify-center transition-all">
+                <i class="fa-solid fa-xmark"></i>
+            </button>
+
+            <!-- Certificate Mock View -->
+            <div id="certToPrint" class="border-4 border-double border-purple-500/40 p-6 sm:p-8 rounded-2xl text-center space-y-4 bg-gradient-to-b from-darkCard to-darkBg relative">
+                <div class="flex justify-between items-center text-xs text-purple-400 font-semibold tracking-widest uppercase">
+                    <span>Aadesh AI Verified Credential</span>
+                    <span>Official Cert</span>
+                </div>
+
+                <div class="py-4">
+                    <i class="fa-solid fa-award text-5xl text-amber-400 my-2 inline-block"></i>
+                    <h2 class="text-xs uppercase tracking-widest text-gray-400 font-semibold">Certificate of Completion</h2>
+                    <p class="text-sm text-gray-300 mt-2">This is proudly presented to</p>
+                    <h3 class="text-2xl sm:text-3xl font-extrabold text-gradient mt-1">Alex Morgan</h3>
+                </div>
+
+                <p class="text-xs sm:text-sm text-gray-300 max-w-md mx-auto">
+                    For successfully mastering the AI-curated curriculum and completing all practical modules for:
+                </p>
+
+                <h4 class="text-lg sm:text-xl font-bold text-purple-300" id="modalCertCourseTitle">UI/UX Design Systems & Figma Pro</h4>
+
+                <div class="pt-6 flex justify-between items-end text-left text-[11px] text-gray-400 border-t border-darkBorder">
+                    <div>
+                        <p class="font-bold text-gray-200">Issue Date: Nov 2024</p>
+                        <p>Credential ID: AI-88492-X</p>
+                    </div>
+                    <div class="text-right">
+                        <span class="font-bold text-purple-400 block">Aadesh AI Autonomous Engine</span>
+                        <span class="text-[10px] text-gray-500">Verified via Blockchain Hash</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Modal Action Buttons -->
+            <div class="flex justify-end gap-3">
+                <button onclick="closeCertificateModal()" class="px-4 py-2 rounded-xl bg-darkCard border border-darkBorder text-sm text-gray-300 hover:text-white">
+                    Close
+                </button>
+                <button onclick="downloadCertificateAction()" class="purple-glow-btn px-5 py-2 rounded-xl text-sm font-semibold text-white flex items-center gap-2">
+                    <i class="fa-solid fa-download"></i> Download Certificate
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- NOTIFICATION TOAST -->
+    <div id="toast" class="fixed top-20 right-5 z-50 hidden glass-card border border-purple-500/50 text-white px-4 py-3 rounded-xl shadow-2xl flex items-center gap-3 transition-all duration-300">
+        <div class="w-8 h-8 rounded-lg bg-purple-600/30 flex items-center justify-center text-purple-400" id="toastIcon">
+            <i class="fa-solid fa-check"></i>
+        </div>
+        <div>
+            <h5 class="text-xs font-bold text-white" id="toastTitle">Notification</h5>
+            <p class="text-xs text-gray-300" id="toastDesc">Action completed successfully.</p>
+        </div>
+    </div>
+
+    <!-- JAVASCRIPT INTERACTION LOGIC -->
+    <script>
+        // NAVIGATION TAB SWITCHING LOGIC
+        function switchTab(tabId) {
+            // Hide all view sections
+            document.querySelectorAll('main > section').forEach(sec => sec.classList.add('hidden'));
+            
+            // Deactivate all tab buttons
+            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+
+            // Show selected view section
+            const targetView = document.getElementById(`view-${tabId}`);
+            if (targetView) targetView.classList.remove('hidden');
+
+            // Set active state on clicked tab button
+            const targetTabBtn = document.getElementById(`tab-${tabId}`);
+            if (targetTabBtn) targetTabBtn.classList.add('active');
+
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+        }
+
+        // QUICK PROMPT TAG PILL CLICK HANDLER
+        function quickPrompt(topicText) {
+            const input = document.getElementById('aiPromptInput');
+            input.value = topicText;
+            generateAICourse();
+        }
+
+        // DYNAMIC AI COURSE GENERATOR SIMULATION
+        function generateAICourse() {
+            const input = document.getElementById('aiPromptInput');
+            const topic = input.value.trim() || 'UI/UX Design Systems';
+
+            const loadingSection = document.getElementById('aiLoadingSection');
+            const courseContainer = document.getElementById('generatedCourseContainer');
+            const loadingTopicText = document.getElementById('loadingTopicText');
+            const progressBar = document.getElementById('generationProgressBar');
+
+            // Reset views
+            courseContainer.classList.add('hidden');
+            loadingSection.classList.remove('hidden');
+            loadingTopicText.innerText = `Synthesizing Curriculum for "${topic}"...`;
+            progressBar.style.width = '0%';
+
+            // Smooth progress simulation
+            let progress = 0;
+            const interval = setInterval(() => {
+                progress += 20;
+                progressBar.style.width = `${progress}%`;
+
+                if (progress >= 100) {
+                    clearInterval(interval);
+                    setTimeout(() => {
+                        loadingSection.classList.add('hidden');
+                        renderGeneratedCourse(topic);
+                        courseContainer.classList.remove('hidden');
+                        courseContainer.scrollIntoView({ behavior: 'smooth' });
+                        showToast('Course Generated!', `Custom modules created for ${topic}`);
+                    }, 400);
+                }
+            }, 250);
+        }
+
+        // RENDER GENERATED COURSE DATA
+        function renderGeneratedCourse(topic) {
+            document.getElementById('generatedTitle').innerText = topic;
+            document.getElementById('generatedDesc').innerText = `AI-optimized interactive curriculum tailored to build comprehensive real-world expertise in ${topic}.`;
+
+            const modulesList = document.getElementById('modulesList');
+            const generatedModules = [
+                { title: `Module 1: Foundations of ${topic}`, duration: '1h 15m', lessons: '4 Interactive Lessons' },
+                { title: `Module 2: Core Architecture & Hands-on Patterns`, duration: '1h 45m', lessons: '6 Lessons + Code Sandbox' },
+                { title: `Module 3: Advanced Optimization & Production Standards`, duration: '2h 00m', lessons: '5 Case Studies' },
+                { title: `Module 4: Capstone Evaluation & Certification Project`, duration: '1h 00m', lessons: '1 Practical Exam' }
+            ];
+
+            modulesList.innerHTML = generatedModules.map((m, idx) => `
+                <div class="glass-card rounded-xl p-4 border border-darkBorder flex items-center justify-between">
+                    <div class="flex items-center gap-3">
+                        <span class="w-8 h-8 rounded-lg bg-purple-900/40 border border-purple-500/30 flex items-center justify-center text-xs font-bold text-purple-300">
+                            0${idx + 1}
+                        </span>
+                        <div>
+                            <h5 class="text-sm font-bold text-white">${m.title}</h5>
+                            <span class="text-xs text-gray-400">${m.lessons}</span>
+                        </div>
+                    </div>
+                    <span class="text-xs text-purple-400 font-medium">${m.duration}</span>
+                </div>
+            `).join('');
+        }
+
+        // START SPECIFIC TRACK FROM TRENDING LIST
+        function startSpecificTrack(trackTitle) {
+            quickPrompt(trackTitle);
+        }
+
+        // ENROLL IN GENERATED COURSE
+        function enrollInGeneratedCourse() {
+            showToast('Enrolled Successfully!', 'Course added to "My Courses". Starting Module 1...');
+            setTimeout(() => {
+                switchTab('courses');
+            }, 1000);
+        }
+
+        // CONTINUE COURSE HANDLER
+        function continueCourse(courseTitle) {
+            showToast('Resuming Session', `Opening lesson viewer for ${courseTitle}`);
+        }
+
+        // CERTIFICATE MODAL LOGIC
+        let currentModalCertTitle = '';
+        function openCertificateModal(certTitle) {
+            currentModalCertTitle = certTitle;
+            document.getElementById('modalCertCourseTitle').innerText = certTitle;
+            document.getElementById('certificateModal').classList.remove('hidden');
+
+            // Trigger celebratory confetti
+            if (typeof confetti === 'function') {
+                confetti({
+                    particleCount: 80,
+                    spread: 70,
+                    origin: { y: 0.6 }
+                });
+            }
+        }
+
+        function closeCertificateModal() {
+            document.getElementById('certificateModal').classList.add('hidden');
+        }
+
+        function downloadCertificate(certTitle) {
+            openCertificateModal(certTitle);
+        }
+
+        function downloadCertificateAction() {
+            showToast('Downloading Certificate', 'Generating high-resolution PDF credential...');
+            setTimeout(() => {
+                closeCertificateModal();
+            }, 1200);
+        }
+
+        // TOAST NOTIFICATION UTILITY
+        function showToast(title, desc) {
+            const toast = document.getElementById('toast');
+            document.getElementById('toastTitle').innerText = title;
+            document.getElementById('toastDesc').innerText = desc;
+
+            toast.classList.remove('hidden');
+            setTimeout(() => {
+                toast.classList.add('hidden');
+            }, 3000);
+        }
+
+        // HEADER SEARCH KEYBINDING SIMULATION
+        document.getElementById('headerSearchInput')?.addEventListener('keyup', (e) => {
+            if (e.key === 'Enter' && e.target.value.trim() !== '') {
+                switchTab('explore');
+                quickPrompt(e.target.value.trim());
+            }
+        });
+    </script>
+</body>
+</html>

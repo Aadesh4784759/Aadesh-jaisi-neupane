@@ -1,0 +1,6 @@
+{
+  "name": "Aadesh AI - Global Multilingual Hub",
+  "description": "Aadesh AI: Multilingual AI chatbot with real-time translation, hands-free voice integration, photo & video geotagging, smart reply follow-ups, and engagement analytics.",
+  "requestFramePermissions": ["geolocation", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
