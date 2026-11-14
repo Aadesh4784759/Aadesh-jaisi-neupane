@@ -3,7 +3,7 @@ import dotenv from 'dotenv';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import mammoth from 'mammoth';
 
 dotenv.config();
@@ -363,7 +363,7 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
 Provide accurate, natural, helpful answers including step-by-step explanations, programming assistance with clean markdown code blocks, study guidance, multilingual help, and image analysis.
 Keep answers well-structured and concise for simple questions, detailed when complexity calls for it.
 
-SUGGESTION RULE: For "suggestedQuestions", ONLY suggest translating/explaining into Nepali or English (never suggest unrelated languages unless the user explicitly asked for that language).
+SUGGESTION RULE: For "suggestedQuestions", provide 3 short, context-aware follow-up action buttons tailored to this conversation (e.g., "Explain in more detail", "Give an example", "Summarize", or a specific follow-up).
 
 User UI language: ${userLangName} (${userLanguage}).
 Target translation language: ${targetLangName} (${targetLanguage}).
@@ -630,6 +630,159 @@ Tone: ${personaInstruction}${memoryBlock}`;
     const safeError = sanitizeErrorMessage(err);
     res.write(`data: ${JSON.stringify({ error: safeError, done: true })}\n\n`);
     res.end();
+  }
+});
+
+// 1C. CONTEXT-AWARE SUGGESTED REPLIES ENDPOINT
+app.post('/api/chat/suggested-replies', async (req: Request, res: Response): Promise<void> => {
+  const startTime = Date.now();
+  const {
+    userMessage = '',
+    aiReply = '',
+    recentMessages = [],
+    targetLanguage = 'ne',
+    userLanguage = 'en',
+    location,
+    hasImage = false,
+  } = req.body || {};
+
+  const trimmedReply = String(aiReply || '').trim();
+  const trimmedUserMsg = String(userMessage || '').trim();
+
+  const buildFallbackSuggestions = (): string[] => {
+    const suggestions: string[] = [
+      'Explain in more detail',
+      'Give a practical example',
+      'Summarize the key points',
+    ];
+    if (location?.name) {
+      suggestions.push(`Explore more about ${String(location.name).slice(0, 32)}`);
+    } else if (hasImage) {
+      suggestions.push('Analyze details in the image');
+    } else if (targetLanguage && targetLanguage !== 'en') {
+      const targetLangName = LANGUAGE_NAMES[targetLanguage] || targetLanguage;
+      suggestions.push(`Explain in ${targetLangName}`);
+    }
+    return suggestions.slice(0, 4);
+  };
+
+  if (!trimmedReply && !trimmedUserMsg) {
+    res.json({
+      suggestedReplies: buildFallbackSuggestions(),
+      latencyMs: Date.now() - startTime,
+      isFallback: true,
+    });
+    return;
+  }
+
+  try {
+    const customKey = (req.headers['x-gemini-api-key'] as string) || req.body?.customApiKey;
+    const ai = getGeminiClient(customKey);
+
+    if (!ai) {
+      res.json({
+        suggestedReplies: buildFallbackSuggestions(),
+        latencyMs: Date.now() - startTime,
+        isLiveAI: false,
+        isFallback: true,
+      });
+      return;
+    }
+
+    const userLangName = LANGUAGE_NAMES[userLanguage] || userLanguage;
+    const targetLangName = LANGUAGE_NAMES[targetLanguage] || targetLanguage;
+    const historySnippet = Array.isArray(recentMessages)
+      ? recentMessages
+          .slice(-4)
+          .filter((m: any) => m?.content && !m?.isError)
+          .map((m: any) => `${m.role === 'user' ? 'User' : 'AI'}: ${String(m.content).slice(0, 220)}`)
+          .join('\n')
+      : '';
+
+    const prompt = `Generate 3 to 4 short, clickable follow-up reply buttons that the user can tap right beneath the AI assistant's latest message.
+Rules:
+- Each suggestion MUST be a concise natural button label/prompt (2 to 7 words max, no numbering or quotes).
+- Tailor them specifically to the topic of the user's message and the assistant's reply (such as expanding a specific concept, giving a concrete example, summarizing, comparing alternatives, or exploring the location/image context if active).
+- Write suggestions primarily in ${userLangName} (matching the user's language; if appropriate, one may offer ${targetLangName} translation/explanation).
+${location?.name ? `- Active Geotag Location Context: ${String(location.name).slice(0, 80)}\n` : ''}${hasImage ? '- An image was shared in this turn.\n' : ''}${historySnippet ? `Recent context:\n${historySnippet}\n` : ''}
+Latest User Message:
+"""
+${trimmedUserMsg.slice(0, 800)}
+"""
+
+Latest AI Reply:
+"""
+${trimmedReply.slice(0, 1600)}
+"""`;
+
+    const fastModels: Array<{ model: string; thinkingLevel: ThinkingLevel }> = [
+      { model: 'gemini-3.1-flash-lite', thinkingLevel: ThinkingLevel.MINIMAL },
+      { model: 'gemini-4-hydrogen', thinkingLevel: ThinkingLevel.LOW },
+      { model: 'gemini-3.5-flash', thinkingLevel: ThinkingLevel.MINIMAL },
+    ];
+
+    let parsedReplies: string[] = [];
+    let modelUsed = '';
+
+    for (const candidate of fastModels) {
+      try {
+        const config: Record<string, any> = {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              suggestedReplies: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
+                description: '3 to 4 concise, context-aware suggested follow-up reply buttons (each 2 to 7 words).',
+              },
+            },
+            required: ['suggestedReplies'],
+          },
+        };
+        if (candidate.model.startsWith('gemini-4') || candidate.model.startsWith('gemini-3')) {
+          config.thinkingConfig = { thinkingLevel: candidate.thinkingLevel };
+        }
+
+        const response = await withTimeout(
+          ai.models.generateContent({
+            model: candidate.model,
+            contents: prompt,
+            config,
+          }),
+          6500
+        );
+        const parsed = extractJsonText(response.text);
+        if (Array.isArray(parsed?.suggestedReplies)) {
+          const cleaned = parsed.suggestedReplies
+            .filter((item: unknown): item is string => typeof item === 'string' && item.trim().length > 1)
+            .map((item: string) => item.trim().slice(0, 72))
+            .slice(0, 4);
+          if (cleaned.length > 0) {
+            parsedReplies = cleaned;
+            modelUsed = candidate.model;
+            break;
+          }
+        }
+      } catch (err) {
+        if (isAuthFailure(err)) break;
+      }
+    }
+
+    res.json({
+      suggestedReplies: parsedReplies.length > 0 ? parsedReplies : buildFallbackSuggestions(),
+      modelUsed: modelUsed || undefined,
+      isLiveAI: parsedReplies.length > 0,
+      isFallback: parsedReplies.length === 0,
+      latencyMs: Date.now() - startTime,
+    });
+  } catch (err: any) {
+    res.json({
+      suggestedReplies: buildFallbackSuggestions(),
+      error: sanitizeErrorMessage(err),
+      isFallback: true,
+      latencyMs: Date.now() - startTime,
+    });
   }
 });
 
@@ -973,7 +1126,403 @@ app.get('/api/admin/overview', async (req: Request, res: Response): Promise<void
   });
 });
 
-// 5. IMAGE STUDIO ENDPOINT (Vision, Screenshot, OCR & Free SVG Vector Art Generator)
+// 5. IMAGE GENERATION & STUDIO ENDPOINTS
+const IMAGE_MODEL_CAPABILITIES = {
+  'gemini-3.1-flash-lite-image': {
+    id: 'gemini-3.1-flash-lite-image',
+    label: 'Flash Lite Image (Fast)',
+    description: 'High-speed raster image generation powered by Gemini 3.1 Flash Lite Image',
+    aspectRatios: ['1:1', '16:9', '9:16', '4:3'],
+    resolutions: [] as string[],
+    supportsResolution: false,
+  },
+  'gemini-nano-banana-2.1': {
+    id: 'gemini-nano-banana-2.1',
+    label: 'Nano Banana 2.1 (HD)',
+    description: 'Studio-quality 1K / 2K / 4K image generation powered by Gemini Nano Banana 2.1',
+    aspectRatios: ['1:1', '16:9', '9:16', '4:3'],
+    resolutions: ['1K', '2K', '4K'],
+    supportsResolution: true,
+  },
+} as const;
+
+type SupportedImageModelId = keyof typeof IMAGE_MODEL_CAPABILITIES;
+
+const IMAGE_STYLE_DIRECTIVES: Record<string, string> = {
+  Realistic: 'Photorealistic photography, natural lighting, sharp optical lens detail, true-to-life textures',
+  '3D': '3D Octane studio render, volumetric lighting, smooth physically based materials, high depth',
+  Cartoon: 'Vibrant stylized 2D cartoon illustration, expressive linework, rich cel shading',
+  Anime: 'High-detail Japanese anime key visual artwork, crisp cel lighting, atmospheric background',
+  'Digital Art': 'Modern concept digital art, dramatic lighting, intricate atmospheric composition',
+  Painting: 'Fine art oil and gouache painting on textured canvas, expressive brushwork',
+};
+
+function classifyImageGenError(err: unknown): { status: number; message: string } {
+  const safeMsg = sanitizeErrorMessage(err);
+  const lower = safeMsg.toLowerCase();
+  const rawStatus = Number((err as any)?.status || (err as any)?.code);
+
+  if (lower.includes('timed out')) {
+    return {
+      status: 504,
+      message: safeMsg || 'Image generation timed out. Please try a shorter prompt or retry.',
+    };
+  }
+  if (
+    rawStatus === 401 ||
+    lower.includes('api_key_invalid') ||
+    lower.includes('api key not valid') ||
+    lower.includes('invalid api key')
+  ) {
+    return {
+      status: 401,
+      message: 'Invalid Gemini API key. Please verify your API key configuration in Settings.',
+    };
+  }
+  if (
+    rawStatus === 403 ||
+    lower.includes('permission_denied') ||
+    lower.includes('permission denied') ||
+    lower.includes('billing')
+  ) {
+    return {
+      status: 403,
+      message:
+        'Image generation access denied or billing required for this Gemini API key. Add a billing-enabled Gemini API key in Settings to generate images.',
+    };
+  }
+  if (
+    rawStatus === 429 ||
+    lower.includes('resource_exhausted') ||
+    lower.includes('quota') ||
+    lower.includes('rate limit')
+  ) {
+    return {
+      status: 429,
+      message:
+        'Gemini image generation quota or rate limit reached. Please wait a moment or check billing/quota for your API key.',
+    };
+  }
+  if (rawStatus === 404 || lower.includes('not found') || lower.includes('is not supported')) {
+    return {
+      status: 404,
+      message: `Selected image model is unavailable for this API key: ${safeMsg}`,
+    };
+  }
+  return {
+    status: 502,
+    message: safeMsg || 'Failed to generate image from Gemini AI.',
+  };
+}
+
+const ASPECT_VIEWBOX: Record<string, { w: number; h: number }> = {
+  '1:1': { w: 800, h: 800 },
+  '16:9': { w: 960, h: 540 },
+  '9:16': { w: 540, h: 960 },
+  '4:3': { w: 800, h: 600 },
+};
+
+function sanitizeSvgMarkup(rawSvg: string, width: number, height: number): string | null {
+  const match = rawSvg.match(/<svg[\s\S]*<\/svg>/i);
+  if (!match) return null;
+  let svg = match[0]
+    .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, '')
+    .replace(/\son[a-z]+\s*=\s*(['"]).*?\1/gi, '')
+    .replace(/javascript:/gi, '');
+  if (!/xmlns=/.test(svg)) {
+    svg = svg.replace('<svg', '<svg xmlns="http://www.w3.org/2000/svg"');
+  }
+  if (!/viewBox=/i.test(svg)) {
+    svg = svg.replace('<svg', `<svg viewBox="0 0 ${width} ${height}"`);
+  }
+  return svg;
+}
+
+const rasterQuotaCooldownUntil = new Map<string, number>();
+
+async function generateVectorFallbackSvg(params: {
+  ai: GoogleGenAI;
+  prompt: string;
+  style: string;
+  aspectRatio: string;
+  startTime: number;
+  notice: string;
+}) {
+  const box = ASPECT_VIEWBOX[params.aspectRatio] || ASPECT_VIEWBOX['1:1'];
+  const svgPrompt = `Create an artistic SVG vector illustration (viewBox="0 0 ${box.w} ${box.h}") for: "${params.prompt}".
+Visual style: ${params.style}.
+Rules:
+1. Output ONLY raw valid <svg viewBox="0 0 ${box.w} ${box.h}" xmlns="http://www.w3.org/2000/svg">...</svg> markup (no markdown fences or explanation).
+2. Include rich <defs> gradients, atmospheric background, layered geometric/organic foreground shapes, lighting highlights, and balanced colors.
+3. Keep the SVG concise (under 40 elements) and never include <script>, <foreignObject>, or external URLs.`;
+
+  const vectorModels = ['gemini-3.1-flash-lite', 'gemini-4-hydrogen', 'gemini-3.5-flash'];
+  let response: Awaited<ReturnType<typeof params.ai.models.generateContent>> | null = null;
+  let modelUsed = vectorModels[0];
+  let lastErr: unknown = null;
+
+  for (const model of vectorModels) {
+    try {
+      const res = await withTimeout(
+        params.ai.models.generateContent({
+          model,
+          contents: svgPrompt,
+          config: {
+            ...(model === 'gemini-3.1-flash-lite'
+              ? { thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL } }
+              : model.includes('gemini-4')
+              ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
+              : {}),
+          },
+        }),
+        20000
+      );
+      response = res;
+      modelUsed = model;
+      break;
+    } catch (err) {
+      lastErr = err;
+      if (isAuthFailure(err)) throw err;
+    }
+  }
+
+  if (!response) {
+    throw lastErr || new Error('Vector illustration fallback failed across models.');
+  }
+
+  const cleanSvg = sanitizeSvgMarkup(String(response.text || ''), box.w, box.h);
+  if (!cleanSvg) {
+    throw new Error('Vector illustration fallback did not return valid SVG markup.');
+  }
+
+  const svgBase64 = Buffer.from(cleanSvg, 'utf-8').toString('base64');
+  return {
+    ok: true as const,
+    status: 200,
+    imageDataUrl: `data:image/svg+xml;base64,${svgBase64}`,
+    mimeType: 'image/svg+xml',
+    revisedPrompt: `${params.prompt} (${params.style} vector illustration)`,
+    modelUsed: `${modelUsed} (Vector Studio)`,
+    aspectRatio: params.aspectRatio,
+    resolution: undefined,
+    style: params.style,
+    isVectorFallback: true,
+    fallbackNotice: params.notice,
+    latencyMs: Date.now() - params.startTime,
+  };
+}
+
+async function generateRasterImageWithGemini(params: {
+  ai: GoogleGenAI;
+  prompt: string;
+  style?: string;
+  aspectRatio?: string;
+  resolution?: string;
+  model?: string;
+  hasCustomKey?: boolean;
+}) {
+  const startTime = Date.now();
+  const cleanPrompt = String(params.prompt || '').trim().slice(0, 1500);
+  if (!cleanPrompt) {
+    return {
+      ok: false as const,
+      status: 400,
+      error: 'Please enter a descriptive prompt for the image you want to generate.',
+      latencyMs: Date.now() - startTime,
+    };
+  }
+
+  const requestedModel = String(params.model || 'gemini-3.1-flash-lite-image').trim();
+  if (!(requestedModel in IMAGE_MODEL_CAPABILITIES)) {
+    return {
+      ok: false as const,
+      status: 400,
+      error: `Unsupported image model "${requestedModel}". Supported models: ${Object.keys(IMAGE_MODEL_CAPABILITIES).join(', ')}.`,
+      latencyMs: Date.now() - startTime,
+    };
+  }
+
+  const primaryModelId = requestedModel as SupportedImageModelId;
+  const candidateModels: SupportedImageModelId[] =
+    primaryModelId === 'gemini-nano-banana-2.1'
+      ? ['gemini-nano-banana-2.1', 'gemini-3.1-flash-lite-image']
+      : [primaryModelId];
+
+  const requestedAspect = String(params.aspectRatio || '1:1').trim();
+  const cleanStyle = String(params.style || 'Realistic').trim();
+  const styleDirective =
+    IMAGE_STYLE_DIRECTIVES[cleanStyle] ||
+    (cleanStyle && cleanStyle.toLowerCase() !== 'none' ? `${cleanStyle} style` : '');
+
+  const finalPrompt = styleDirective
+    ? `${cleanPrompt}\n\nStyle direction: ${styleDirective}.`
+    : cleanPrompt;
+
+  let lastClassified: { status: number; message: string } | null = null;
+  let safeAspect = '1:1';
+
+  for (const modelId of candidateModels) {
+    const cap = IMAGE_MODEL_CAPABILITIES[modelId];
+    safeAspect = (cap.aspectRatios as readonly string[]).includes(requestedAspect)
+      ? requestedAspect
+      : '1:1';
+
+    if (!params.hasCustomKey && (rasterQuotaCooldownUntil.get(modelId) ?? 0) > Date.now()) {
+      lastClassified = {
+        status: 429,
+        message: 'Gemini image generation quota or rate limit reached for raster model.',
+      };
+      continue;
+    }
+
+    const requestedResolution = String(params.resolution || '').trim().toUpperCase();
+    const safeResolution =
+      cap.supportsResolution && (cap.resolutions as readonly string[]).includes(requestedResolution)
+        ? requestedResolution
+        : cap.supportsResolution
+        ? '1K'
+        : undefined;
+
+    const imageConfig: { aspectRatio: string; imageSize?: string } = {
+      aspectRatio: safeAspect,
+    };
+    if (safeResolution) {
+      imageConfig.imageSize = safeResolution;
+    }
+
+    try {
+      const response = await withTimeout(
+        params.ai.models.generateContent({
+          model: modelId,
+          contents: finalPrompt,
+          config: {
+            imageConfig,
+          },
+        }),
+        25000
+      );
+
+      const parts = response.candidates?.[0]?.content?.parts ?? [];
+      let base64Image: string | null = null;
+      let mimeType = 'image/png';
+      const textParts: string[] = [];
+
+      for (const part of parts) {
+        if (part.inlineData?.data) {
+          base64Image = part.inlineData.data;
+          mimeType = part.inlineData.mimeType || 'image/png';
+        } else if (typeof part.text === 'string' && part.text.trim()) {
+          textParts.push(part.text.trim());
+        }
+      }
+
+      if (!base64Image) {
+        const note = textParts.join(' ').slice(0, 300);
+        lastClassified = {
+          status: 422,
+          message: note
+            ? `No image was returned by ${modelId}: ${note}`
+            : `No image data was returned by ${modelId}. Please try rephrasing your prompt.`,
+        };
+        continue;
+      }
+
+      rasterQuotaCooldownUntil.delete(modelId);
+      return {
+        ok: true as const,
+        status: 200,
+        imageDataUrl: `data:${mimeType};base64,${base64Image}`,
+        mimeType,
+        revisedPrompt: textParts.join(' ').trim() || undefined,
+        modelUsed: modelId,
+        aspectRatio: safeAspect,
+        resolution: safeResolution,
+        style: cleanStyle,
+        latencyMs: Date.now() - startTime,
+      };
+    } catch (err: any) {
+      lastClassified = classifyImageGenError(err);
+      if (!params.hasCustomKey && (lastClassified.status === 429 || lastClassified.status === 403)) {
+        rasterQuotaCooldownUntil.set(modelId, Date.now() + MODEL_COOLDOWN_MS);
+      }
+      console.warn(`Raster image model ${modelId} unavailable (${lastClassified.status}): ${lastClassified.message}`);
+      if (lastClassified.status === 401) {
+        break;
+      }
+    }
+  }
+
+  // Automatic Free-Tier Vector Studio SVG fallback when raster models hit Free Tier quota (429) or billing gate (403)
+  if (lastClassified && (lastClassified.status === 429 || lastClassified.status === 403 || lastClassified.status === 404)) {
+    try {
+      return await generateVectorFallbackSvg({
+        ai: params.ai,
+        prompt: cleanPrompt,
+        style: cleanStyle,
+        aspectRatio: safeAspect,
+        startTime,
+        notice:
+          'Raster image models require paid-tier quota (current key has Free Tier limit 0). Generated a crisp Vector Studio SVG illustration instead using Gemini 4.',
+      });
+    } catch (svgErr: any) {
+      const svgClassified = classifyImageGenError(svgErr);
+      return {
+        ok: false as const,
+        status: svgClassified.status,
+        error: svgClassified.message,
+        latencyMs: Date.now() - startTime,
+      };
+    }
+  }
+
+  return {
+    ok: false as const,
+    status: lastClassified?.status || 502,
+    error: lastClassified?.message || 'Failed to generate image from Gemini AI.',
+    latencyMs: Date.now() - startTime,
+  };
+}
+
+app.get('/api/images/models', (_req: Request, res: Response): void => {
+  res.json({
+    defaultModel: 'gemini-3.1-flash-lite-image',
+    models: Object.values(IMAGE_MODEL_CAPABILITIES),
+  });
+});
+
+app.post('/api/images/generate', async (req: Request, res: Response): Promise<void> => {
+  const customKey = (req.headers['x-gemini-api-key'] as string) || req.body?.customApiKey;
+  const ai = getGeminiClient(customKey);
+  if (!ai) {
+    res.status(400).json({
+      ok: false,
+      error: 'Gemini API key is not configured on the server or in Settings.',
+    });
+    return;
+  }
+
+  const result = await generateRasterImageWithGemini({
+    ai,
+    prompt: req.body?.prompt,
+    style: req.body?.style,
+    aspectRatio: req.body?.aspectRatio,
+    resolution: req.body?.resolution,
+    model: req.body?.model,
+    hasCustomKey: Boolean(typeof customKey === 'string' && customKey.trim()),
+  });
+
+  if (!result.ok) {
+    res.status(result.status).json({
+      ok: false,
+      error: result.error,
+      latencyMs: result.latencyMs,
+    });
+    return;
+  }
+
+  res.json(result);
+});
+
 app.post('/api/studio/image', async (req: Request, res: Response): Promise<void> => {
   const startTime = Date.now();
   try {
@@ -983,12 +1532,34 @@ app.post('/api/studio/image', async (req: Request, res: Response): Promise<void>
       imageData,
       imageMimeType = 'image/jpeg',
       targetLanguage = 'en',
+      style,
+      aspectRatio,
+      resolution,
+      model,
     } = req.body;
 
     const customKey = (req.headers['x-gemini-api-key'] as string) || req.body?.customApiKey;
     const ai = getGeminiClient(customKey);
     if (!ai) {
       res.status(400).json({ error: 'Gemini API key is not configured.' });
+      return;
+    }
+
+    if (task === 'generate-image') {
+      const result = await generateRasterImageWithGemini({
+        ai,
+        prompt,
+        style,
+        aspectRatio,
+        resolution,
+        model,
+        hasCustomKey: Boolean(typeof customKey === 'string' && customKey.trim()),
+      });
+      if (!result.ok) {
+        res.status(result.status).json({ error: result.error, latencyMs: result.latencyMs });
+        return;
+      }
+      res.json(result);
       return;
     }
 

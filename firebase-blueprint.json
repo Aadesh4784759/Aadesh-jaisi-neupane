@@ -378,6 +378,26 @@
         "completedAt": { "type": "string", "maxLength": 50 }
       },
       "required": ["id", "userId", "topic", "mode", "score", "totalQuestions", "completedAt"]
+    },
+    "GeneratedImage": {
+      "title": "GeneratedImage",
+      "description": "Metadata for user-generated AI images (pixels stored locally in IndexedDB)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "prompt": { "type": "string", "maxLength": 1500 },
+        "revisedPrompt": { "type": "string", "maxLength": 1500 },
+        "style": { "type": "string", "maxLength": 64 },
+        "aspectRatio": { "type": "string", "maxLength": 16 },
+        "resolution": { "type": "string", "maxLength": 16 },
+        "modelName": { "type": "string", "maxLength": 80 },
+        "mimeType": { "type": "string", "maxLength": 40 },
+        "storageLocation": { "type": "string", "maxLength": 256 },
+        "createdAt": { "type": "string", "maxLength": 50 },
+        "latencyMs": { "type": "number" }
+      },
+      "required": ["id", "userId", "prompt", "style", "aspectRatio", "modelName", "storageLocation", "createdAt"]
     }
   },
   "firestore": {
@@ -408,6 +428,10 @@
     "/users/{userId}/studyProgress/{progressId}": {
       "schema": "StudyProgress",
       "description": "User Study Hub progress records"
+    },
+    "/users/{userId}/generatedImages/{imageId}": {
+      "schema": "GeneratedImage",
+      "description": "User AI image generation metadata records"
     },
     "/usage_analytics/{eventId}": {
       "schema": "UsageAnalytics",

@@ -292,3 +292,30 @@ export interface AgentStepPlan {
   status: 'pending' | 'running' | 'completed';
   output?: string;
 }
+
+export type ImageAspectRatio = '1:1' | '16:9' | '9:16' | '4:3';
+export type ImageQualitySize = '1K' | '2K' | '4K';
+export type ImageStylePreset =
+  | 'Realistic'
+  | '3D'
+  | 'Cartoon'
+  | 'Anime'
+  | 'Digital Art'
+  | 'Painting';
+
+export interface GeneratedImageItem {
+  id: string;
+  userId?: string;
+  prompt: string;
+  revisedPrompt?: string;
+  style: ImageStylePreset | string;
+  aspectRatio: ImageAspectRatio | string;
+  resolution?: ImageQualitySize | string;
+  modelName: string;
+  mimeType: string;
+  imageDataUrl: string;
+  storageLocation: string;
+  createdAt: number;
+  latencyMs?: number;
+}
+

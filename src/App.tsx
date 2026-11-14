@@ -41,8 +41,10 @@ import { InterpreterView } from './components/InterpreterView';
 import { GeotagGalleryView } from './components/GeotagGalleryView';
 import { AnalyticsDashboard } from './components/AnalyticsDashboard';
 import { VoiceHistoryView } from './components/VoiceHistoryView';
+import { ImageStudioView } from './components/ImageStudioView';
 import { ProfileView } from './components/ProfileView';
 import { AdminDashboardView } from './components/AdminDashboardView';
+import { WorldClockView } from './components/WorldClockView';
 import { SettingsModal } from './components/SettingsModal';
 import { AuthModal } from './components/AuthModal';
 import { GamificationModal } from './components/GamificationModal';
@@ -95,6 +97,7 @@ export default function App() {
   const [isBrowserOnline, setIsBrowserOnline] = useState<boolean>(
     typeof navigator !== 'undefined' ? navigator.onLine : true
   );
+  const [isKeyboardOpen, setIsKeyboardOpen] = useState<boolean>(false);
 
   const isOnline = isBrowserOnline && !settings.offlineModeForce;
   const isOwnerAdmin = Boolean(
@@ -107,6 +110,29 @@ export default function App() {
   useEffect(() => {
     applyAvatarDynamicTheme(user.avatarColor, settings.dynamicAvatarTheme !== false);
   }, [user.avatarColor, settings.dynamicAvatarTheme]);
+
+  // Detect Android/iOS virtual keyboard open state via visualViewport
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.visualViewport) return;
+    const vv = window.visualViewport;
+
+    const updateKeyboardState = () => {
+      const isNarrowViewport = window.innerWidth < 1024;
+      const activeTag = document.activeElement?.tagName;
+      const isInputFocused = activeTag === 'TEXTAREA' || activeTag === 'INPUT';
+      const heightRatio = vv.height / Math.max(1, window.innerHeight);
+      setIsKeyboardOpen(isNarrowViewport && isInputFocused && heightRatio < 0.8);
+    };
+
+    vv.addEventListener('resize', updateKeyboardState);
+    window.addEventListener('focusin', updateKeyboardState);
+    window.addEventListener('focusout', updateKeyboardState);
+    return () => {
+      vv.removeEventListener('resize', updateKeyboardState);
+      window.removeEventListener('focusin', updateKeyboardState);
+      window.removeEventListener('focusout', updateKeyboardState);
+    };
+  }, []);
 
   // Sync voiceAssistant configuration whenever Read Aloud speed, pitch, or volume changes
   useEffect(() => {
@@ -340,8 +366,9 @@ export default function App() {
         }
         sentiment = 'neutral';
         suggestedQuestions = [
-          'नेपालीमा अनुवाद गर्नुहोस् (Translate to Nepali)',
-          'Explain step by step in English',
+          'Explain in more detail',
+          'Give example',
+          'Summarize',
         ];
       } else {
         const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -380,7 +407,7 @@ export default function App() {
         translation = data.translation || '';
         detectedLanguage = data.detectedLanguage || 'en';
         sentiment = data.sentiment || 'positive';
-        suggestedQuestions = data.suggestedQuestions || [];
+        suggestedQuestions = Array.isArray(data.suggestedQuestions) ? data.suggestedQuestions : [];
         geotagInsights = data.geotagInsights;
         latencyMs = data.latencyMs || Date.now() - startTime;
 
@@ -391,8 +418,9 @@ export default function App() {
         }
       }
 
+      const modelMsgId = `mod-${Date.now()}`;
       const modelMessage: ChatMessage = {
-        id: `mod-${Date.now()}`,
+        id: modelMsgId,
         role: 'model',
         senderName: 'Aadesh AI',
         content: reply,
@@ -415,6 +443,64 @@ export default function App() {
       const finalSessions = sessions.map((s) => (s.id === currentSession.id ? finalSession : s));
       setSessions(finalSessions);
       saveStoredSessions(finalSessions, user.id);
+
+      // Dedicated backend call for context-aware suggested reply buttons after every AI response
+      if (isOnline) {
+        const suggestHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (settings.customGeminiApiKey) {
+          suggestHeaders['x-gemini-api-key'] = settings.customGeminiApiKey;
+        }
+        const targetSessionId = currentSession.id;
+        void fetch('/api/chat/suggested-replies', {
+          method: 'POST',
+          headers: suggestHeaders,
+          body: JSON.stringify({
+            userMessage: params.text || fallbackContent,
+            aiReply: reply,
+            recentMessages: updatedMessages
+              .slice(-4)
+              .filter((m) => !m.isError)
+              .map((m) => ({ role: m.role, content: m.content })),
+            targetLanguage: params.targetLanguage,
+            userLanguage: settings.uiLanguage,
+            location: params.location,
+            hasImage: Boolean(params.imageData),
+            customApiKey: settings.customGeminiApiKey,
+          }),
+        })
+          .then((suggRes) => (suggRes.ok ? suggRes.json() : null))
+          .then((suggData) => {
+            if (!suggData || !Array.isArray(suggData.suggestedReplies) || suggData.suggestedReplies.length === 0) {
+              return;
+            }
+            const nextSuggestions = suggData.suggestedReplies
+              .filter((item: unknown): item is string => typeof item === 'string' && item.trim().length > 0)
+              .slice(0, 4);
+            if (nextSuggestions.length === 0) return;
+
+            setSessions((prevSessions) => {
+              const nextSessions = prevSessions.map((s) => {
+                if (s.id !== targetSessionId) return s;
+                return {
+                  ...s,
+                  messages: s.messages.map((m) =>
+                    m.id === modelMsgId ? { ...m, suggestedQuestions: nextSuggestions } : m
+                  ),
+                };
+              });
+              saveStoredSessions(nextSessions, user.id);
+              return nextSessions;
+            });
+
+            if (user.isLoggedIn) {
+              saveSingleMessageToFirestore(user.id, targetSessionId, {
+                ...modelMessage,
+                suggestedQuestions: nextSuggestions,
+              }).catch(() => {});
+            }
+          })
+          .catch(() => {});
+      }
 
       // Sync conversation & usage telemetry to Firestore when signed in
       if (user.isLoggedIn) {
@@ -868,7 +954,11 @@ export default function App() {
   const totalMessageCount = sessions.reduce((acc, s) => acc + s.messages.length, 0);
 
   return (
-    <div className="min-h-screen relative flex flex-col justify-between selection:bg-purple-500/30 selection:text-purple-200">
+    <div
+      className={`${
+        activeTab === 'chat' ? 'app-shell-chat' : 'app-shell-scroll'
+      } relative flex flex-col justify-between selection:bg-purple-500/30 selection:text-purple-200 max-w-full overflow-x-hidden`}
+    >
       {/* Ambient Glowing Background Orbs & 3D Spheres */}
       <div
         className="orb w-[380px] h-[380px] top-[-40px] left-[-90px] animate-pulse-glow transition-colors duration-500"
@@ -910,7 +1000,7 @@ export default function App() {
         onOpenInstall={() => setIsInstallModalOpen(true)}
       />
 
-      {/* NAVIGATION BAR (Desktop Top Bar + Mobile Floating Bottom Dock across 8+ items) */}
+      {/* NAVIGATION BAR (Desktop Top Bar + Mobile Floating Bottom Dock) */}
       <NavigationDock
         activeTab={activeTab}
         onSelectTab={(tab) => {
@@ -922,19 +1012,20 @@ export default function App() {
         }}
         uiLanguage={settings.uiLanguage}
         isOwnerAdmin={isOwnerAdmin}
+        isKeyboardOpen={isKeyboardOpen}
         onOpenInstall={() => setIsInstallModalOpen(true)}
       />
 
       {/* Owner Announcement Banner if active */}
       {platformNotice?.announcement && (
-        <div className="bg-purple-950/85 border-b border-purple-500/40 text-purple-100 text-xs py-1.5 px-4 text-center z-20 font-medium">
+        <div className="bg-purple-950/85 border-b border-purple-500/40 text-purple-100 text-xs py-1.5 px-4 text-center z-20 font-medium shrink-0">
           📢 {platformNotice.announcement}
         </div>
       )}
 
       {/* Offline Alert Strip if Offline */}
       {!isOnline && (
-        <div className="bg-amber-950/80 border-b border-amber-500/40 text-amber-200 text-xs py-1.5 px-4 text-center z-20 font-medium flex items-center justify-center gap-2">
+        <div className="bg-amber-950/80 border-b border-amber-500/40 text-amber-200 text-xs py-1.5 px-4 text-center z-20 font-medium flex items-center justify-center gap-2 shrink-0">
           <span>⚠️ Offline Mode Active: Conversations saved locally. Syncs when reconnected.</span>
           <button
             onClick={handleToggleForceOffline}
@@ -946,7 +1037,11 @@ export default function App() {
       )}
 
       {/* MAIN VIEWPORT */}
-      <main className="relative z-10 flex-grow w-full flex flex-col">
+      <main
+        className={`relative z-10 w-full flex flex-col ${
+          activeTab === 'chat' ? 'flex-1 min-h-0 overflow-hidden' : 'flex-grow'
+        }`}
+      >
         {activeTab === 'chat' && (
           <ChatView
             currentSession={currentSession}
@@ -973,6 +1068,32 @@ export default function App() {
             isLoading={isLoading}
             searchFilter={searchQuery}
             onSearchChange={setSearchQuery}
+            isKeyboardOpen={isKeyboardOpen}
+          />
+        )}
+
+        {activeTab === 'images' && (
+          <ImageStudioView
+            settings={settings}
+            user={user}
+            isOnline={isOnline}
+            onOpenSettings={() => setIsSettingsModalOpen(true)}
+            onImageGenerated={(latencyMs) => {
+              const { updatedUser, newBadgeUnlocked } = recordGamificationActivity(user, 'image');
+              setUser(updatedUser);
+              saveStoredUser(updatedUser);
+              if (newBadgeUnlocked) {
+                try {
+                  confetti({ particleCount: 70, spread: 65, origin: { y: 0.6 } });
+                } catch {}
+              }
+              recordMetricEvent({
+                isImage: true,
+                latencyMs,
+                sentiment: 'positive',
+              });
+              setMetrics(getStoredMetrics());
+            }}
           />
         )}
 
@@ -1018,6 +1139,18 @@ export default function App() {
           />
         )}
 
+        {activeTab === 'worldTime' && (
+          <WorldClockView
+            onAskAboutCountry={(country, formattedTime) => {
+              setActiveTab('chat');
+              handleSendMessage({
+                text: `Tell me about ${country.country} (${country.city}), where the current live local time is ${formattedTime}.`,
+                targetLanguage: currentSession.targetLanguage || settings.defaultTargetLanguage,
+              });
+            }}
+          />
+        )}
+
         {activeTab === 'analytics' && <AnalyticsDashboard metrics={metrics} />}
 
         {activeTab === 'profile' && (
@@ -1050,6 +1183,17 @@ export default function App() {
           />
         )}
       </main>
+
+      {/* Single Clean Creator Attribution Footer (Rendered ONLY outside active chat view) */}
+      {activeTab !== 'chat' && (
+        <footer className="relative z-10 border-t border-white/10 bg-[#090a0f]/80 py-4 px-4 pb-24 lg:pb-5 text-center text-xs text-gray-400">
+          <span>Aadesh AI Global Multilingual Hub</span>
+          <span className="mx-2 text-purple-400">•</span>
+          <span>
+            Built by <strong className="text-purple-300">Aadesh Jaisi</strong>
+          </span>
+        </footer>
+      )}
 
       {/* FULL SETTINGS MODAL */}
       <SettingsModal

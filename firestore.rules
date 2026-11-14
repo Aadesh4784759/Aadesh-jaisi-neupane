@@ -166,6 +166,26 @@ service cloud.firestore {
         && data.completedAt is string && data.completedAt.size() <= 50;
     }
 
+    function isValidGeneratedImageDoc(data, userId, imageId) {
+      return data.keys().hasAll(['id', 'userId', 'prompt', 'style', 'aspectRatio', 'modelName', 'storageLocation', 'createdAt'])
+        && data.keys().hasOnly([
+          'id', 'userId', 'prompt', 'revisedPrompt', 'style', 'aspectRatio',
+          'resolution', 'modelName', 'mimeType', 'storageLocation', 'createdAt', 'latencyMs'
+        ])
+        && data.id == imageId
+        && data.userId == userId
+        && data.prompt is string && data.prompt.size() >= 1 && data.prompt.size() <= 1500
+        && data.style is string && data.style.size() >= 1 && data.style.size() <= 64
+        && data.aspectRatio is string && data.aspectRatio.size() >= 1 && data.aspectRatio.size() <= 16
+        && data.modelName is string && data.modelName.size() >= 1 && data.modelName.size() <= 80
+        && data.storageLocation is string && data.storageLocation.size() >= 1 && data.storageLocation.size() <= 256
+        && data.createdAt is string && data.createdAt.size() <= 50
+        && (!('revisedPrompt' in data) || (data.revisedPrompt is string && data.revisedPrompt.size() <= 1500))
+        && (!('resolution' in data) || (data.resolution is string && data.resolution.size() <= 16))
+        && (!('mimeType' in data) || (data.mimeType is string && data.mimeType.size() <= 40))
+        && (!('latencyMs' in data) || data.latencyMs is number);
+    }
+
     function isValidVoiceDoc(data, userId, voiceId) {
       return data.keys().hasAll(['id', 'userId', 'transcript', 'timestamp'])
         && data.keys().hasOnly(['id', 'userId', 'transcript', 'language', 'durationSeconds', 'timestamp'])
@@ -314,6 +334,16 @@ service cloud.firestore {
             'topic', 'mode', 'score', 'totalQuestions', 'language', 'completedAt'
           ]);
         allow delete: if isValidId(userId) && isValidId(progressId) && (isOwner(userId) || isAdmin());
+      }
+
+      // Generated Image Metadata Subcollection (pixels stored locally in IndexedDB)
+      match /generatedImages/{imageId} {
+        allow get: if isValidId(userId) && isValidId(imageId) && (isOwner(userId) || isAdmin());
+        allow list: if isOwner(userId) || isAdmin();
+        allow create: if isValidId(userId) && isValidId(imageId)
+          && isOwner(userId)
+          && isValidGeneratedImageDoc(incoming(), userId, imageId);
+        allow delete: if isValidId(userId) && isValidId(imageId) && (isOwner(userId) || isAdmin());
       }
     }
 

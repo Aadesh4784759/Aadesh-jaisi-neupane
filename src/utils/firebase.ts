@@ -36,6 +36,7 @@ import {
   AdminUserRecord,
   ChatMessage,
   ChatSession,
+  GeneratedImageItem,
   PersonalTask,
   StudyProgressItem,
   UserProfile,
@@ -832,6 +833,92 @@ export async function saveStudyProgressToFirestore(
   } catch (err) {
     if (err instanceof Error && err.message.toLowerCase().includes('permission')) {
       handleFirestoreError(err, OperationType.WRITE, path);
+    }
+  }
+}
+
+// ---------------- GENERATED IMAGES METADATA SYNC ----------------
+
+export async function saveGeneratedImageMetaToFirestore(
+  userId: string,
+  item: GeneratedImageItem
+): Promise<void> {
+  if (!db || !auth?.currentUser || auth.currentUser.uid !== userId) return;
+  const uid = safeDocId(userId);
+  const imageId = safeDocId(item.id);
+  const path = `users/${uid}/generatedImages/${imageId}`;
+  try {
+    const payload: Record<string, any> = {
+      id: imageId,
+      userId: uid,
+      prompt: item.prompt.slice(0, 1500),
+      style: (item.style || 'Realistic').slice(0, 64),
+      aspectRatio: (item.aspectRatio || '1:1').slice(0, 16),
+      modelName: (item.modelName || 'gemini-3.1-flash-lite-image').slice(0, 80),
+      mimeType: (item.mimeType || 'image/png').slice(0, 40),
+      storageLocation: (item.storageLocation || `indexeddb:${imageId}`).slice(0, 256),
+      createdAt: new Date(item.createdAt || Date.now()).toISOString(),
+    };
+    if (item.revisedPrompt) payload.revisedPrompt = item.revisedPrompt.slice(0, 1500);
+    if (item.resolution) payload.resolution = String(item.resolution).slice(0, 16);
+    if (typeof item.latencyMs === 'number') payload.latencyMs = item.latencyMs;
+
+    await setDoc(doc(db, 'users', uid, 'generatedImages', imageId), payload);
+  } catch (err) {
+    if (err instanceof Error && err.message.toLowerCase().includes('permission')) {
+      handleFirestoreError(err, OperationType.WRITE, path);
+    }
+  }
+}
+
+export async function loadGeneratedImagesMetaFromFirestore(
+  userId: string
+): Promise<Omit<GeneratedImageItem, 'imageDataUrl'>[]> {
+  if (!db || !auth?.currentUser || auth.currentUser.uid !== userId) return [];
+  const uid = safeDocId(userId);
+  const path = `users/${uid}/generatedImages`;
+  try {
+    const snap = await getDocs(
+      query(collection(db, 'users', uid, 'generatedImages'), orderBy('createdAt', 'desc'), limit(50))
+    );
+    return snap.docs.map((d) => {
+      const data = d.data();
+      return {
+        id: data.id || d.id,
+        userId: uid,
+        prompt: data.prompt || '',
+        revisedPrompt: data.revisedPrompt,
+        style: data.style || 'Realistic',
+        aspectRatio: data.aspectRatio || '1:1',
+        resolution: data.resolution,
+        modelName: data.modelName || 'gemini-3.1-flash-lite-image',
+        mimeType: data.mimeType || 'image/png',
+        storageLocation: data.storageLocation || `indexeddb:${d.id}`,
+        createdAt: data.createdAt ? new Date(data.createdAt).getTime() : Date.now(),
+        latencyMs: typeof data.latencyMs === 'number' ? data.latencyMs : undefined,
+      };
+    });
+  } catch (err) {
+    if (err instanceof Error && err.message.toLowerCase().includes('permission')) {
+      handleFirestoreError(err, OperationType.LIST, path);
+    }
+    return [];
+  }
+}
+
+export async function deleteGeneratedImageMetaFromFirestore(
+  userId: string,
+  imageId: string
+): Promise<void> {
+  if (!db || !auth?.currentUser || auth.currentUser.uid !== userId) return;
+  const uid = safeDocId(userId);
+  const safeId = safeDocId(imageId);
+  const path = `users/${uid}/generatedImages/${safeId}`;
+  try {
+    await deleteDoc(doc(db, 'users', uid, 'generatedImages', safeId));
+  } catch (err) {
+    if (err instanceof Error && err.message.toLowerCase().includes('permission')) {
+      handleFirestoreError(err, OperationType.DELETE, path);
     }
   }
 }

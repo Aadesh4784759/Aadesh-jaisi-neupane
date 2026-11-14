@@ -98,6 +98,7 @@ interface ChatViewProps {
   isLoading: boolean;
   searchFilter: string;
   onSearchChange?: (q: string) => void;
+  isKeyboardOpen?: boolean;
 }
 
 const QUICK_REACTIONS = ['👍', '❤️', '😂', '😮'] as const;
@@ -170,6 +171,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   isLoading,
   searchFilter,
   onSearchChange,
+  isKeyboardOpen = false,
 }) => {
   const [inputText, setInputText] = useState('');
   const [selectedImage, setSelectedImage] = useState<{ base64: string; mimeType: string } | null>(null);
@@ -198,6 +200,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const [lightboxImage, setLightboxImage] = useState<LightboxImageData | null>(null);
   const [drawerSearchQuery, setDrawerSearchQuery] = useState<string>('');
   const [drawerDateFilter, setDrawerDateFilter] = useState<string>('');
+  const [sessionSearchDropdownOpen, setSessionSearchDropdownOpen] = useState(false);
   const [langSwitcherOpen, setLangSwitcherOpen] = useState(false);
   const [langSearchQuery, setLangSearchQuery] = useState('');
   const [activeFolderFilter, setActiveFolderFilter] = useState<string>('All');
@@ -230,14 +233,22 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const justTriggeredQuickContextRef = useRef<boolean>(false);
   const langSwitcherRef = useRef<HTMLDivElement>(null);
   const langSearchInputRef = useRef<HTMLInputElement>(null);
+  const sessionSearchRef = useRef<HTMLDivElement>(null);
 
-  // Close Quick Language Switcher and Folder Assign popover on outside click / Escape
+  // Close Quick Language Switcher, Session Search Dropdown, and Folder Assign popover on outside click / Escape
   useEffect(() => {
-    if (!langSwitcherOpen && !folderAssignSessionId) return;
+    if (!langSwitcherOpen && !folderAssignSessionId && !sessionSearchDropdownOpen) return;
     const handleOutsideClick = (e: MouseEvent | TouchEvent) => {
       const target = e.target as HTMLElement | null;
       if (langSwitcherOpen && langSwitcherRef.current && !langSwitcherRef.current.contains(target)) {
         setLangSwitcherOpen(false);
+      }
+      if (
+        sessionSearchDropdownOpen &&
+        sessionSearchRef.current &&
+        !sessionSearchRef.current.contains(target)
+      ) {
+        setSessionSearchDropdownOpen(false);
       }
       if (folderAssignSessionId && !target?.closest('[data-folder-assign-menu="true"]')) {
         setFolderAssignSessionId(null);
@@ -246,6 +257,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
     const handleEscape = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setLangSwitcherOpen(false);
+        setSessionSearchDropdownOpen(false);
         setFolderAssignSessionId(null);
       }
     };
@@ -907,17 +919,14 @@ export const ChatView: React.FC<ChatViewProps> = ({
     setTimeout(() => setExportToast(null), 3000);
   };
 
-  // Extract latest suggested questions from the most recent model response (strictly Nepali/English for language suggestions)
-  const latestModelMessage = [...currentSession.messages].reverse().find((m) => m.role === 'model');
-  const activeSmartReplies =
-    latestModelMessage?.suggestedQuestions && latestModelMessage.suggestedQuestions.length > 0
-      ? latestModelMessage.suggestedQuestions
-      : [
-          'नेपालीमा अनुवाद गर्नुहोस् (Translate to Nepali)',
-          'सरल नेपालीमा बुझाउनुहोस् (Explain in Nepali)',
-          'Explain step by step in English',
-          'Give a practical coding or study example',
-        ];
+  // Detect active geotagged conversation context from attached location or any message in session
+  const activeConversationGeotagLocation =
+    attachedLocation ||
+    [...currentSession.messages].reverse().find((m) => Boolean(m.location))?.location;
+  const isGeotaggedConversation = Boolean(
+    activeConversationGeotagLocation ||
+      currentSession.messages.some((m) => Boolean(m.location || m.geotagInsights))
+  );
 
   // Filter messages if searchFilter is applied
   const trimmedSearch = searchFilter.trim();
@@ -972,6 +981,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
   const trimmedDrawerQuery = drawerSearchQuery.trim();
   const normalizedDrawerQuery = trimmedDrawerQuery.toLowerCase();
+  const drawerQueryKeywords = normalizedDrawerQuery.split(/\s+/).filter(Boolean);
 
   const filteredSessions = allSessions
     .map((session) => {
@@ -987,40 +997,75 @@ export const ChatView: React.FC<ChatViewProps> = ({
         return { session, matchCount: 0, snippet: '' };
       }
 
-      const titleMatch = session.title.toLowerCase().includes(normalizedDrawerQuery);
+      const titleLower = session.title.toLowerCase();
+      const titleMatch =
+        titleLower.includes(normalizedDrawerQuery) ||
+        drawerQueryKeywords.every((kw) => titleLower.includes(kw));
       const sessionDateMatch =
         getDateSearchTokens(session.createdAt).includes(normalizedDrawerQuery) ||
         getDateSearchTokens(session.updatedAt).includes(normalizedDrawerQuery);
 
-      const matchingMessages = session.messages.filter((m) => {
-        const textHaystack = [
+      const messageHaystacks = session.messages.map((m) => ({
+        msg: m,
+        haystack: [
           m.content,
           m.translation || '',
           m.senderName || '',
           m.attachmentName || '',
           m.location?.name || '',
           m.geotagInsights || '',
+          getDateSearchTokens(m.timestamp),
         ]
           .join(' ')
-          .toLowerCase();
-        return (
-          textHaystack.includes(normalizedDrawerQuery) ||
-          getDateSearchTokens(m.timestamp).includes(normalizedDrawerQuery)
-        );
-      });
+          .toLowerCase(),
+      }));
 
-      if (!titleMatch && !sessionDateMatch && matchingMessages.length === 0) {
+      const matchingMessages = messageHaystacks
+        .filter(({ haystack }) =>
+          drawerQueryKeywords.length > 1
+            ? haystack.includes(normalizedDrawerQuery) ||
+              drawerQueryKeywords.every((kw) => haystack.includes(kw))
+            : haystack.includes(normalizedDrawerQuery)
+        )
+        .map(({ msg }) => msg);
+
+      const combinedSessionHaystack = [
+        titleLower,
+        getDateSearchTokens(session.createdAt),
+        getDateSearchTokens(session.updatedAt),
+        ...messageHaystacks.map((entry) => entry.haystack),
+      ].join(' ');
+
+      const allKeywordsPresentAcrossSession = drawerQueryKeywords.every((kw) =>
+        combinedSessionHaystack.includes(kw)
+      );
+
+      if (
+        !titleMatch &&
+        !sessionDateMatch &&
+        matchingMessages.length === 0 &&
+        !allKeywordsPresentAcrossSession
+      ) {
         return null;
       }
 
-      const firstMatchedMsg = matchingMessages[0];
-      const snippet = firstMatchedMsg
-        ? firstMatchedMsg.content.replace(/\s+/g, ' ').trim().slice(0, 72)
+      const fallbackMatchedMsg =
+        matchingMessages[0] ||
+        messageHaystacks.find(({ haystack }) =>
+          drawerQueryKeywords.some((kw) => haystack.includes(kw))
+        )?.msg;
+      const snippet = fallbackMatchedMsg
+        ? fallbackMatchedMsg.content.replace(/\s+/g, ' ').trim().slice(0, 72)
         : '';
 
       return {
         session,
-        matchCount: matchingMessages.length,
+        matchCount:
+          matchingMessages.length > 0
+            ? matchingMessages.length
+            : allKeywordsPresentAcrossSession && !titleMatch
+            ? 1
+            : 0,
         snippet,
       };
     })
@@ -1332,10 +1377,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
   };
 
   return (
-    <div className="flex h-[calc(100vh-4.2rem)] lg:h-[calc(100vh-7.2rem)] relative w-full overflow-hidden">
+    <div className="flex-1 min-h-0 flex relative w-full overflow-hidden">
       {/* SESSIONS SIDEBAR (Desktop & Mobile Drawer) */}
       <div
-        className={`fixed inset-y-0 left-0 z-40 w-72 glass-nav border-r border-[#232738] p-4 flex flex-col justify-between transform transition-all duration-300 md:relative ${
+        className={`fixed inset-y-0 left-0 z-50 md:z-20 w-72 max-w-[85vw] safe-top safe-bottom glass-nav border-r border-[#232738] p-4 flex flex-col justify-between transform transition-all duration-300 md:relative ${
           sessionsSidebarOpen
             ? 'translate-x-0 md:w-72 md:opacity-100'
             : '-translate-x-full md:w-0 md:p-0 md:opacity-0 md:overflow-hidden md:border-none'
@@ -1461,8 +1506,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 type="text"
                 value={drawerSearchQuery}
                 onChange={(e) => setDrawerSearchQuery(e.target.value)}
-                placeholder="Find sessions by keyword or date..."
-                aria-label="Full-text search conversations by keyword or date"
+                placeholder="Search sessions by title or content..."
+                aria-label="Search conversation sessions by title or content keywords"
                 className="w-full bg-[#090a0f]/90 border border-[#232738] focus:border-purple-500 rounded-xl pl-8 pr-7 py-1.5 text-xs text-gray-200 placeholder-gray-500 outline-none"
               />
               {drawerSearchQuery && (
@@ -1640,12 +1685,12 @@ export const ChatView: React.FC<ChatViewProps> = ({
       {sessionsSidebarOpen && (
         <div
           onClick={() => setSessionsSidebarOpen(false)}
-          className="fixed inset-0 bg-black/60 z-30 md:hidden backdrop-blur-xs"
+          className="fixed inset-0 bg-black/65 z-40 md:hidden backdrop-blur-xs"
         />
       )}
 
       {/* MAIN CHAT STREAM CONTAINER */}
-      <div className="flex-1 flex flex-col h-full bg-transparent overflow-hidden relative">
+      <div className="flex-1 min-w-0 flex flex-col h-full min-h-0 bg-transparent overflow-hidden relative">
         {/* Session Sub-Header Controls */}
         <div className="glass-nav px-3 sm:px-4 py-2 border-b border-[#232738] flex items-center justify-between gap-2 z-20">
           <div className="flex items-center gap-2 min-w-0">
@@ -1675,21 +1720,131 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 {getFolderMeta(currentSession.category || 'General').icon}
                 <span>{currentSession.category || 'General'}</span>
               </button>
+              {isGeotaggedConversation && (
+                <span
+                  title={
+                    activeConversationGeotagLocation?.name
+                      ? `Active geotagged conversation context: ${activeConversationGeotagLocation.name}`
+                      : 'Active geotagged conversation context'
+                  }
+                  className="hidden sm:inline-flex items-center gap-1 px-2 py-0.5 rounded-lg border border-emerald-400/45 bg-emerald-950/60 text-emerald-200 text-[10px] font-bold uppercase tracking-wider shrink-0"
+                >
+                  <MapPin className="w-3 h-3 text-emerald-400 shrink-0" />
+                  <span>Context</span>
+                </span>
+              )}
             </div>
           </div>
 
           <div className="flex items-center space-x-1.5 sm:space-x-2 shrink-0">
+            {/* Inline Conversation Session Search Bar (Filters existing sessions by title or content keywords) */}
+            <div className="relative hidden md:block" ref={sessionSearchRef}>
+              <div className="relative flex items-center">
+                <Search className="w-3.5 h-3.5 text-purple-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  type="text"
+                  value={drawerSearchQuery}
+                  onFocus={() => setSessionSearchDropdownOpen(true)}
+                  onChange={(e) => {
+                    setDrawerSearchQuery(e.target.value);
+                    setSessionSearchDropdownOpen(true);
+                  }}
+                  placeholder="Search sessions by title or content..."
+                  aria-label="Filter existing sessions by title or content keywords"
+                  className="w-48 lg:w-60 bg-[#131520] border border-[#232738] focus:border-purple-500 rounded-xl pl-8 pr-7 py-1 text-xs text-gray-200 placeholder-gray-500 outline-none transition-all"
+                />
+                {drawerSearchQuery && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDrawerSearchQuery('');
+                      setSessionSearchDropdownOpen(false);
+                    }}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-white cursor-pointer"
+                    aria-label="Clear session search"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
+
+              {sessionSearchDropdownOpen && trimmedDrawerQuery && (
+                <div
+                  role="listbox"
+                  aria-label="Matching conversation sessions"
+                  className="absolute right-0 mt-2 w-80 max-w-[90vw] glass-card rounded-2xl border border-purple-500/45 shadow-2xl p-2 z-50 space-y-1.5"
+                >
+                  <div className="flex items-center justify-between px-2 py-1 border-b border-white/10 text-[10px] font-bold uppercase tracking-wider text-purple-300">
+                    <span>Matching Sessions ({filteredSessions.length})</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSessionsSidebarOpen(true);
+                        setSessionSearchDropdownOpen(false);
+                      }}
+                      className="text-gray-400 hover:text-white normal-case font-semibold cursor-pointer"
+                    >
+                      Open Logs
+                    </button>
+                  </div>
+
+                  {filteredSessions.length === 0 ? (
+                    <div className="py-4 px-3 text-center text-xs text-gray-400">
+                      No sessions match "{trimmedDrawerQuery}"
+                    </div>
+                  ) : (
+                    <div className="max-h-64 overflow-y-auto space-y-1 pr-0.5">
+                      {filteredSessions.slice(0, 8).map(({ session: s, matchCount, snippet }) => (
+                        <button
+                          key={`quick-session-${s.id}`}
+                          type="button"
+                          onClick={() => {
+                            onSelectSession(s.id);
+                            if (matchCount > 0 && onSearchChange) {
+                              onSearchChange(trimmedDrawerQuery);
+                            }
+                            setSessionSearchDropdownOpen(false);
+                          }}
+                          className={`w-full text-left p-2 rounded-xl border transition-colors cursor-pointer space-y-0.5 ${
+                            s.id === currentSession.id
+                              ? 'bg-purple-900/45 border-purple-400/50 text-white'
+                              : 'bg-[#131520]/80 hover:bg-white/10 border-white/5 text-gray-200'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-xs font-semibold truncate">
+                              <HighlightText text={s.title} query={trimmedDrawerQuery} />
+                            </span>
+                            {matchCount > 0 && (
+                              <span className="text-[10px] text-amber-300 font-semibold shrink-0">
+                                {matchCount} {matchCount === 1 ? 'hit' : 'hits'}
+                              </span>
+                            )}
+                          </div>
+                          {snippet && (
+                            <p className="text-[10px] text-purple-200/80 truncate">
+                              <HighlightText text={snippet} query={trimmedDrawerQuery} />
+                            </p>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
             {onSearchChange && (
               <button
                 type="button"
                 onClick={() => setShowInlineSearch((prev) => !prev)}
                 className={`md:hidden p-1.5 rounded-xl border transition-colors cursor-pointer ${
-                  showInlineSearch || trimmedSearch
+                  showInlineSearch || trimmedSearch || trimmedDrawerQuery
                     ? 'bg-amber-950/60 border-amber-500/50 text-amber-300'
                     : 'bg-[#131520] border-[#232738] text-gray-300 hover:text-white'
                 }`}
-                title="Search chat history"
-                aria-label="Toggle chat history search"
+                title="Search sessions and messages"
+                aria-label="Toggle session and message search"
               >
                 <Search className="w-3.5 h-3.5" />
               </button>
@@ -1934,23 +2089,30 @@ export const ChatView: React.FC<ChatViewProps> = ({
           </div>
         </div>
 
-        {/* Inline Search Input for Mobile Viewports */}
-        {onSearchChange && showInlineSearch && (
-          <div className="md:hidden px-4 py-2 bg-[#0c0e17] border-b border-[#232738] flex items-center gap-2">
+        {/* Inline Session & Message Search Input for Mobile Viewports */}
+        {showInlineSearch && (
+          <div className="md:hidden px-4 py-2 bg-[#0c0e17] border-b border-[#232738] space-y-2">
             <div className="relative flex-1">
-              <Search className="w-3.5 h-3.5 text-gray-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <Search className="w-3.5 h-3.5 text-purple-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
               <input
                 type="text"
                 autoFocus
-                value={searchFilter}
-                onChange={(e) => onSearchChange(e.target.value)}
-                placeholder="Search & highlight in chat bubbles..."
+                value={drawerSearchQuery}
+                onChange={(e) => {
+                  setDrawerSearchQuery(e.target.value);
+                  onSearchChange?.(e.target.value);
+                }}
+                placeholder="Search sessions by title or content..."
+                aria-label="Search sessions by title or content keywords"
                 className="w-full bg-[#131520] border border-[#232738] focus:border-purple-500 rounded-xl pl-8 pr-7 py-1.5 text-xs text-gray-200 placeholder-gray-500 outline-none"
               />
-              {searchFilter && (
+              {(drawerSearchQuery || searchFilter) && (
                 <button
                   type="button"
-                  onClick={() => onSearchChange('')}
+                  onClick={() => {
+                    setDrawerSearchQuery('');
+                    onSearchChange?.('');
+                  }}
                   className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-white cursor-pointer"
                   aria-label="Clear search"
                 >
@@ -1958,6 +2120,44 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 </button>
               )}
             </div>
+
+            {trimmedDrawerQuery && (
+              <div className="max-h-40 overflow-y-auto space-y-1">
+                {filteredSessions.length === 0 ? (
+                  <p className="text-[11px] text-gray-400 px-1">
+                    No sessions match "{trimmedDrawerQuery}"
+                  </p>
+                ) : (
+                  filteredSessions.slice(0, 5).map(({ session: s, matchCount, snippet }) => (
+                    <button
+                      key={`mob-session-${s.id}`}
+                      type="button"
+                      onClick={() => {
+                        onSelectSession(s.id);
+                        setShowInlineSearch(false);
+                      }}
+                      className="w-full text-left px-2.5 py-1.5 rounded-xl bg-[#131520] hover:bg-purple-900/30 border border-white/10 text-xs flex items-center justify-between gap-2 cursor-pointer"
+                    >
+                      <div className="min-w-0">
+                        <div className="font-semibold text-white truncate">
+                          <HighlightText text={s.title} query={trimmedDrawerQuery} />
+                        </div>
+                        {snippet && (
+                          <div className="text-[10px] text-purple-200/80 truncate">
+                            <HighlightText text={snippet} query={trimmedDrawerQuery} />
+                          </div>
+                        )}
+                      </div>
+                      {matchCount > 0 && (
+                        <span className="text-[10px] text-amber-300 font-semibold shrink-0">
+                          {matchCount} hits
+                        </span>
+                      )}
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
           </div>
         )}
 
@@ -2078,7 +2278,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
         )}
 
         {/* Message Feed */}
-        <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6 pb-56 sm:pb-60">
+        <div className="flex-1 min-h-0 overflow-y-auto chat-feed-scroll px-2.5 sm:px-6 py-4 space-y-5">
           {/* No Search Results Empty State */}
           {trimmedSearch && displayedMessages.length === 0 && (
             <div className="glass-card rounded-2xl p-6 max-w-lg mx-auto text-center border border-amber-500/30 space-y-3">
@@ -2103,27 +2303,27 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
           {/* Hero Welcome banner when starting */}
           {!trimmedSearch && displayedMessages.length <= 1 && (
-            <div className="relative text-center py-6 sm:py-8 space-y-4 max-w-2xl mx-auto overflow-hidden">
+            <div className="relative text-center py-4 sm:py-8 space-y-4 max-w-2xl mx-auto overflow-hidden">
               {/* Subtle 3D Spheres floating in background matching attached photo */}
               <div className="sphere-3d w-14 h-14 absolute -top-2 left-6 opacity-60 animate-float-slow" />
               <div className="sphere-3d w-20 h-20 absolute -top-4 right-10 opacity-70 animate-float-delayed" />
               <div className="sphere-3d w-8 h-8 absolute bottom-0 left-1/4 opacity-50 animate-pulse-glow" />
 
-              <div className="inline-flex items-center gap-2 px-3.5 py-1 rounded-full bg-purple-950/60 border border-purple-500/30 text-purple-300 text-xs font-semibold shadow-inner">
-                <Sparkles className="w-3.5 h-3.5 text-purple-400" />
-                <span>⚡ Aadesh AI Global Hub • Worldwide Multimodal Intelligence</span>
+              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-purple-950/60 border border-purple-500/30 text-purple-300 text-[11px] sm:text-xs font-semibold shadow-inner">
+                <Sparkles className="w-3.5 h-3.5 text-purple-400 shrink-0" />
+                <span>Aadesh AI Global Hub • Worldwide Intelligence</span>
               </div>
 
-              <h1 className="text-3xl sm:text-4xl font-black text-white tracking-tight">
-                Explore & Learn with <span className="text-gradient">Aadesh AI Global Hub</span>
+              <h1 className="text-2xl sm:text-4xl font-black text-white tracking-tight px-1">
+                Explore &amp; Learn with <span className="text-gradient">Aadesh AI</span>
               </h1>
 
-              <p className="text-xs sm:text-sm text-gray-400 max-w-lg mx-auto">
-                Next-generation multilingual AI, multimodal vision and photo analysis, hands-free voice intelligence, and contextual reasoning across 20+ world languages.
+              <p className="text-xs sm:text-sm text-gray-400 max-w-lg mx-auto px-2">
+                Multilingual AI, photo &amp; document analysis, voice intelligence, and contextual reasoning across 20+ world languages.
               </p>
 
-              {/* Quick Topic Starter Cards (Worldwide Engineering & Learning) */}
-              <div className="grid grid-cols-2 gap-2.5 pt-2 text-left">
+              {/* Quick Topic Starter Cards (Single column on mobile, 2 columns sm+) */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-2 text-left">
                 <button
                   onClick={() => handleSend('Design a scalable clean architecture for a modern full-stack web application with TypeScript')}
                   className="glass-card glass-card-hover p-3 rounded-xl border border-purple-500/25 text-left group cursor-pointer"
@@ -2193,21 +2393,29 @@ export const ChatView: React.FC<ChatViewProps> = ({
               ([, count]) => typeof count === 'number' && count > 0
             );
             const viewMode = translationViewModes[msg.id] || 'bilingual';
+            const hasGeotagContext = Boolean(
+              msg.location || (typeof msg.geotagInsights === 'string' && msg.geotagInsights.trim().length > 0)
+            );
+            const contextTooltip = msg.location?.name
+              ? `Location context: ${msg.location.name}`
+              : msg.geotagInsights
+              ? 'Contains geotag regional insights'
+              : 'Contains location metadata';
 
             return (
               <div
                 key={msg.id}
                 id={`chat-msg-${msg.id}`}
-                className={`flex flex-col ${isUser ? 'items-end' : 'items-start'} space-y-2 max-w-4xl mx-auto w-full scroll-mt-6`}
+                className={`flex flex-col ${isUser ? 'items-end' : 'items-start'} space-y-2 max-w-3xl mx-auto w-full scroll-mt-6`}
               >
-                {/* Geotag Indicator Pill */}
+                {/* Geotag Location Pill Above Bubble */}
                 {msg.location && (
                   <div
                     className={`inline-flex items-center gap-1.5 px-3 py-0.5 rounded-full bg-purple-950/70 border border-purple-500/40 text-[11px] text-purple-300 font-medium ${
                       isUser ? 'mr-11 sm:mr-12' : 'ml-11 sm:ml-12'
                     }`}
                   >
-                    <MapPin className="w-3 h-3 text-purple-400" />
+                    <MapPin className="w-3 h-3 text-purple-400 shrink-0" />
                     <span>
                       <HighlightText text={msg.location.name} query={trimmedSearch} />
                     </span>
@@ -2306,7 +2514,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
                         ? 'glass-card text-gray-100 rounded-tl-xs border border-emerald-500/40 bg-emerald-950/20'
                         : msg.isError
                         ? 'glass-card text-rose-100 rounded-tl-xs border border-rose-500/50 bg-rose-950/25'
+                        : hasGeotagContext
+                        ? 'glass-card text-gray-100 rounded-tl-xs border border-emerald-400/50 shadow-[0_0_24px_rgba(16,185,129,0.12)]'
                         : 'glass-card text-gray-100 rounded-tl-xs border border-purple-500/30'
+                    } ${
+                      hasGeotagContext && isUser ? 'ring-1 ring-emerald-400/55 border-emerald-300/60' : ''
                     } ${
                       msg.isPinned ? 'ring-1 ring-amber-400/60 border-amber-400/50' : ''
                     } ${
@@ -2323,16 +2535,28 @@ export const ChatView: React.FC<ChatViewProps> = ({
                         <span className="text-[11px] font-bold text-purple-100 truncate">
                           {senderDisplayName}
                         </span>
-                        <span className="text-[10px] font-semibold px-1.5 py-0.2 rounded bg-white/15 text-purple-100 border border-white/20 shrink-0">
-                          You
-                        </span>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          {hasGeotagContext && (
+                            <span
+                              data-context-badge="true"
+                              title={contextTooltip}
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/25 border border-emerald-300/60 text-[10px] font-bold uppercase tracking-wider text-emerald-100 shadow-xs"
+                            >
+                              <MapPin className="w-2.5 h-2.5 text-emerald-300 shrink-0" />
+                              <span>Context</span>
+                            </span>
+                          )}
+                          <span className="text-[10px] font-semibold px-1.5 py-0.2 rounded bg-white/15 text-purple-100 border border-white/20 shrink-0">
+                            You
+                          </span>
+                        </div>
                       </div>
                     )}
 
                     {/* AI Model / Group Participant Header */}
                     {!isUser && (
-                      <div className="flex items-center justify-between border-b border-white/10 pb-2.5 gap-2">
-                        <div className="flex items-center gap-2 min-w-0">
+                      <div className="flex items-center justify-between border-b border-white/10 pb-2.5 gap-2 flex-wrap">
+                        <div className="flex items-center gap-2 min-w-0 flex-wrap">
                           <span className="text-xs font-bold text-white tracking-wide flex items-center gap-1.5 truncate">
                             {senderDisplayName}
                             {isAI ? (
@@ -2345,6 +2569,16 @@ export const ChatView: React.FC<ChatViewProps> = ({
                               </span>
                             )}
                           </span>
+                          {hasGeotagContext && (
+                            <span
+                              data-context-badge="true"
+                              title={contextTooltip}
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-950/90 border border-emerald-400/60 text-[10px] font-bold uppercase tracking-wider text-emerald-200 shadow-[0_0_12px_rgba(16,185,129,0.22)] shrink-0"
+                            >
+                              <MapPin className="w-2.5 h-2.5 text-emerald-400 shrink-0" />
+                              <span>Context</span>
+                            </span>
+                          )}
                         </div>
 
                         {/* View Mode Toggle Tabs & All-Language Response Translator */}
@@ -2424,7 +2658,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                           senderName: senderDisplayName,
                           timestamp: msg.timestamp,
                           caption: msg.content,
-                          locationName: msg.location?.name,
+                          locationName: msg.location?.name || activeConversationGeotagLocation?.name,
                         })
                       }
                       aria-label="View attached image in full screen"
@@ -2436,6 +2670,24 @@ export const ChatView: React.FC<ChatViewProps> = ({
                         alt="Uploaded query"
                         className="w-full h-full max-h-72 object-cover group-hover:scale-[1.02] transition-transform duration-200"
                       />
+                      {(msg.location || isGeotaggedConversation) && (
+                        <span
+                          title={
+                            (msg.location?.name || activeConversationGeotagLocation?.name)
+                              ? `Image in active geotagged conversation: ${msg.location?.name || activeConversationGeotagLocation?.name}`
+                              : 'Image is part of an active geotagged conversation'
+                          }
+                          className="absolute top-2 left-2 inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-emerald-950/85 backdrop-blur-sm border border-emerald-400/55 text-[10px] font-bold uppercase tracking-wider text-emerald-200 shadow-md"
+                        >
+                          <MapPin className="w-3 h-3 text-emerald-400 shrink-0" />
+                          <span>Context</span>
+                          {(msg.location?.name || activeConversationGeotagLocation?.name) && (
+                            <span className="font-medium normal-case tracking-normal text-emerald-100/90 truncate max-w-[130px]">
+                              · {msg.location?.name || activeConversationGeotagLocation?.name}
+                            </span>
+                          )}
+                        </span>
+                      )}
                       <span className="absolute bottom-2 right-2 inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-black/70 backdrop-blur-sm border border-white/20 text-[10px] font-semibold text-white opacity-85 group-hover:opacity-100 transition-opacity">
                         <Maximize2 className="w-3 h-3 text-purple-300" />
                         <span>Expand</span>
@@ -2885,20 +3137,22 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   {msg.isOffline && <span className="text-amber-300/80">• Local</span>}
                 </div>
 
-                {/* INTERACTIVE 'SMART REPLY' BUTTONS ON MESSAGE */}
-                {!isUser && msg.suggestedQuestions && msg.suggestedQuestions.length > 0 && (
+                {/* INTERACTIVE CONTEXT-AWARE SUGGESTED REPLY CHIPS */}
+                {!isUser && !msg.isError && msg.suggestedQuestions && msg.suggestedQuestions.length > 0 && (
                   <div className="space-y-1.5 pt-1 w-full max-w-[92%] sm:max-w-[85%] pl-10 sm:pl-12">
                     <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-purple-400 pl-1">
                       <Sparkles className="w-3 h-3 text-purple-400" />
-                      <span>Smart Replies (1-Tap Follow-up)</span>
+                      <span>Suggested Replies</span>
                     </div>
 
                     <div className="flex flex-wrap gap-2">
                       {msg.suggestedQuestions.map((q, idx) => (
                         <button
                           key={idx}
+                          type="button"
+                          disabled={isLoading}
                           onClick={() => handleSend(q)}
-                          className="smart-reply-chip text-xs text-purple-200 px-3.5 py-1.5 rounded-xl flex items-center gap-1.5 group cursor-pointer"
+                          className="smart-reply-chip text-xs text-purple-200 px-3.5 py-1.5 rounded-xl flex items-center gap-1.5 group cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                         >
                           <span className="w-1.5 h-1.5 rounded-full bg-purple-400 group-hover:scale-125 transition-transform" />
                           <span>{q}</span>
@@ -2914,7 +3168,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
           {/* AI Response Loading Indicator */}
           {isLoading && (
-            <div className="flex items-start gap-2.5 sm:gap-3 max-w-4xl mx-auto w-full">
+            <div className="flex items-start gap-2.5 sm:gap-3 max-w-3xl mx-auto w-full">
               <div
                 className="w-8 h-8 sm:w-9 sm:h-9 rounded-full purple-glow-btn border border-purple-400/50 flex items-center justify-center shrink-0 shadow-lg mt-0.5"
                 aria-hidden="true"
@@ -2924,7 +3178,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
               <div className="glass-card rounded-2xl rounded-tl-xs p-4 border border-purple-500/30 flex items-center gap-3">
                 <div className="w-4 h-4 border-2 border-purple-400 border-t-transparent rounded-full animate-spin" />
                 <span className="text-xs text-purple-300 font-medium animate-pulse">
-                  Aadesh AI is translating and synthesizing response...
+                  Aadesh AI is thinking...
                 </span>
               </div>
             </div>
@@ -2932,7 +3186,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
           {/* Live Voice Interim Speech Bubble */}
           {isRecording && voiceInterimTranscript && (
-            <div className="flex justify-end max-w-4xl mx-auto w-full">
+            <div className="flex justify-end max-w-3xl mx-auto w-full">
               <div className="glass-card rounded-2xl rounded-tr-xs p-3.5 border border-purple-500/50 text-xs text-purple-200 italic flex items-center gap-2">
                 <Mic className="w-3.5 h-3.5 text-purple-400 animate-pulse" />
                 <span>"{voiceInterimTranscript}"</span>
@@ -3063,38 +3317,27 @@ export const ChatView: React.FC<ChatViewProps> = ({
           </div>
         )}
 
-        {/* CUSTOM FLOATING GLOWING CHAT COMPOSER */}
-        <div className="absolute bottom-20 lg:bottom-4 left-0 right-0 px-3 sm:px-6 z-20 pointer-events-none">
-          <div className="max-w-4xl mx-auto pointer-events-auto space-y-2">
-            {/* Quick Context & Smart Reply strip above the input bar */}
-            <div className="flex items-center justify-between gap-2 overflow-x-auto pb-1 scrollbar-none">
-              <div className="flex items-center gap-1.5 shrink-0">
-                <span className="text-[10px] uppercase font-bold text-gray-400 flex items-center gap-1 pl-1">
-                  <Sparkles className="w-3 h-3 text-purple-400" />
-                  <span>Quick Prompts:</span>
-                </span>
-                {activeSmartReplies.slice(0, 3).map((reply, idx) => (
-                  <button
-                    key={idx}
-                    onClick={() => handleSend(reply)}
-                    className="text-[11px] bg-[#131520]/90 hover:bg-purple-900/40 text-purple-300 border border-purple-500/30 px-2.5 py-1 rounded-full whitespace-nowrap transition-all flex items-center gap-1 shadow-sm cursor-pointer"
-                  >
-                    <span>{reply}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-
+        {/* CLEAN BOTTOM-ANCHORED CHATGPT-STYLE FLOATING COMPOSER */}
+        <div
+          className={`shrink-0 z-20 w-full px-2.5 sm:px-6 pt-2 bg-gradient-to-t from-[#090a0f]/95 via-[#090a0f]/75 to-transparent transition-[padding] duration-150 ${
+            isKeyboardOpen
+              ? 'pb-[max(0.5rem,env(safe-area-inset-bottom))]'
+              : 'pb-[calc(4.5rem+env(safe-area-inset-bottom))] lg:pb-4'
+          }`}
+        >
+          <div className="max-w-3xl mx-auto w-full space-y-2">
             {/* Attached context chip (photo, file, or geotag) */}
             {(selectedImage || selectedFile || attachedLocation) && (
-              <div className="glass-card rounded-xl p-2 px-3 flex flex-wrap items-center justify-between gap-2 border border-purple-500/40 text-xs shadow-md">
-                <div className="flex flex-wrap items-center gap-3">
+              <div className="glass-card rounded-2xl p-2 px-3 flex flex-wrap items-center justify-between gap-2 border border-purple-500/40 text-xs shadow-md">
+                <div className="flex flex-wrap items-center gap-2.5 min-w-0">
                   {selectedImage && (
-                    <div className="relative w-10 h-10 rounded-lg overflow-hidden border border-purple-500/50">
+                    <div className="relative w-11 h-11 rounded-xl overflow-hidden border border-purple-500/50 shrink-0">
                       <img src={selectedImage.base64} alt="Attached" className="w-full h-full object-cover" />
                       <button
+                        type="button"
                         onClick={() => setSelectedImage(null)}
                         className="absolute top-0 right-0 bg-red-600/90 text-white text-[9px] w-4 h-4 flex items-center justify-center rounded-bl-sm cursor-pointer"
+                        aria-label="Remove attached image"
                       >
                         ✕
                       </button>
@@ -3102,12 +3345,14 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   )}
 
                   {selectedFile && (
-                    <div className="flex items-center gap-1.5 bg-purple-950/60 border border-purple-500/40 px-2.5 py-1 rounded-lg text-purple-200 font-medium">
-                      <Paperclip className="w-3.5 h-3.5 text-purple-400" />
-                      <span className="max-w-[160px] truncate font-mono">{selectedFile.name}</span>
+                    <div className="flex items-center gap-1.5 bg-purple-950/60 border border-purple-500/40 px-2.5 py-1 rounded-lg text-purple-200 font-medium max-w-full">
+                      <Paperclip className="w-3.5 h-3.5 text-purple-400 shrink-0" />
+                      <span className="max-w-[150px] truncate font-mono">{selectedFile.name}</span>
                       <button
+                        type="button"
                         onClick={() => setSelectedFile(null)}
                         className="text-gray-400 hover:text-white text-xs ml-1 cursor-pointer"
+                        aria-label="Remove attached file"
                       >
                         ✕
                       </button>
@@ -3115,12 +3360,14 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   )}
 
                   {attachedLocation && (
-                    <div className="flex items-center gap-1.5 text-purple-300 font-semibold">
-                      <MapPin className="w-3.5 h-3.5 text-purple-400" />
-                      <span>{attachedLocation.name}</span>
+                    <div className="flex items-center gap-1.5 text-purple-300 font-semibold min-w-0">
+                      <MapPin className="w-3.5 h-3.5 text-purple-400 shrink-0" />
+                      <span className="truncate max-w-[150px]">{attachedLocation.name}</span>
                       <button
+                        type="button"
                         onClick={() => setAttachedLocation(undefined)}
                         className="text-gray-400 hover:text-white text-xs ml-1 cursor-pointer"
+                        aria-label="Remove geotag"
                       >
                         ✕
                       </button>
@@ -3128,17 +3375,16 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   )}
                 </div>
 
-                <span className="text-[10px] text-gray-400">Attached to message</span>
+                <span className="text-[10px] text-gray-400 shrink-0">Attached</span>
               </div>
             )}
 
-            {/* Main Glowing Interactive Composer Container */}
+            {/* Main ChatGPT-Style Floating Rounded Composer */}
             <div className="glow-input-container">
-              <div className="glow-input-inner p-2 sm:p-2.5 flex items-end gap-1.5 sm:gap-2">
+              <div className="glow-input-inner px-3 sm:px-4 pt-2.5 pb-2 flex flex-col gap-1.5">
                 {isRecording ? (
                   /* VISUAL AUDIO-WAVE ANIMATION & STOP BUTTON OVERLAY */
-                  <div className="flex-1 flex items-center justify-between gap-2 sm:gap-3 px-2 py-0.5 animate-in fade-in zoom-in-95 duration-150">
-                    {/* Left: Pulsing Red Recording Indicator & Timer */}
+                  <div className="flex items-center justify-between gap-2 sm:gap-3 py-1 animate-in fade-in zoom-in-95 duration-150">
                     <div className="flex items-center gap-2 shrink-0">
                       <span className="w-3 h-3 rounded-full bg-red-500 recording-pulse shrink-0" />
                       <div className="flex flex-col">
@@ -3149,12 +3395,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
                           </span>
                         </span>
                         <span className="text-[10px] text-purple-300/80 font-medium max-w-[120px] sm:max-w-xs truncate">
-                          {voiceInterimTranscript ? `"${voiceInterimTranscript}"` : 'Speak now hands-free...'}
+                          {voiceInterimTranscript ? `"${voiceInterimTranscript}"` : 'Speak now...'}
                         </span>
                       </div>
                     </div>
 
-                    {/* Center: Dynamic Audio Waveform Bars */}
                     <div className="flex-1 flex items-center justify-center gap-1 sm:gap-1.5 h-8 px-2 overflow-hidden">
                       {[35, 75, 45, 90, 60, 100, 70, 85, 40, 95, 65, 80, 50, 90, 40, 70, 55, 30].map((h, i) => (
                         <span
@@ -3169,22 +3414,22 @@ export const ChatView: React.FC<ChatViewProps> = ({
                       ))}
                     </div>
 
-                    {/* Right: Cancel & Stop Button Overlay */}
                     <div className="flex items-center gap-1.5 shrink-0">
                       <button
+                        type="button"
                         onClick={() => {
                           voiceAssistant.stopListening();
                           setIsRecording(false);
                           setVoiceInterimTranscript('');
                         }}
-                        className="p-2 rounded-xl bg-gray-800/80 hover:bg-gray-700 text-gray-400 hover:text-white text-xs cursor-pointer transition-colors"
+                        className="p-2 min-w-[38px] min-h-[38px] rounded-xl bg-gray-800/80 hover:bg-gray-700 text-gray-400 hover:text-white text-xs cursor-pointer transition-colors"
                         title="Cancel recording"
                       >
                         ✕
                       </button>
 
-                      {/* Prominent Stop & Submit Button */}
                       <button
+                        type="button"
                         onClick={() => {
                           voiceAssistant.stopListening();
                           setIsRecording(false);
@@ -3193,7 +3438,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                             handleSend(finalSpeech, true);
                           }
                         }}
-                        className="bg-gradient-to-r from-red-600 via-rose-600 to-red-500 hover:from-red-500 hover:to-rose-400 text-white font-bold py-2 px-3.5 rounded-xl text-xs flex items-center gap-1.5 shadow-lg shadow-red-600/40 cursor-pointer transition-transform hover:scale-105 active:scale-95"
+                        className="bg-gradient-to-r from-red-600 via-rose-600 to-red-500 hover:from-red-500 hover:to-rose-400 text-white font-bold py-2 px-3.5 min-h-[38px] rounded-xl text-xs flex items-center gap-1.5 shadow-lg shadow-red-600/40 cursor-pointer transition-transform hover:scale-105 active:scale-95"
                         title="Stop recording and send message"
                       >
                         <Square className="w-3.5 h-3.5 fill-white text-white" />
@@ -3202,65 +3447,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
                     </div>
                   </div>
                 ) : (
-                  /* Standard Multiline Composer Layout */
                   <>
-                    {/* Photo Upload Button */}
-                    <input
-                      type="file"
-                      ref={fileInputRef}
-                      onChange={handlePhotoSelect}
-                      accept="image/*"
-                      className="hidden"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => fileInputRef.current?.click()}
-                      className={`p-2 sm:p-2.5 rounded-xl transition-all border cursor-pointer shrink-0 ${
-                        selectedImage
-                          ? 'bg-purple-900/70 text-purple-200 border-purple-400 shadow-sm'
-                          : 'bg-[#181a29]/80 text-gray-400 border-white/5 hover:text-purple-300 hover:border-purple-500/40'
-                      }`}
-                      title="Upload Photo for Vision & Translation"
-                    >
-                      <ImageIcon className="w-4 h-4" />
-                    </button>
-
-                    {/* Document / Code File Attachment Button */}
-                    <input
-                      type="file"
-                      ref={docFileInputRef}
-                      onChange={handleDocumentSelect}
-                      accept=".txt,.md,.json,.csv,.js,.ts,.tsx,.py,.html,.css,.xml,.yaml,.yml,.log"
-                      className="hidden"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => docFileInputRef.current?.click()}
-                      className={`p-2 sm:p-2.5 rounded-xl transition-all border cursor-pointer shrink-0 ${
-                        selectedFile
-                          ? 'bg-purple-900/70 text-purple-200 border-purple-400 shadow-sm'
-                          : 'bg-[#181a29]/80 text-gray-400 border-white/5 hover:text-purple-300 hover:border-purple-500/40'
-                      }`}
-                      title="Attach text, markdown, CSV, or code file"
-                    >
-                      <Paperclip className="w-4 h-4" />
-                    </button>
-
-                    {/* Geotag Location Pin Button */}
-                    <button
-                      type="button"
-                      onClick={() => setShowGeotagModal(true)}
-                      className={`hidden xs:flex p-2 sm:p-2.5 rounded-xl transition-all border cursor-pointer shrink-0 ${
-                        attachedLocation
-                          ? 'bg-purple-900/70 text-purple-200 border-purple-400 shadow-sm'
-                          : 'bg-[#181a29]/80 text-gray-400 border-white/5 hover:text-purple-300 hover:border-purple-500/40'
-                      }`}
-                      title="Attach Geotag Location"
-                    >
-                      <MapPin className="w-4 h-4" />
-                    </button>
-
-                    {/* Multiline Auto-Expanding Textarea */}
+                    {/* Full-Width Multiline Auto-Expanding Textarea */}
                     <textarea
                       ref={textareaRef}
                       rows={1}
@@ -3273,48 +3461,105 @@ export const ChatView: React.FC<ChatViewProps> = ({
                           handleSend();
                         }
                       }}
-                      placeholder={t.inputPlaceholder || 'Message Aadesh AI in any language (Shift+Enter for new line)...'}
-                      className="flex-1 bg-transparent text-gray-100 placeholder-gray-500 text-xs sm:text-sm px-2 py-2 outline-none font-medium resize-none max-h-40 overflow-y-auto leading-relaxed"
+                      placeholder={t.inputPlaceholder || 'Message Aadesh AI...'}
+                      aria-label="Message Aadesh AI"
+                      className="w-full bg-transparent text-gray-100 placeholder-gray-400 text-sm sm:text-[15px] py-1 px-0.5 outline-none font-medium resize-none min-h-[36px] max-h-40 overflow-y-auto leading-relaxed"
                     />
 
-                    {/* Hands-Free Voice Mic Button */}
-                    <button
-                      type="button"
-                      onClick={toggleVoiceRecording}
-                      className="p-2 sm:p-2.5 rounded-xl transition-all relative cursor-pointer bg-[#181a29]/80 text-purple-400 border border-purple-500/25 hover:border-purple-500 hover:bg-purple-900/20 shrink-0"
-                      title="Voice Input (Tap to speak)"
-                    >
-                      <Mic className="w-4 h-4" />
-                    </button>
+                    {/* Bottom Action Toolbar inside Composer */}
+                    <div className="flex items-center justify-between gap-2 pt-0.5">
+                      {/* Left: File Attachment, Image Upload, Geotag */}
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="file"
+                          ref={docFileInputRef}
+                          onChange={handleDocumentSelect}
+                          accept=".txt,.md,.json,.csv,.js,.ts,.tsx,.py,.html,.css,.xml,.yaml,.yml,.log"
+                          className="hidden"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => docFileInputRef.current?.click()}
+                          className={`min-w-[38px] min-h-[38px] p-2 rounded-xl transition-all border cursor-pointer flex items-center justify-center ${
+                            selectedFile
+                              ? 'bg-purple-900/70 text-purple-200 border-purple-400 shadow-sm'
+                              : 'bg-[#181a29]/80 text-gray-300 border-white/10 hover:text-purple-300 hover:border-purple-500/40'
+                          }`}
+                          title="Attach document or code file"
+                          aria-label="Attach file"
+                        >
+                          <Paperclip className="w-4 h-4" />
+                        </button>
 
-                    {/* Send Button (disabled when empty or generating) */}
-                    <button
-                      type="button"
-                      onClick={() => handleSend()}
-                      disabled={isLoading || (!inputText.trim() && !selectedImage && !selectedFile)}
-                      className="purple-glow-btn text-white font-semibold py-2 px-3.5 sm:py-2.5 sm:px-4 rounded-xl flex items-center justify-center gap-1.5 text-xs sm:text-sm disabled:opacity-40 disabled:cursor-not-allowed transition-all cursor-pointer shrink-0"
-                    >
-                      {isLoading ? (
-                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                      ) : (
-                        <>
-                          <span className="hidden sm:inline">Send</span>
-                          <Send className="w-3.5 h-3.5" />
-                        </>
-                      )}
-                    </button>
+                        <input
+                          type="file"
+                          ref={fileInputRef}
+                          onChange={handlePhotoSelect}
+                          accept="image/*"
+                          className="hidden"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => fileInputRef.current?.click()}
+                          className={`min-w-[38px] min-h-[38px] p-2 rounded-xl transition-all border cursor-pointer flex items-center justify-center ${
+                            selectedImage
+                              ? 'bg-purple-900/70 text-purple-200 border-purple-400 shadow-sm'
+                              : 'bg-[#181a29]/80 text-gray-300 border-white/10 hover:text-purple-300 hover:border-purple-500/40'
+                          }`}
+                          title="Upload image"
+                          aria-label="Upload image"
+                        >
+                          <ImageIcon className="w-4 h-4" />
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => setShowGeotagModal(true)}
+                          className={`min-w-[38px] min-h-[38px] p-2 rounded-xl transition-all border cursor-pointer flex items-center justify-center ${
+                            attachedLocation
+                              ? 'bg-purple-900/70 text-purple-200 border-purple-400 shadow-sm'
+                              : 'bg-[#181a29]/80 text-gray-300 border-white/10 hover:text-purple-300 hover:border-purple-500/40'
+                          }`}
+                          title="Attach Geotag Location"
+                          aria-label="Attach location"
+                        >
+                          <MapPin className="w-4 h-4" />
+                        </button>
+                      </div>
+
+                      {/* Right: Microphone & Send */}
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={toggleVoiceRecording}
+                          className="min-w-[38px] min-h-[38px] p-2 rounded-xl transition-all cursor-pointer bg-[#181a29]/80 text-purple-300 border border-purple-500/30 hover:border-purple-400 hover:bg-purple-900/30 flex items-center justify-center"
+                          title="Voice Input (Tap to speak)"
+                          aria-label="Voice input"
+                        >
+                          <Mic className="w-4 h-4" />
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => handleSend()}
+                          disabled={isLoading || (!inputText.trim() && !selectedImage && !selectedFile)}
+                          aria-label="Send message"
+                          className="purple-glow-btn text-white font-semibold min-w-[40px] min-h-[40px] px-3 sm:px-4 rounded-full sm:rounded-2xl flex items-center justify-center gap-1.5 text-xs sm:text-sm disabled:opacity-40 disabled:cursor-not-allowed transition-all cursor-pointer shrink-0"
+                        >
+                          {isLoading ? (
+                            <RefreshCw className="w-4 h-4 animate-spin" />
+                          ) : (
+                            <>
+                              <span className="hidden sm:inline">Send</span>
+                              <Send className="w-4 h-4" />
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    </div>
                   </>
                 )}
               </div>
-            </div>
-
-            {/* Creator Attribution Footer Tagline */}
-            <div className="text-center text-[11px] text-gray-400 flex items-center justify-center gap-1.5 pt-0.5">
-              <span>⚡ Aadesh AI Global Hub</span>
-              <span>•</span>
-              <span className="text-purple-300 font-semibold">Created by Aadesh Jaisi</span>
-              <span className="hidden sm:inline">•</span>
-              <span className="hidden sm:inline text-emerald-400 font-medium">Enter to send · Shift+Enter new line</span>
             </div>
           </div>
         </div>

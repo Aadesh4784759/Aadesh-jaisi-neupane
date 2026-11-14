@@ -3,6 +3,7 @@ import {
   MessageSquareText,
   Radio,
   Languages,
+  ImagePlus,
   MapPin,
   History,
   BarChart3,
@@ -10,6 +11,7 @@ import {
   UserCircle2,
   ShieldCheck,
   Smartphone,
+  Clock,
 } from 'lucide-react';
 import { UI_TRANSLATIONS } from '../data/languages';
 
@@ -18,6 +20,7 @@ interface NavigationDockProps {
   onSelectTab: (tab: string) => void;
   uiLanguage: string;
   isOwnerAdmin?: boolean;
+  isKeyboardOpen?: boolean;
   onOpenInstall?: () => void;
 }
 
@@ -26,16 +29,18 @@ export const NavigationDock: React.FC<NavigationDockProps> = ({
   onSelectTab,
   uiLanguage,
   isOwnerAdmin = false,
+  isKeyboardOpen = false,
   onOpenInstall,
 }) => {
   const t = UI_TRANSLATIONS[uiLanguage] || UI_TRANSLATIONS.en;
 
-  // 8 Core Navigation Items (+ Owner-only Admin item when verified)
   const navItems = [
     { id: 'chat', label: t.chatTab || 'Chat', icon: MessageSquareText },
+    { id: 'images', label: t.imagesTab || 'Images', icon: ImagePlus },
     { id: 'voice', label: t.voiceTab || 'Voice', icon: Radio },
     { id: 'interpret', label: t.interpreterTab || 'Translate', icon: Languages },
     { id: 'gallery', label: t.galleryTab || 'Gallery', icon: MapPin },
+    { id: 'worldTime', label: t.worldTimeTab || 'World Time', icon: Clock },
     { id: 'voiceHistory', label: t.historyTab || 'History', icon: History },
     { id: 'analytics', label: t.analyticsTab || 'Analytics', icon: BarChart3 },
     { id: 'settings', label: t.settingsTab || 'Settings', icon: Settings2 },
@@ -51,7 +56,7 @@ export const NavigationDock: React.FC<NavigationDockProps> = ({
       {/* DESKTOP / CHROMEBOOK TOP NAVIGATION BAR */}
       <nav
         aria-label="Primary Desktop Navigation"
-        className="hidden lg:flex sticky top-[61px] z-30 w-full glass-nav border-b border-white/10 px-6 py-2 items-center justify-between"
+        className="hidden lg:flex sticky top-[61px] z-30 w-full glass-nav border-b border-white/10 px-6 py-2 items-center justify-between shrink-0"
       >
         <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-none">
           {navItems.map((item) => {
@@ -88,9 +93,6 @@ export const NavigationDock: React.FC<NavigationDockProps> = ({
         </div>
 
         <div className="flex items-center gap-3 shrink-0">
-          <span className="text-[11px] text-gray-400 hidden xl:inline">
-            Created by <strong className="text-purple-300">Aadesh Jaisi</strong>
-          </span>
           {onOpenInstall && (
             <button
               onClick={onOpenInstall}
@@ -104,38 +106,40 @@ export const NavigationDock: React.FC<NavigationDockProps> = ({
         </div>
       </nav>
 
-      {/* MOBILE / TABLET FLOATING BOTTOM DOCK */}
-      <nav
-        aria-label="Mobile Bottom Navigation"
-        className="lg:hidden fixed bottom-3 left-1/2 -translate-x-1/2 z-50 glass-nav rounded-2xl px-1.5 sm:px-2.5 py-1.5 border border-purple-500/35 shadow-2xl flex items-center gap-0.5 sm:gap-1 max-w-[96vw] overflow-x-auto scrollbar-none"
-      >
-        {navItems.map((item) => {
-          const Icon = item.icon;
-          const isActive = activeTab === item.id;
-          const isAdminItem = item.id === 'admin';
-          return (
-            <button
-              key={item.id}
-              onClick={() => onSelectTab(item.id)}
-              title={item.label}
-              className={`px-2.5 sm:px-3 py-1.5 rounded-xl text-[11px] font-semibold flex items-center gap-1.5 transition-all duration-200 cursor-pointer shrink-0 ${
-                isActive
-                  ? isAdminItem
-                    ? 'bg-amber-950/70 text-amber-200 border border-amber-500/50 shadow-md'
-                    : 'bg-purple-900/45 text-purple-200 border border-purple-500/50 shadow-md'
-                  : 'text-gray-400 hover:text-white hover:bg-white/5 border border-transparent'
-              }`}
-            >
-              <Icon
-                className={`w-4 h-4 ${
-                  isActive ? (isAdminItem ? 'text-amber-400' : 'text-purple-400') : 'text-gray-400'
+      {/* MOBILE / TABLET FLOATING BOTTOM DOCK (auto-hides while virtual keyboard is open) */}
+      {!isKeyboardOpen && (
+        <nav
+          aria-label="Mobile Bottom Navigation"
+          className="lg:hidden fixed bottom-[max(0.5rem,env(safe-area-inset-bottom))] left-1/2 -translate-x-1/2 z-40 glass-nav rounded-2xl px-1.5 sm:px-2.5 py-1.5 border border-purple-500/35 shadow-2xl flex items-center gap-0.5 sm:gap-1 max-w-[96vw] overflow-x-auto scrollbar-none"
+        >
+          {navItems.map((item) => {
+            const Icon = item.icon;
+            const isActive = activeTab === item.id;
+            const isAdminItem = item.id === 'admin';
+            return (
+              <button
+                key={item.id}
+                onClick={() => onSelectTab(item.id)}
+                title={item.label}
+                className={`px-2.5 sm:px-3 py-2 min-h-[38px] rounded-xl text-[11px] font-semibold flex items-center gap-1.5 transition-all duration-200 cursor-pointer shrink-0 ${
+                  isActive
+                    ? isAdminItem
+                      ? 'bg-amber-950/70 text-amber-200 border border-amber-500/50 shadow-md'
+                      : 'bg-purple-900/45 text-purple-200 border border-purple-500/50 shadow-md'
+                    : 'text-gray-400 hover:text-white hover:bg-white/5 border border-transparent'
                 }`}
-              />
-              <span className={isActive ? 'inline' : 'hidden sm:inline'}>{item.label}</span>
-            </button>
-          );
-        })}
-      </nav>
+              >
+                <Icon
+                  className={`w-4 h-4 ${
+                    isActive ? (isAdminItem ? 'text-amber-400' : 'text-purple-400') : 'text-gray-400'
+                  }`}
+                />
+                <span className={isActive ? 'inline' : 'hidden sm:inline'}>{item.label}</span>
+              </button>
+            );
+          })}
+        </nav>
+      )}
     </>
   );
 };

@@ -42,9 +42,16 @@ export const ImageLightbox: React.FC<ImageLightboxProps> = ({ image, onClose }) 
   if (!image) return null;
 
   const handleDownload = () => {
+    const ext = image.url.startsWith('data:image/svg+xml')
+      ? 'svg'
+      : image.url.startsWith('data:image/jpeg')
+      ? 'jpg'
+      : image.url.startsWith('data:image/webp')
+      ? 'webp'
+      : 'png';
     const link = document.createElement('a');
     link.href = image.url;
-    link.download = `aadesh-ai-image-${image.timestamp || Date.now()}.png`;
+    link.download = `aadesh-ai-image-${image.timestamp || Date.now()}.${ext}`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);

@@ -24,9 +24,16 @@ import {
   Edit3,
   Download,
   Smartphone,
+  Clock,
+  Globe2,
 } from 'lucide-react';
 import { AIConnectionState, AppSettings, UserProfile } from '../types';
 import { SUPPORTED_LANGUAGES, UI_TRANSLATIONS } from '../data/languages';
+import {
+  ALL_COUNTRY_CLOCKS,
+  DEFAULT_PINNED_COUNTRY_CODES,
+  formatCountryTime,
+} from '../data/worldClocks';
 import { computeLevelInfo } from '../utils/gamification';
 import { GamificationWidget } from './GamificationWidget';
 import { generateThemeTokensFromColor } from '../utils/avatarTheme';
@@ -73,16 +80,27 @@ export const Header: React.FC<HeaderProps> = ({
   const [langDropdownOpen, setLangDropdownOpen] = useState(false);
   const [accessMenuOpen, setAccessMenuOpen] = useState(false);
   const [profileDropdownOpen, setProfileDropdownOpen] = useState(false);
+  const [clockDropdownOpen, setClockDropdownOpen] = useState(false);
+  const [now, setNow] = useState<Date>(() => new Date());
 
   const profileRef = useRef<HTMLDivElement>(null);
   const langRef = useRef<HTMLDivElement>(null);
   const accessRef = useRef<HTMLDivElement>(null);
+  const clockRef = useRef<HTMLDivElement>(null);
 
   const t = UI_TRANSLATIONS[settings.uiLanguage] || UI_TRANSLATIONS.en;
   const currentLang =
     SUPPORTED_LANGUAGES.find((l) => l.code === settings.uiLanguage) || SUPPORTED_LANGUAGES[0];
 
   const levelInfo = computeLevelInfo(user.xp || 0);
+
+  // Live 1-second tick for real-time local & world clocks
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setNow(new Date());
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   // Close dropdowns when clicking outside
   useEffect(() => {
@@ -96,30 +114,33 @@ export const Header: React.FC<HeaderProps> = ({
       if (accessRef.current && !accessRef.current.contains(event.target as Node)) {
         setAccessMenuOpen(false);
       }
+      if (clockRef.current && !clockRef.current.contains(event.target as Node)) {
+        setClockDropdownOpen(false);
+      }
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
   return (
-    <header className="sticky top-0 z-40 w-full glass-nav px-3 sm:px-6 py-2.5 flex items-center justify-between border-b border-white/10 shadow-lg">
+    <header className="sticky top-0 z-40 w-full safe-top glass-nav px-2.5 sm:px-6 py-2 sm:py-2.5 flex items-center justify-between gap-2 border-b border-white/10 shadow-lg max-w-full">
       {/* BRAND LOGO & LIVE AI STATUS */}
-      <div className="flex items-center space-x-3">
+      <div className="flex items-center space-x-2 sm:space-x-3 min-w-0 shrink">
         <div
           onClick={() => onSelectTab('chat')}
-          className="w-10 h-10 rounded-xl purple-glow-btn flex items-center justify-center text-white font-bold text-xl shadow-md transition-transform hover:scale-105 cursor-pointer shrink-0"
+          className="w-8 h-8 sm:w-10 sm:h-10 rounded-xl purple-glow-btn flex items-center justify-center text-white font-bold text-lg sm:text-xl shadow-md transition-transform hover:scale-105 cursor-pointer shrink-0"
         >
-          <Sparkles className="w-5 h-5 text-white animate-pulse" />
+          <Sparkles className="w-4 h-4 sm:w-5 sm:h-5 text-white animate-pulse" />
         </div>
-        <div>
+        <div className="min-w-0">
           <div
             onClick={() => onSelectTab('chat')}
             className="cursor-pointer flex items-center gap-1.5"
           >
-            <span className="text-base sm:text-lg font-black tracking-tight text-white flex items-center gap-1">
+            <span className="text-sm sm:text-lg font-black tracking-tight text-white flex items-center gap-1 whitespace-nowrap">
               Aadesh <span className="text-gradient">AI</span>
             </span>
-            <span className="text-xs font-semibold text-purple-300 hidden md:inline">
+            <span className="text-xs font-semibold text-purple-300 hidden md:inline whitespace-nowrap">
               Global Hub
             </span>
           </div>
@@ -135,7 +156,7 @@ export const Header: React.FC<HeaderProps> = ({
                   ? 'Verifying AI API Service...'
                   : 'AI Service Disconnected. Click to reconnect or configure API Key.'
               }
-              className={`text-[10px] font-bold px-2 py-0.5 rounded-full border flex items-center gap-1.5 transition-all cursor-pointer ${
+              className={`text-[10px] font-bold px-1.5 sm:px-2 py-0.5 rounded-full border flex items-center gap-1 sm:gap-1.5 transition-all cursor-pointer whitespace-nowrap ${
                 aiStatus === 'connected'
                   ? 'bg-emerald-950/80 text-emerald-300 border-emerald-500/40 hover:bg-emerald-900/60 shadow-[0_0_10px_rgba(16,185,129,0.25)]'
                   : aiStatus === 'connecting'
@@ -144,7 +165,7 @@ export const Header: React.FC<HeaderProps> = ({
               }`}
             >
               <span
-                className={`w-2 h-2 rounded-full ${
+                className={`w-1.5 h-1.5 sm:w-2 sm:h-2 rounded-full shrink-0 ${
                   aiStatus === 'connected'
                     ? 'bg-emerald-400 animate-pulse'
                     : aiStatus === 'connecting'
@@ -163,7 +184,7 @@ export const Header: React.FC<HeaderProps> = ({
 
             {/* Offline indicator if forced offline */}
             {!isOnline && (
-              <span className="text-[10px] font-semibold text-amber-300 bg-amber-950/70 border border-amber-500/30 px-1.5 py-0.2 rounded-full">
+              <span className="hidden sm:inline text-[10px] font-semibold text-amber-300 bg-amber-950/70 border border-amber-500/30 px-1.5 py-0.2 rounded-full">
                 Offline Cache
               </span>
             )}
@@ -172,7 +193,7 @@ export const Header: React.FC<HeaderProps> = ({
       </div>
 
       {/* CENTER SEARCH BAR */}
-      <div className="hidden md:flex items-center relative w-1/3 max-w-md">
+      <div className="hidden md:flex items-center relative w-1/3 max-w-md min-w-0">
         <Search className="absolute left-3.5 w-4 h-4 text-gray-400" />
         <input
           type="text"
@@ -191,10 +212,89 @@ export const Header: React.FC<HeaderProps> = ({
         )}
       </div>
 
-      {/* RIGHT CONTROLS: STREAK/XP PILL + USER IDENTITY WITH ORANGE HIGHLIGHT + UTILITIES */}
-      <div className="flex items-center space-x-2 sm:space-x-3">
+      {/* RIGHT CONTROLS: LIVE WORLD CLOCK + STREAK/XP PILL + USER IDENTITY WITH ORANGE HIGHLIGHT + UTILITIES */}
+      <div className="flex items-center gap-1.5 sm:gap-2.5 shrink-0">
+        {/* LIVE REAL-TIME WORLD CLOCK TICKER */}
+        <div className="relative" ref={clockRef}>
+          <button
+            type="button"
+            onClick={() => {
+              setClockDropdownOpen((prev) => !prev);
+              setProfileDropdownOpen(false);
+              setLangDropdownOpen(false);
+              setAccessMenuOpen(false);
+            }}
+            className={`flex items-center justify-center p-2 rounded-xl border text-xs transition-all cursor-pointer min-h-[38px] min-w-[38px] ${
+              activeTab === 'worldTime' || clockDropdownOpen
+                ? 'bg-purple-900/50 border-purple-400/70 text-white'
+                : 'bg-[#131520] hover:bg-purple-900/30 border-[#232738] hover:border-purple-500/40 text-purple-200'
+            }`}
+            title="Live Real-Time World Clock (All Countries)"
+            aria-label="Open live world clock across all countries"
+          >
+            <Clock className="w-4 h-4 text-emerald-400 shrink-0" />
+          </button>
+
+          {clockDropdownOpen && (
+            <div className="absolute right-0 mt-2 w-72 max-w-[calc(100vw-1rem)] glass-card rounded-2xl p-3 border border-purple-500/45 shadow-2xl z-50 animate-in fade-in zoom-in-95 duration-150 space-y-2.5">
+              <div className="flex items-center justify-between border-b border-white/10 pb-2">
+                <span className="text-xs font-bold text-white flex items-center gap-1.5">
+                  <Globe2 className="w-4 h-4 text-purple-400" />
+                  <span>Live World Clocks</span>
+                </span>
+                <span className="text-[10px] font-bold text-emerald-300 flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                  <span>Real-Time</span>
+                </span>
+              </div>
+
+              <div className="space-y-1.5 max-h-64 overflow-y-auto pr-0.5">
+                {DEFAULT_PINNED_COUNTRY_CODES.map((code) => {
+                  const entry = ALL_COUNTRY_CLOCKS.find((c) => c.code === code);
+                  if (!entry) return null;
+                  const formatted = formatCountryTime(now, entry.timeZone, false);
+                  return (
+                    <div
+                      key={entry.code}
+                      className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-xl bg-[#090a0f]/85 border border-white/5 text-xs"
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="text-base leading-none">{entry.flag}</span>
+                        <div className="min-w-0">
+                          <div className="font-semibold text-white truncate">{entry.country}</div>
+                          <div className="text-[10px] text-gray-400 truncate">
+                            {entry.city} · {formatted.utcOffsetLabel}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="text-right shrink-0">
+                        <div className="font-mono tabular-nums font-bold text-purple-200">
+                          {formatted.timeString}
+                        </div>
+                        <div className="text-[9px] text-gray-400">{formatted.relativeDayLabel}</div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setClockDropdownOpen(false);
+                  onSelectTab('worldTime');
+                }}
+                className="purple-glow-btn w-full py-2 px-3 rounded-xl text-xs font-bold text-white flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                <Globe2 className="w-3.5 h-3.5" />
+                <span>View All {ALL_COUNTRY_CLOCKS.length} Countries →</span>
+              </button>
+            </div>
+          )}
+        </div>
+
         {/* GAMIFICATION STREAK, XP & DAILY GOALS WIDGET */}
-        <GamificationWidget user={user} onClick={onOpenGamification} />
+        <GamificationWidget user={user} onClick={onOpenGamification} className="hidden md:flex" />
 
         {/* USER PROFILE & IDENTITY WITH ORANGE HIGHLIGHTED IDENTITY LINE */}
         <div className="relative" ref={profileRef}>
@@ -204,12 +304,12 @@ export const Header: React.FC<HeaderProps> = ({
               setLangDropdownOpen(false);
               setAccessMenuOpen(false);
             }}
-            className="flex items-center space-x-2.5 bg-[#131520] hover:bg-[#1a172c] border border-amber-500/80 hover:border-amber-400 py-1 px-2 sm:px-3 rounded-xl shadow-[0_0_15px_rgba(245,158,11,0.28)] hover:shadow-[0_0_22px_rgba(245,158,11,0.45)] transition-all cursor-pointer group"
+            className="flex items-center gap-1.5 sm:gap-2.5 bg-[#131520] hover:bg-[#1a172c] border border-amber-500/80 hover:border-amber-400 py-1 px-1.5 sm:px-3 rounded-xl shadow-[0_0_12px_rgba(245,158,11,0.25)] hover:shadow-[0_0_20px_rgba(245,158,11,0.45)] transition-all cursor-pointer group min-h-[38px]"
             title="User Profile, Identity & Account Settings"
           >
             {/* User Avatar */}
             <div
-              className="relative w-7 h-7 sm:w-8 sm:h-8 rounded-full p-[2px] shrink-0 transition-all duration-300"
+              className="relative w-6 h-6 sm:w-8 sm:h-8 rounded-full p-[2px] shrink-0 transition-all duration-300"
               style={{
                 background: `linear-gradient(135deg, ${avatarTokens.primaryHex}, ${avatarTokens.secondaryHex}, ${avatarTokens.lightHex})`,
                 boxShadow: `0 0 10px rgba(${avatarTokens.primaryRgb}, 0.45)`,
@@ -223,7 +323,7 @@ export const Header: React.FC<HeaderProps> = ({
                 />
               ) : (
                 <div
-                  className="w-full h-full rounded-full flex items-center justify-center text-white text-xs font-black"
+                  className="w-full h-full rounded-full flex items-center justify-center text-white text-[10px] sm:text-xs font-black"
                   style={{
                     background: `linear-gradient(135deg, ${avatarTokens.deepHex}, #131520)`,
                   }}
@@ -232,28 +332,28 @@ export const Header: React.FC<HeaderProps> = ({
                 </div>
               )}
               <span
-                className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-[#131520] shadow-sm animate-pulse"
+                className="absolute -bottom-0.5 -right-0.5 w-2 h-2 sm:w-2.5 sm:h-2.5 rounded-full border-2 border-[#131520] shadow-sm animate-pulse"
                 style={{ backgroundColor: avatarTokens.lightHex }}
               />
             </div>
 
             {/* User Name & Handle */}
-            <div className="flex flex-col text-left">
-              <span className="text-[11px] sm:text-xs font-black text-white leading-tight group-hover:text-amber-200 transition-colors truncate max-w-[100px] sm:max-w-[130px]">
+            <div className="flex flex-col text-left min-w-0">
+              <span className="text-[11px] sm:text-xs font-black text-white leading-tight group-hover:text-amber-200 transition-colors truncate max-w-[68px] xs:max-w-[90px] sm:max-w-[130px]">
                 {user.name}
               </span>
-              <div className="text-[9px] font-extrabold text-amber-300 flex items-center gap-1 leading-none mt-0.5 bg-gradient-to-r from-amber-500/25 via-amber-500/15 to-transparent px-1.5 py-0.5 rounded border border-amber-400/50 shadow-[0_0_6px_rgba(245,158,11,0.3)]">
+              <div className="hidden xs:flex text-[9px] font-extrabold text-amber-300 items-center gap-1 leading-none mt-0.5 bg-gradient-to-r from-amber-500/25 via-amber-500/15 to-transparent px-1.5 py-0.5 rounded border border-amber-400/50 shadow-[0_0_6px_rgba(245,158,11,0.3)] max-w-[96px] sm:max-w-[130px]">
                 <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0 animate-ping" />
                 <span className="tracking-wider uppercase truncate">@{user.username || 'guest'}</span>
               </div>
             </div>
 
-            <ChevronDown className="w-3.5 h-3.5 text-amber-400 group-hover:text-amber-300 ml-0.5" />
+            <ChevronDown className="w-3 h-3 sm:w-3.5 sm:h-3.5 text-amber-400 group-hover:text-amber-300 shrink-0" />
           </button>
 
           {/* USER PROFILE DROPDOWN */}
           {profileDropdownOpen && (
-            <div className="absolute right-0 mt-2 w-72 glass-card rounded-2xl p-3 border border-purple-500/40 shadow-2xl z-50 animate-in fade-in zoom-in-95 duration-150 space-y-3">
+            <div className="absolute right-0 mt-2 w-72 max-w-[calc(100vw-1rem)] glass-card rounded-2xl p-3 border border-purple-500/40 shadow-2xl z-50 animate-in fade-in zoom-in-95 duration-150 space-y-3">
               {/* Profile Card Header */}
               <div className="flex items-center gap-3 p-2 rounded-xl bg-[#090a0f] border border-amber-500/30">
                 <div
@@ -281,8 +381,8 @@ export const Header: React.FC<HeaderProps> = ({
                 </div>
                 <div className="min-w-0 flex-1">
                   <h4 className="text-xs font-bold text-white truncate flex items-center gap-1.5">
-                    <span>{user.name}</span>
-                    <span className="text-[9px] px-1.5 py-0.2 rounded bg-amber-950 text-amber-300 border border-amber-500/40 font-semibold uppercase">
+                    <span className="truncate">{user.name}</span>
+                    <span className="text-[9px] px-1.5 py-0.2 rounded bg-amber-950 text-amber-300 border border-amber-500/40 font-semibold uppercase shrink-0">
                       {isOwnerAdmin ? 'Owner' : user.isLoggedIn ? 'Member' : 'Guest'}
                     </span>
                   </h4>
@@ -383,7 +483,7 @@ export const Header: React.FC<HeaderProps> = ({
                       setProfileDropdownOpen(false);
                       onOpenInstall();
                     }}
-                    className="w-full text-left px-3 py-2 rounded-xl text-gray-200 hover:text-white hover:bg-emerald-950/30 border border-transparent hover:border-emerald-500/30 flex items-center gap-2.5 transition-colors cursor-pointer text-emerald-300"
+                    className="w-full text-left px-3 py-2 rounded-xl hover:text-white hover:bg-emerald-950/30 border border-transparent hover:border-emerald-500/30 flex items-center gap-2.5 transition-colors cursor-pointer text-emerald-300"
                   >
                     <Smartphone className="w-4 h-4 text-emerald-400" />
                     <span>Install App (Android & iOS)</span>
@@ -429,16 +529,16 @@ export const Header: React.FC<HeaderProps> = ({
               setProfileDropdownOpen(false);
               setAccessMenuOpen(false);
             }}
-            className="flex items-center gap-1.5 bg-[#131520] hover:bg-purple-900/30 border border-[#232738] hover:border-purple-500/50 px-2.5 py-1.5 rounded-xl text-xs font-medium text-gray-200 transition-all cursor-pointer"
+            className="flex items-center gap-1 sm:gap-1.5 bg-[#131520] hover:bg-purple-900/30 border border-[#232738] hover:border-purple-500/50 px-2 sm:px-2.5 py-2 rounded-xl text-xs font-medium text-gray-200 transition-all cursor-pointer min-h-[38px]"
             title="Change Interface Language"
           >
             <span className="text-sm">{currentLang.flag}</span>
             <span className="hidden sm:inline font-medium">{currentLang.name}</span>
-            <Globe className="w-3.5 h-3.5 text-purple-400 ml-0.5" />
+            <Globe className="w-3.5 h-3.5 text-purple-400" />
           </button>
 
           {langDropdownOpen && (
-            <div className="absolute right-0 mt-2 w-52 max-h-72 overflow-y-auto glass-card rounded-2xl p-2 border border-purple-500/40 shadow-2xl z-50 animate-in fade-in zoom-in-95 duration-150">
+            <div className="absolute right-0 mt-2 w-52 max-w-[calc(100vw-1rem)] max-h-72 overflow-y-auto glass-card rounded-2xl p-2 border border-purple-500/40 shadow-2xl z-50 animate-in fade-in zoom-in-95 duration-150">
               <div className="text-[11px] font-semibold text-gray-400 px-2 py-1 uppercase tracking-wider">
                 Select UI Language
               </div>
@@ -470,10 +570,10 @@ export const Header: React.FC<HeaderProps> = ({
           )}
         </div>
 
-        {/* HANDS-FREE VOICE TOGGLE */}
+        {/* HANDS-FREE VOICE TOGGLE (Tablet/Desktop inline, also inside Sliders menu on mobile) */}
         <button
           onClick={() => onUpdateSettings({ handsFreeMode: !settings.handsFreeMode })}
-          className={`p-2 rounded-xl text-xs flex items-center gap-1.5 transition-all border cursor-pointer ${
+          className={`hidden sm:flex p-2 rounded-xl text-xs items-center gap-1.5 transition-all border cursor-pointer min-h-[38px] ${
             settings.handsFreeMode
               ? 'bg-purple-600 text-white border-purple-400 shadow-md shadow-purple-600/40 animate-pulse'
               : 'bg-[#131520] text-gray-400 border-[#232738] hover:text-white'
@@ -488,12 +588,12 @@ export const Header: React.FC<HeaderProps> = ({
           <span className="hidden xl:inline text-xs font-medium">Hands-Free</span>
         </button>
 
-        {/* AUTO-SPEECH READOUT TOGGLE */}
+        {/* AUTO-SPEECH READOUT TOGGLE (Tablet/Desktop inline) */}
         <button
           onClick={() =>
             onUpdateSettings({ autoSpeakAIResponses: !settings.autoSpeakAIResponses })
           }
-          className={`p-2 rounded-xl text-xs transition-all border cursor-pointer ${
+          className={`hidden sm:flex items-center justify-center p-2 rounded-xl text-xs transition-all border cursor-pointer min-h-[38px] ${
             settings.autoSpeakAIResponses
               ? 'bg-indigo-600/30 text-indigo-300 border-indigo-500/50'
               : 'bg-[#131520] text-gray-400 border-[#232738] hover:text-white'
@@ -511,7 +611,7 @@ export const Header: React.FC<HeaderProps> = ({
           )}
         </button>
 
-        {/* MODERN DARK / LIGHT THEME SWITCHER */}
+        {/* MODERN DARK / LIGHT THEME SWITCHER (Tablet/Desktop inline) */}
         <button
           onClick={() => {
             const nextTheme = settings.theme === 'light' ? 'dark' : 'light';
@@ -522,7 +622,7 @@ export const Header: React.FC<HeaderProps> = ({
               document.body.classList.remove('light-theme');
             }
           }}
-          className="p-2 rounded-xl bg-[#131520] hover:bg-purple-900/30 border border-[#232738] hover:border-purple-500/50 text-gray-300 hover:text-white transition-all cursor-pointer"
+          className="hidden sm:flex items-center justify-center p-2 rounded-xl bg-[#131520] hover:bg-purple-900/30 border border-[#232738] hover:border-purple-500/50 text-gray-300 hover:text-white transition-all cursor-pointer min-h-[38px]"
           title={
             settings.theme === 'light'
               ? 'Switch to Dark Theme'
@@ -537,7 +637,7 @@ export const Header: React.FC<HeaderProps> = ({
           )}
         </button>
 
-        {/* ACCESSIBILITY & DISPLAY CONTROLS */}
+        {/* ACCESSIBILITY & DISPLAY CONTROLS (Always visible; includes voice & theme toggles on mobile) */}
         <div className="relative" ref={accessRef}>
           <button
             onClick={() => {
@@ -545,17 +645,17 @@ export const Header: React.FC<HeaderProps> = ({
               setLangDropdownOpen(false);
               setProfileDropdownOpen(false);
             }}
-            className="p-2 rounded-xl bg-[#131520] border border-[#232738] text-gray-300 hover:text-purple-300 hover:border-purple-500/50 transition-all cursor-pointer"
-            title="Accessibility & Display"
-            aria-label="Accessibility settings"
+            className="p-2 rounded-xl bg-[#131520] border border-[#232738] text-gray-300 hover:text-purple-300 hover:border-purple-500/50 transition-all cursor-pointer min-h-[38px] min-w-[38px] flex items-center justify-center"
+            title="Accessibility, Audio & Display"
+            aria-label="Accessibility and quick settings"
           >
             <Sliders className="w-4 h-4" />
           </button>
 
           {accessMenuOpen && (
-            <div className="absolute right-0 mt-2 w-64 glass-card rounded-2xl p-4 border border-purple-500/40 shadow-2xl z-50 space-y-3 animate-in fade-in zoom-in-95 duration-150">
+            <div className="absolute right-0 mt-2 w-64 max-w-[calc(100vw-1rem)] glass-card rounded-2xl p-4 border border-purple-500/40 shadow-2xl z-50 space-y-3 animate-in fade-in zoom-in-95 duration-150">
               <div className="text-xs font-bold text-white border-b border-white/10 pb-2 flex items-center justify-between">
-                <span>Accessibility & Display</span>
+                <span>Display & Quick Controls</span>
                 <button
                   onClick={() => {
                     setAccessMenuOpen(false);
@@ -564,6 +664,62 @@ export const Header: React.FC<HeaderProps> = ({
                   className="text-[10px] text-purple-400 hover:underline cursor-pointer"
                 >
                   All Settings
+                </button>
+              </div>
+
+              {/* Mobile-accessible Voice & Theme quick switches */}
+              <div className="sm:hidden grid grid-cols-3 gap-1.5 pb-2 border-b border-white/10">
+                <button
+                  type="button"
+                  onClick={() => onUpdateSettings({ handsFreeMode: !settings.handsFreeMode })}
+                  className={`py-2 px-1.5 rounded-xl border text-[11px] font-semibold flex flex-col items-center gap-1 cursor-pointer ${
+                    settings.handsFreeMode
+                      ? 'bg-purple-600/50 border-purple-400 text-white'
+                      : 'bg-[#090a0f] border-[#232738] text-gray-300'
+                  }`}
+                >
+                  <Mic className="w-3.5 h-3.5" />
+                  <span>Hands-Free</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() =>
+                    onUpdateSettings({ autoSpeakAIResponses: !settings.autoSpeakAIResponses })
+                  }
+                  className={`py-2 px-1.5 rounded-xl border text-[11px] font-semibold flex flex-col items-center gap-1 cursor-pointer ${
+                    settings.autoSpeakAIResponses
+                      ? 'bg-indigo-600/40 border-indigo-400 text-white'
+                      : 'bg-[#090a0f] border-[#232738] text-gray-300'
+                  }`}
+                >
+                  {settings.autoSpeakAIResponses ? (
+                    <Volume2 className="w-3.5 h-3.5" />
+                  ) : (
+                    <VolumeX className="w-3.5 h-3.5" />
+                  )}
+                  <span>Readout</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    const nextTheme = settings.theme === 'light' ? 'dark' : 'light';
+                    onUpdateSettings({ theme: nextTheme });
+                    if (nextTheme === 'light') {
+                      document.body.classList.add('light-theme');
+                    } else {
+                      document.body.classList.remove('light-theme');
+                    }
+                  }}
+                  className="py-2 px-1.5 rounded-xl border bg-[#090a0f] border-[#232738] text-gray-300 text-[11px] font-semibold flex flex-col items-center gap-1 cursor-pointer"
+                >
+                  {settings.theme === 'light' ? (
+                    <Moon className="w-3.5 h-3.5 text-purple-400" />
+                  ) : (
+                    <Sun className="w-3.5 h-3.5 text-amber-400" />
+                  )}
+                  <span>{settings.theme === 'light' ? 'Dark' : 'Light'}</span>
                 </button>
               </div>
 
