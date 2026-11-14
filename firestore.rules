@@ -1,0 +1,349 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Verified Platform Owner / Admin check
+    function isAdmin() {
+      return isSignedIn() && (
+        (request.auth.token.email == 'aadeshjaisi6@gmail.com'
+          && request.auth.token.email_verified == true)
+        || exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function isValidId(id) {
+      return id is string
+        && id.size() > 0
+        && id.size() <= 128
+        && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidUserDoc(data, userId) {
+      return data.keys().hasAll(['userId', 'displayName', 'createdAt'])
+        && data.keys().hasOnly([
+          'userId', 'displayName', 'username', 'email', 'photoURL',
+          'preferredLanguage', 'status', 'role', 'provider',
+          'messageCount', 'conversationCount', 'createdAt', 'updatedAt', 'lastActiveAt'
+        ])
+        && data.userId == userId
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 100
+        && data.createdAt is string && data.createdAt.size() <= 50
+        && (!('username' in data) || (data.username is string && data.username.size() <= 64))
+        && (!('email' in data) || (data.email is string && data.email.size() <= 160))
+        && (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 1000))
+        && (!('preferredLanguage' in data) || (data.preferredLanguage is string && data.preferredLanguage.size() <= 20))
+        && (!('status' in data) || data.status in ['active', 'suspended'])
+        && (!('role' in data) || data.role in ['user', 'admin'])
+        && (!('provider' in data) || (data.provider is string && data.provider.size() <= 32))
+        && (!('messageCount' in data) || data.messageCount is number)
+        && (!('conversationCount' in data) || data.conversationCount is number)
+        && (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 50))
+        && (!('lastActiveAt' in data) || (data.lastActiveAt is string && data.lastActiveAt.size() <= 50));
+    }
+
+    function isValidConversationDoc(data, userId, conversationId) {
+      return data.keys().hasAll(['id', 'userId', 'title'])
+        && data.keys().hasOnly([
+          'id', 'userId', 'title', 'language', 'category', 'messageCount', 'createdAt', 'updatedAt'
+        ])
+        && data.id == conversationId
+        && data.userId == userId
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 200
+        && (!('language' in data) || (data.language is string && data.language.size() <= 20))
+        && (!('category' in data) || (data.category is string && data.category.size() <= 48))
+        && (!('messageCount' in data) || data.messageCount is number)
+        && (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 50))
+        && (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 50));
+    }
+
+    function isValidMessageDoc(data, userId, conversationId, messageId) {
+      return data.keys().hasAll(['id', 'userId', 'conversationId', 'role', 'content'])
+        && data.keys().hasOnly([
+          'id', 'userId', 'conversationId', 'role', 'content',
+          'senderName', 'senderAvatarUrl',
+          'translation', 'translationLanguage', 'feedback',
+          'reactions', 'userReactions', 'isPinned', 'pinnedAt',
+          'attachmentName', 'imageUrl', 'isVoice', 'timestamp', 'editedAt'
+        ])
+        && data.id == messageId
+        && data.userId == userId
+        && data.conversationId == conversationId
+        && data.role in ['user', 'model', 'participant', 'system']
+        && data.content is string && data.content.size() <= 50000
+        && (!('senderName' in data) || (data.senderName is string && data.senderName.size() <= 100))
+        && (!('senderAvatarUrl' in data) || (data.senderAvatarUrl is string && data.senderAvatarUrl.size() <= 1000))
+        && (!('translation' in data) || (data.translation is string && data.translation.size() <= 50000))
+        && (!('translationLanguage' in data) || (data.translationLanguage is string && data.translationLanguage.size() <= 20))
+        && (!('feedback' in data) || data.feedback in ['up', 'down'])
+        && (!('reactions' in data) || (
+          data.reactions is map
+          && data.reactions.keys().hasOnly(['👍', '❤️', '😂', '😮', '🔥', '👏'])
+          && (!('👍' in data.reactions) || (data.reactions['👍'] is int && data.reactions['👍'] >= 0 && data.reactions['👍'] <= 999))
+          && (!('❤️' in data.reactions) || (data.reactions['❤️'] is int && data.reactions['❤️'] >= 0 && data.reactions['❤️'] <= 999))
+          && (!('😂' in data.reactions) || (data.reactions['😂'] is int && data.reactions['😂'] >= 0 && data.reactions['😂'] <= 999))
+          && (!('😮' in data.reactions) || (data.reactions['😮'] is int && data.reactions['😮'] >= 0 && data.reactions['😮'] <= 999))
+          && (!('🔥' in data.reactions) || (data.reactions['🔥'] is int && data.reactions['🔥'] >= 0 && data.reactions['🔥'] <= 999))
+          && (!('👏' in data.reactions) || (data.reactions['👏'] is int && data.reactions['👏'] >= 0 && data.reactions['👏'] <= 999))
+        ))
+        && (!('userReactions' in data) || (
+          data.userReactions is list
+          && data.userReactions.size() <= 6
+          && data.userReactions.hasOnly(['👍', '❤️', '😂', '😮', '🔥', '👏'])
+        ))
+        && (!('isPinned' in data) || data.isPinned is bool)
+        && (!('pinnedAt' in data) || (data.pinnedAt is string && data.pinnedAt.size() <= 50))
+        && (!('attachmentName' in data) || (data.attachmentName is string && data.attachmentName.size() <= 256))
+        && (!('imageUrl' in data) || (data.imageUrl is string && data.imageUrl.size() <= 1000))
+        && (!('isVoice' in data) || data.isVoice is bool)
+        && (!('timestamp' in data) || (data.timestamp is string && data.timestamp.size() <= 50))
+        && (!('editedAt' in data) || (data.editedAt is string && data.editedAt.size() <= 50));
+    }
+
+    function isValidMemoryDoc(data, userId, memoryId) {
+      return data.keys().hasAll(['id', 'userId', 'category', 'content', 'approved', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'userId', 'category', 'content', 'approved', 'createdAt', 'updatedAt'])
+        && data.id == memoryId
+        && data.userId == userId
+        && data.category in ['preference', 'instruction', 'fact', 'goal']
+        && data.content is string && data.content.size() >= 1 && data.content.size() <= 2000
+        && data.approved is bool
+        && data.createdAt is string && data.createdAt.size() <= 50
+        && data.updatedAt is string && data.updatedAt.size() <= 50;
+    }
+
+    function isValidTaskDoc(data, userId, taskId) {
+      return data.keys().hasAll(['id', 'userId', 'title', 'priority', 'category', 'completed', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'id', 'userId', 'title', 'notes', 'dueDate', 'dueTime',
+          'priority', 'category', 'completed', 'reminderMinutes', 'createdAt', 'updatedAt'
+        ])
+        && data.id == taskId
+        && data.userId == userId
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 240
+        && data.priority in ['low', 'medium', 'high']
+        && data.category is string && data.category.size() <= 48
+        && data.completed is bool
+        && data.createdAt is string && data.createdAt.size() <= 50
+        && data.updatedAt is string && data.updatedAt.size() <= 50
+        && (!('notes' in data) || (data.notes is string && data.notes.size() <= 2000))
+        && (!('dueDate' in data) || (data.dueDate is string && data.dueDate.size() <= 20))
+        && (!('dueTime' in data) || (data.dueTime is string && data.dueTime.size() <= 20))
+        && (!('reminderMinutes' in data) || data.reminderMinutes is number);
+    }
+
+    function isValidStudyProgressDoc(data, userId, progressId) {
+      return data.keys().hasAll(['id', 'userId', 'topic', 'mode', 'score', 'totalQuestions', 'completedAt'])
+        && data.keys().hasOnly(['id', 'userId', 'topic', 'mode', 'score', 'totalQuestions', 'language', 'completedAt'])
+        && data.id == progressId
+        && data.userId == userId
+        && data.topic is string && data.topic.size() >= 1 && data.topic.size() <= 200
+        && data.mode is string && data.mode.size() <= 40
+        && data.score is number && data.score >= 0
+        && data.totalQuestions is number && data.totalQuestions >= 0
+        && (!('language' in data) || (data.language is string && data.language.size() <= 20))
+        && data.completedAt is string && data.completedAt.size() <= 50;
+    }
+
+    function isValidVoiceDoc(data, userId, voiceId) {
+      return data.keys().hasAll(['id', 'userId', 'transcript', 'timestamp'])
+        && data.keys().hasOnly(['id', 'userId', 'transcript', 'language', 'durationSeconds', 'timestamp'])
+        && data.id == voiceId
+        && data.userId == userId
+        && data.transcript is string && data.transcript.size() <= 10000
+        && (!('language' in data) || (data.language is string && data.language.size() <= 20))
+        && (!('durationSeconds' in data) || data.durationSeconds is number)
+        && data.timestamp is string && data.timestamp.size() <= 50;
+    }
+
+    function isValidAnalyticsDoc(data, eventId) {
+      return data.keys().hasAll(['id', 'userId', 'eventType', 'dateKey', 'timestamp'])
+        && data.keys().hasOnly(['id', 'userId', 'eventType', 'language', 'latencyMs', 'dateKey', 'timestamp'])
+        && data.id == eventId
+        && data.userId == request.auth.uid
+        && data.eventType is string && data.eventType.size() <= 40
+        && data.dateKey is string && data.dateKey.size() <= 20
+        && data.timestamp is string && data.timestamp.size() <= 50
+        && (!('language' in data) || (data.language is string && data.language.size() <= 20))
+        && (!('latencyMs' in data) || data.latencyMs is number);
+    }
+
+    // User Profiles & Private Account Data
+    match /users/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin();
+
+      // Prevent self-assigning admin/suspended privileges on creation
+      allow create: if isValidId(userId)
+        && isOwner(userId)
+        && isValidUserDoc(incoming(), userId)
+        && (!('role' in incoming()) || incoming().role == 'user' || isAdmin())
+        && (!('status' in incoming()) || incoming().status == 'active' || isAdmin());
+
+      // Owners can update their own profile fields without escalating role or status;
+      // Verified Admin can update any user's status/role.
+      allow update: if isValidId(userId)
+        && isValidUserDoc(incoming(), userId)
+        && incoming().createdAt == existing().createdAt
+        && (
+          isAdmin()
+          || (
+            isOwner(userId)
+            && (!('role' in incoming()) || incoming().role == existing().get('role', 'user'))
+            && (!('status' in incoming()) || incoming().status == existing().get('status', 'active'))
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'displayName', 'username', 'email', 'photoURL',
+              'preferredLanguage', 'provider', 'messageCount',
+              'conversationCount', 'updatedAt', 'lastActiveAt'
+            ])
+          )
+        );
+
+      allow delete: if isValidId(userId) && (isOwner(userId) || isAdmin());
+
+      // User Conversations Subcollection
+      match /conversations/{conversationId} {
+        allow get: if isValidId(userId) && isValidId(conversationId) && (isOwner(userId) || isAdmin());
+        allow list: if isOwner(userId) || isAdmin();
+        allow create: if isValidId(userId) && isValidId(conversationId)
+          && isOwner(userId)
+          && isValidConversationDoc(incoming(), userId, conversationId);
+        allow update: if isValidId(userId) && isValidId(conversationId)
+          && isOwner(userId)
+          && isValidConversationDoc(incoming(), userId, conversationId)
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'title', 'language', 'category', 'messageCount', 'updatedAt'
+          ]);
+        allow delete: if isValidId(userId) && isValidId(conversationId) && (isOwner(userId) || isAdmin());
+
+        // Messages Subcollection
+        match /messages/{messageId} {
+          allow get: if isValidId(userId) && isValidId(conversationId) && isValidId(messageId)
+            && (isOwner(userId) || isAdmin());
+          allow list: if isOwner(userId) || isAdmin();
+          allow create: if isValidId(userId) && isValidId(conversationId) && isValidId(messageId)
+            && isOwner(userId)
+            && isValidMessageDoc(incoming(), userId, conversationId, messageId);
+          allow update: if isValidId(userId) && isValidId(conversationId) && isValidId(messageId)
+            && isOwner(userId)
+            && isValidMessageDoc(incoming(), userId, conversationId, messageId)
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'content', 'editedAt', 'translation', 'translationLanguage', 'feedback', 'reactions', 'userReactions', 'isPinned', 'pinnedAt'
+            ]);
+          allow delete: if isValidId(userId) && isValidId(conversationId) && isValidId(messageId)
+            && (isOwner(userId) || isAdmin());
+        }
+      }
+
+      // Voice-to-Text Input History Subcollection
+      match /voiceHistory/{voiceId} {
+        allow get: if isValidId(userId) && isValidId(voiceId) && (isOwner(userId) || isAdmin());
+        allow list: if isOwner(userId) || isAdmin();
+        allow create: if isValidId(userId) && isValidId(voiceId)
+          && isOwner(userId)
+          && isValidVoiceDoc(incoming(), userId, voiceId);
+        allow update: if isValidId(userId) && isValidId(voiceId)
+          && isOwner(userId)
+          && isValidVoiceDoc(incoming(), userId, voiceId)
+          && incoming().diff(existing()).affectedKeys().hasOnly(['transcript', 'language']);
+        allow delete: if isValidId(userId) && isValidId(voiceId) && (isOwner(userId) || isAdmin());
+      }
+
+      // User-Approved AI Memory Subcollection
+      match /memories/{memoryId} {
+        allow get: if isValidId(userId) && isValidId(memoryId) && (isOwner(userId) || isAdmin());
+        allow list: if isOwner(userId) || isAdmin();
+        allow create: if isValidId(userId) && isValidId(memoryId)
+          && isOwner(userId)
+          && isValidMemoryDoc(incoming(), userId, memoryId);
+        allow update: if isValidId(userId) && isValidId(memoryId)
+          && isOwner(userId)
+          && isValidMemoryDoc(incoming(), userId, memoryId)
+          && incoming().diff(existing()).affectedKeys().hasOnly(['category', 'content', 'approved', 'updatedAt']);
+        allow delete: if isValidId(userId) && isValidId(memoryId) && (isOwner(userId) || isAdmin());
+      }
+
+      // Personal Assistant Tasks & Reminders Subcollection
+      match /tasks/{taskId} {
+        allow get: if isValidId(userId) && isValidId(taskId) && (isOwner(userId) || isAdmin());
+        allow list: if isOwner(userId) || isAdmin();
+        allow create: if isValidId(userId) && isValidId(taskId)
+          && isOwner(userId)
+          && isValidTaskDoc(incoming(), userId, taskId);
+        allow update: if isValidId(userId) && isValidId(taskId)
+          && isOwner(userId)
+          && isValidTaskDoc(incoming(), userId, taskId)
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'title', 'notes', 'dueDate', 'dueTime', 'priority', 'category', 'completed', 'reminderMinutes', 'updatedAt'
+          ]);
+        allow delete: if isValidId(userId) && isValidId(taskId) && (isOwner(userId) || isAdmin());
+      }
+
+      // Study Hub Learning Progress Subcollection
+      match /studyProgress/{progressId} {
+        allow get: if isValidId(userId) && isValidId(progressId) && (isOwner(userId) || isAdmin());
+        allow list: if isOwner(userId) || isAdmin();
+        allow create: if isValidId(userId) && isValidId(progressId)
+          && isOwner(userId)
+          && isValidStudyProgressDoc(incoming(), userId, progressId);
+        allow update: if isValidId(userId) && isValidId(progressId)
+          && isOwner(userId)
+          && isValidStudyProgressDoc(incoming(), userId, progressId)
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'topic', 'mode', 'score', 'totalQuestions', 'language', 'completedAt'
+          ]);
+        allow delete: if isValidId(userId) && isValidId(progressId) && (isOwner(userId) || isAdmin());
+      }
+    }
+
+    // Usage Analytics: authenticated users write their own events; only owner/admin can read/list all
+    match /usage_analytics/{eventId} {
+      allow get, list: if isAdmin();
+      allow create: if isValidId(eventId)
+        && isSignedIn()
+        && isValidAnalyticsDoc(incoming(), eventId);
+      allow delete: if isValidId(eventId) && isAdmin();
+    }
+
+    // Admin Platform Settings: public read of announcement, owner-only write
+    match /admin_settings/{docId} {
+      allow get: if isValidId(docId);
+      allow list: if isAdmin();
+      allow create, update, delete: if isValidId(docId)
+        && isAdmin()
+        && incoming().keys().hasAll(['platformName', 'updatedAt'])
+        && incoming().keys().hasOnly(['platformName', 'maintenanceMode', 'announcement', 'updatedAt'])
+        && incoming().platformName is string && incoming().platformName.size() <= 120
+        && (!('maintenanceMode' in incoming()) || incoming().maintenanceMode is bool)
+        && (!('announcement' in incoming()) || (incoming().announcement is string && incoming().announcement.size() <= 500))
+        && incoming().updatedAt is string && incoming().updatedAt.size() <= 50;
+    }
+
+    // Explicit Admin UID lookup registry (read-only for owner)
+    match /admins/{adminUid} {
+      allow get: if isSignedIn() && request.auth.uid == adminUid;
+      allow write: if false;
+    }
+  }
+}

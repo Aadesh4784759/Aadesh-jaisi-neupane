@@ -1,49 +1,123 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import confetti from 'canvas-confetti';
-import { AppSettings, ChatMessage, ChatSession, EngagementMetrics, GeotaggedMedia, LocationData } from './types';
+import {
+  AIConnectionState,
+  AppSettings,
+  ChatMessage,
+  ChatSession,
+  EngagementMetrics,
+  GeotaggedMedia,
+  LocationData,
+  UserProfile,
+  VoiceHistoryEntry,
+} from './types';
 import {
   DEFAULT_SETTINGS,
+  DEFAULT_USER,
+  OWNER_ADMIN_EMAIL,
   getStoredMedia,
   getStoredMetrics,
   getStoredSessions,
+  getStoredFolders,
   getStoredSettings,
-  recordMetricEvent,
+  getStoredUser,
+  getStoredVoiceHistory,
   saveStoredMedia,
   saveStoredMetrics,
   saveStoredSessions,
+  saveStoredFolders,
   saveStoredSettings,
+  saveStoredUser,
+  saveStoredVoiceHistory,
+  addVoiceHistoryEntry,
+  recordMetricEvent,
 } from './utils/storage';
 import { SUPPORTED_LANGUAGES, VOICE_PERSONAS } from './data/languages';
 import { Header } from './components/Header';
 import { NavigationDock } from './components/NavigationDock';
 import { ChatView } from './components/ChatView';
+import { ActiveVoiceView } from './components/ActiveVoiceView';
 import { InterpreterView } from './components/InterpreterView';
 import { GeotagGalleryView } from './components/GeotagGalleryView';
 import { AnalyticsDashboard } from './components/AnalyticsDashboard';
+import { VoiceHistoryView } from './components/VoiceHistoryView';
+import { ProfileView } from './components/ProfileView';
+import { AdminDashboardView } from './components/AdminDashboardView';
 import { SettingsModal } from './components/SettingsModal';
+import { AuthModal } from './components/AuthModal';
+import { GamificationModal } from './components/GamificationModal';
+import { InstallAppModal } from './components/InstallAppModal';
+import { recordGamificationActivity } from './utils/gamification';
 import { voiceAssistant } from './utils/speech';
+import { applyAvatarDynamicTheme } from './utils/avatarTheme';
+import {
+  subscribeToAuth,
+  syncUserProfileToFirestore,
+  loadUserProfileFromFirestore,
+  saveConversationAndMessagesToFirestore,
+  saveSingleMessageToFirestore,
+  deleteConversationFromFirestore,
+  recordUsageAnalyticsToFirestore,
+  subscribeToPlatformAnnouncement,
+  logOut,
+} from './utils/firebase';
 
 export default function App() {
   const [settings, setSettings] = useState<AppSettings>(getStoredSettings());
-  const [sessions, setSessions] = useState<ChatSession[]>(getStoredSessions());
+  const [user, setUser] = useState<UserProfile>(getStoredUser());
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
+  const [authModalMode, setAuthModalMode] = useState<'signin' | 'register' | 'profile'>('signin');
+  const [isGamificationModalOpen, setIsGamificationModalOpen] = useState<boolean>(false);
+  const [isInstallModalOpen, setIsInstallModalOpen] = useState<boolean>(false);
+  const [aiStatus, setAiStatus] = useState<AIConnectionState>('connecting');
+  const [sessions, setSessions] = useState<ChatSession[]>(() => getStoredSessions(getStoredUser().id));
+  const [sessionFolders, setSessionFolders] = useState<string[]>(() =>
+    getStoredFolders(getStoredUser().id)
+  );
   const [currentSessionId, setCurrentSessionId] = useState<string>(() => {
-    const stored = getStoredSessions();
+    const stored = getStoredSessions(getStoredUser().id);
     return stored[0]?.id || 'session-default-welcome';
   });
+  const [voiceHistory, setVoiceHistory] = useState<VoiceHistoryEntry[]>(() =>
+    getStoredVoiceHistory(getStoredUser().id)
+  );
   const [mediaItems, setMediaItems] = useState<GeotaggedMedia[]>(getStoredMedia());
   const [metrics, setMetrics] = useState<EngagementMetrics>(getStoredMetrics());
   const [activeTab, setActiveTab] = useState<string>('chat');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [platformNotice, setPlatformNotice] = useState<{
+    announcement?: string;
+    maintenanceMode?: boolean;
+  } | null>(null);
+  const isSendingRef = useRef<boolean>(false);
   const [isBrowserOnline, setIsBrowserOnline] = useState<boolean>(
     typeof navigator !== 'undefined' ? navigator.onLine : true
   );
 
-  // Computed online status considering user forced offline setting
   const isOnline = isBrowserOnline && !settings.offlineModeForce;
+  const isOwnerAdmin = Boolean(
+    user.isLoggedIn &&
+      user.email?.toLowerCase() === OWNER_ADMIN_EMAIL &&
+      user.role === 'admin'
+  );
 
-  // Listen for browser online / offline events
+  // Apply dynamic UI color theme derived from user's selected avatar color
+  useEffect(() => {
+    applyAvatarDynamicTheme(user.avatarColor, settings.dynamicAvatarTheme !== false);
+  }, [user.avatarColor, settings.dynamicAvatarTheme]);
+
+  // Sync voiceAssistant configuration whenever Read Aloud speed, pitch, or volume changes
+  useEffect(() => {
+    voiceAssistant.configure({
+      rate: settings.voiceSpeed ?? 1.0,
+      pitch: settings.voicePitch ?? 1.0,
+      volume: settings.voiceVolume ?? 1.0,
+    });
+  }, [settings.voiceSpeed, settings.voicePitch, settings.voiceVolume]);
+
+  // Listen for browser online / offline events, platform announcement, and Firebase Auth state
   useEffect(() => {
     const handleOnline = () => setIsBrowserOnline(true);
     const handleOffline = () => setIsBrowserOnline(false);
@@ -51,64 +125,168 @@ export default function App() {
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
 
-    // Initial setup of font size and high contrast classes on body
     saveStoredSettings(settings);
+    if (settings.theme === 'light') {
+      document.body.classList.add('light-theme');
+    } else {
+      document.body.classList.remove('light-theme');
+    }
+
+    const unsubNotice = subscribeToPlatformAnnouncement((data) => {
+      setPlatformNotice(data);
+    });
+
+    const unsubscribeAuth = subscribeToAuth(async (fbUser) => {
+      if (fbUser) {
+        const emailLower = (fbUser.email || '').toLowerCase();
+        const isVerifiedOwner = emailLower === OWNER_ADMIN_EMAIL && fbUser.emailVerified;
+        const cleanName =
+          fbUser.displayName || (fbUser.email ? fbUser.email.split('@')[0] : 'Member');
+        const cleanHandle = cleanName.toLowerCase().replace(/[^a-z0-9_]/g, '') || 'member';
+        const createdAtMs = fbUser.metadata.creationTime
+          ? new Date(fbUser.metadata.creationTime).getTime()
+          : Date.now();
+
+        const fsProfile = await loadUserProfileFromFirestore(fbUser.uid).catch(() => null);
+
+        setUser((prev) => {
+          const updated: UserProfile = {
+            ...prev,
+            id: fbUser.uid,
+            name: fsProfile?.name || cleanName,
+            username: fsProfile?.username || cleanHandle,
+            email: fbUser.email || prev.email || '',
+            avatarUrl: fbUser.photoURL || fsProfile?.avatarUrl || '',
+            provider: fbUser.providerData[0]?.providerId?.includes('google') ? 'google' : 'email',
+            isLoggedIn: true,
+            role: isVerifiedOwner ? 'admin' : fsProfile?.role || 'user',
+            status: fsProfile?.status || 'active',
+            createdAt: fsProfile?.createdAt || createdAtMs,
+            lastActiveAt: Date.now(),
+            preferredLanguage: fsProfile?.preferredLanguage || settings.uiLanguage || 'en',
+            linkedProviders: Array.from(
+              new Set([
+                ...prev.linkedProviders,
+                fbUser.providerData[0]?.providerId?.includes('google') ? 'google' : 'email',
+              ])
+            ),
+          };
+          saveStoredUser(updated);
+          syncUserProfileToFirestore(updated).catch(() => {});
+          return updated;
+        });
+
+        if (fsProfile?.preferredLanguage && fsProfile.preferredLanguage !== settings.uiLanguage) {
+          handleUpdateSettings({ uiLanguage: fsProfile.preferredLanguage });
+        }
+      }
+    });
 
     return () => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
+      unsubNotice();
+      if (unsubscribeAuth) unsubscribeAuth();
     };
   }, []);
 
-  // Update settings helper
-  const handleUpdateSettings = (newSettings: Partial<AppSettings>) => {
-    const updated = { ...settings, ...newSettings };
-    setSettings(updated);
-    saveStoredSettings(updated);
+  // Sync session, folders, and voice history when user account switches
+  useEffect(() => {
+    const userSessions = getStoredSessions(user.id);
+    setSessions(userSessions);
+    setSessionFolders(getStoredFolders(user.id));
+    setCurrentSessionId(userSessions[0]?.id || `session-${Date.now()}`);
+    setVoiceHistory(getStoredVoiceHistory(user.id));
+  }, [user.id]);
+
+  // Check AI Service connectivity health
+  const checkAIHealth = async () => {
+    setAiStatus('connecting');
+    try {
+      const headers: Record<string, string> = {};
+      if (settings.customGeminiApiKey) {
+        headers['x-gemini-api-key'] = settings.customGeminiApiKey;
+      }
+      const res = await fetch('/api/health', { headers });
+      if (res.ok) {
+        const data = await res.json();
+        setAiStatus(data.isLiveAI ? 'connected' : 'disconnected');
+      } else {
+        setAiStatus('disconnected');
+      }
+    } catch {
+      setAiStatus('disconnected');
+    }
   };
 
-  // Toggle force offline simulation
+  useEffect(() => {
+    checkAIHealth();
+  }, [settings.customGeminiApiKey]);
+
+  const handleUpdateSettings = (newSettings: Partial<AppSettings>) => {
+    setSettings((prev) => {
+      const updated = { ...prev, ...newSettings };
+      saveStoredSettings(updated);
+      return updated;
+    });
+  };
+
   const handleToggleForceOffline = () => {
     handleUpdateSettings({ offlineModeForce: !settings.offlineModeForce });
   };
 
-  // Current session object
   const currentSession =
-    sessions.find((s) => s.id === currentSessionId) || sessions[0] || {
+    sessions.find((s) => s.id === currentSessionId) ||
+    sessions[0] || {
       id: 'session-default-welcome',
-      title: 'Global Travel & Translation',
+      title: 'Aadesh AI Global Conversation',
       createdAt: Date.now(),
       updatedAt: Date.now(),
       targetLanguage: settings.defaultTargetLanguage,
       messages: [],
     };
 
-  // Send message in Chat View
+  // Send message in Chat or Voice view (supports photos & text/code attachments)
   const handleSendMessage = async (params: {
     text: string;
     imageData?: string;
     imageMimeType?: string;
+    attachmentName?: string;
+    attachmentContent?: string;
     location?: LocationData;
     isVoice?: boolean;
     targetLanguage: string;
-  }) => {
+  }): Promise<{ reply: string; translation?: string } | void> => {
+    if (isSendingRef.current) return;
+    isSendingRef.current = true;
+
     const userMsgId = `usr-${Date.now()}`;
+    const fallbackContent = params.imageData
+      ? 'Shared a photograph for visual analysis'
+      : params.attachmentName
+      ? `Attached file: ${params.attachmentName}`
+      : '';
+
     const userMessage: ChatMessage = {
       id: userMsgId,
       role: 'user',
-      content: params.text || (params.imageData ? 'Shared a photograph for visual analysis' : ''),
+      senderId: user.id,
+      senderName: user.name,
+      senderAvatarUrl: user.avatarUrl || undefined,
+      content: params.text || fallbackContent,
       timestamp: Date.now(),
       imageUrl: params.imageData,
+      attachmentName: params.attachmentName,
       location: params.location,
       isVoiceInput: params.isVoice,
     };
 
     const updatedMessages = [...currentSession.messages, userMessage];
 
-    // Auto-generate title if this is the first user message
     let sessionTitle = currentSession.title;
-    if (currentSession.messages.length <= 1 && params.text) {
-      sessionTitle = params.text.slice(0, 32) + (params.text.length > 32 ? '...' : '');
+    if (currentSession.messages.length <= 1 && (params.text || params.attachmentName)) {
+      const basis = params.text || params.attachmentName || 'Conversation';
+      sessionTitle = basis.slice(0, 36) + (basis.length > 36 ? '...' : '');
     }
 
     const updatedSession: ChatSession = {
@@ -120,9 +298,20 @@ export default function App() {
 
     const updatedSessions = sessions.map((s) => (s.id === currentSession.id ? updatedSession : s));
     setSessions(updatedSessions);
-    saveStoredSessions(updatedSessions);
+    saveStoredSessions(updatedSessions, user.id);
 
-    // Call AI Backend or Offline Engine
+    if (params.isVoice && params.text) {
+      const newEntry = addVoiceHistoryEntry(
+        {
+          transcript: params.text,
+          language: settings.uiLanguage,
+          durationSeconds: Math.max(2, Math.round(params.text.split(' ').length / 2.5)),
+        },
+        user.id
+      );
+      setVoiceHistory((prev) => [newEntry, ...prev]);
+    }
+
     setIsLoading(true);
     const startTime = Date.now();
 
@@ -136,36 +325,55 @@ export default function App() {
       let latencyMs = 280;
 
       if (!isOnline) {
-        // Offline heuristic engine
         latencyMs = 120;
         const targetLangObj =
           SUPPORTED_LANGUAGES.find((l) => l.code === params.targetLanguage) || SUPPORTED_LANGUAGES[0];
 
         if (params.imageData) {
-          reply = `[Offline Local Engine] I registered your photo${params.location ? ` tagged at ${params.location.name}` : ''}. Stored in your local offline gallery.`;
-          translation = `[${targetLangObj.name} Offline] Imagen registrada y guardada localmente.`;
+          reply = `[Offline Local Engine] Registered your photo${
+            params.location ? ` tagged at ${params.location.name}` : ''
+          }.`;
+          translation = `[${targetLangObj.name} Offline] Photo registered locally.`;
         } else {
-          reply = `[Offline Mode] Your inquiry "${params.text}" has been logged. Using local phrasebook & cached regional translation engine for ${targetLangObj.name}.`;
-          translation = `[${targetLangObj.name} Translation] Mensaje procesado sin conexión.`;
+          reply = `[Offline Mode] Recorded: "${params.text || params.attachmentName}". Reconnect for live Gemini reasoning.`;
+          translation = `[${targetLangObj.name} Translation] Offline mode active.`;
         }
         sentiment = 'neutral';
-        suggestedQuestions = ['Browse offline phrasebook', 'Check emergency phrases'];
+        suggestedQuestions = [
+          'नेपालीमा अनुवाद गर्नुहोस् (Translate to Nepali)',
+          'Explain step by step in English',
+        ];
       } else {
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (settings.customGeminiApiKey) {
+          headers['x-gemini-api-key'] = settings.customGeminiApiKey;
+        }
+
         const res = await fetch('/api/chat', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers,
           body: JSON.stringify({
-            messages: updatedMessages.map((m) => ({ role: m.role, content: m.content })),
+            messages: updatedMessages
+              .filter((m) => !m.isError)
+              .map((m) => ({ role: m.role, content: m.content })),
             currentMessage: params.text,
             imageData: params.imageData,
             imageMimeType: params.imageMimeType,
+            attachmentName: params.attachmentName,
+            attachmentContent: params.attachmentContent,
             targetLanguage: params.targetLanguage,
             userLanguage: settings.uiLanguage,
             voicePersona: settings.voicePersona || 'friendly',
             location: params.location,
+            customApiKey: settings.customGeminiApiKey,
             mode: 'chat',
           }),
         });
+
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          throw new Error(errData.error || `Server returned ${res.status}`);
+        }
 
         const data = await res.json();
         reply = data.reply || 'Response received.';
@@ -175,19 +383,28 @@ export default function App() {
         suggestedQuestions = data.suggestedQuestions || [];
         geotagInsights = data.geotagInsights;
         latencyMs = data.latencyMs || Date.now() - startTime;
+
+        if (data.isLiveAI) {
+          setAiStatus('connected');
+        } else if (!settings.customGeminiApiKey) {
+          setAiStatus('disconnected');
+        }
       }
 
       const modelMessage: ChatMessage = {
         id: `mod-${Date.now()}`,
         role: 'model',
+        senderName: 'Aadesh AI',
         content: reply,
         translation,
+        translationLanguage: translation ? params.targetLanguage : undefined,
         detectedLanguage,
         sentiment,
         suggestedQuestions,
         geotagInsights,
         timestamp: Date.now(),
         isOffline: !isOnline,
+        latencyMs,
       };
 
       const finalSession: ChatSession = {
@@ -197,9 +414,37 @@ export default function App() {
 
       const finalSessions = sessions.map((s) => (s.id === currentSession.id ? finalSession : s));
       setSessions(finalSessions);
-      saveStoredSessions(finalSessions);
+      saveStoredSessions(finalSessions, user.id);
 
-      // Record engagement metrics
+      // Sync conversation & usage telemetry to Firestore when signed in
+      if (user.isLoggedIn) {
+        saveConversationAndMessagesToFirestore(user.id, finalSession).catch(() => {});
+        recordUsageAnalyticsToFirestore({
+          eventType: params.isVoice
+            ? 'voice'
+            : params.imageData
+            ? 'image'
+            : params.attachmentName
+            ? 'file'
+            : 'chat',
+          language: params.targetLanguage,
+          latencyMs,
+        }).catch(() => {});
+      }
+
+      const { updatedUser, newBadgeUnlocked } = recordGamificationActivity(
+        user,
+        params.isVoice ? 'voice' : params.imageData ? 'image' : 'chat'
+      );
+      setUser(updatedUser);
+      saveStoredUser(updatedUser);
+
+      if (newBadgeUnlocked) {
+        try {
+          confetti({ particleCount: 80, spread: 70, origin: { y: 0.6 } });
+        } catch {}
+      }
+
       recordMetricEvent({
         isVoice: params.isVoice,
         isImage: Boolean(params.imageData),
@@ -211,69 +456,372 @@ export default function App() {
       });
       setMetrics(getStoredMetrics());
 
-      // Read aloud if setting or hands-free is enabled
-      if (settings.autoSpeakAIResponses || settings.handsFreeMode) {
+      if ((settings.autoSpeakAIResponses || settings.handsFreeMode) && activeTab === 'chat') {
         const targetLangObj =
           SUPPORTED_LANGUAGES.find((l) => l.code === params.targetLanguage) || SUPPORTED_LANGUAGES[0];
         const activePersonaObj =
           VOICE_PERSONAS.find((p) => p.id === (settings.voicePersona || 'friendly')) || VOICE_PERSONAS[3];
         voiceAssistant.speak(translation || reply, targetLangObj.speechCode, {
-          rate: settings.voiceSpeed * activePersonaObj.rate,
-          pitch: settings.voicePitch * activePersonaObj.pitch,
+          rate: settings.voiceSpeed ?? 1.0,
+          pitch: settings.voicePitch ?? activePersonaObj.pitch,
+          volume: settings.voiceVolume ?? 1.0,
         });
       }
-    } catch (err) {
+
+      return { reply, translation };
+    } catch (err: any) {
       console.error('Chat error:', err);
+      const errorMessageText = `⚠️ ${err?.message || 'Connection error'}. Please verify your internet connection or Gemini API key in Settings.`;
+      const modelErrorMsg: ChatMessage = {
+        id: `mod-err-${Date.now()}`,
+        role: 'model',
+        content: errorMessageText,
+        timestamp: Date.now(),
+        sentiment: 'urgent',
+        isError: true,
+      };
+      const finalSession: ChatSession = {
+        ...updatedSession,
+        messages: [...updatedMessages, modelErrorMsg],
+      };
+      const finalSessions = sessions.map((s) => (s.id === currentSession.id ? finalSession : s));
+      setSessions(finalSessions);
+      saveStoredSessions(finalSessions, user.id);
+      throw err;
     } finally {
+      isSendingRef.current = false;
       setIsLoading(false);
     }
   };
 
-  // Create new session
-  const handleNewSession = () => {
+  const handleUpdateUser = (updatedUser: UserProfile) => {
+    setUser(updatedUser);
+    saveStoredUser(updatedUser);
+    if (updatedUser.isLoggedIn) {
+      syncUserProfileToFirestore(updatedUser).catch(() => {});
+    }
+  };
+
+  const handleSignOut = async () => {
+    try {
+      await logOut();
+    } catch {}
+    const guestUser: UserProfile = {
+      ...DEFAULT_USER,
+      id: `guest-${Date.now()}`,
+      name: 'Guest Explorer',
+      username: 'guest',
+      email: '',
+      phone: '',
+      avatarUrl: '',
+      provider: 'guest',
+      role: 'user',
+      isLoggedIn: false,
+      linkedProviders: [],
+      createdAt: Date.now(),
+    };
+    setUser(guestUser);
+    saveStoredUser(guestUser);
+    if (activeTab === 'admin') {
+      setActiveTab('chat');
+    }
+  };
+
+  const handleNewSession = (initialCategory?: string) => {
+    const cleanCategory =
+      initialCategory && initialCategory.trim() && initialCategory !== 'All'
+        ? initialCategory.trim().slice(0, 48)
+        : 'General';
     const newSession: ChatSession = {
       id: `session-${Date.now()}`,
       title: `Conversation ${sessions.length + 1}`,
       createdAt: Date.now(),
       updatedAt: Date.now(),
       targetLanguage: settings.defaultTargetLanguage,
+      category: cleanCategory,
       messages: [],
     };
     const updated = [newSession, ...sessions];
     setSessions(updated);
     setCurrentSessionId(newSession.id);
-    saveStoredSessions(updated);
+    saveStoredSessions(updated, user.id);
+    if (user.isLoggedIn) {
+      saveConversationAndMessagesToFirestore(user.id, newSession).catch(() => {});
+    }
   };
 
-  // Delete session
+  const handleRenameSession = (id: string, newTitle: string) => {
+    const updated = sessions.map((s) =>
+      s.id === id ? { ...s, title: newTitle, updatedAt: Date.now() } : s
+    );
+    setSessions(updated);
+    saveStoredSessions(updated, user.id);
+    const target = updated.find((s) => s.id === id);
+    if (target && user.isLoggedIn) {
+      saveConversationAndMessagesToFirestore(user.id, target).catch(() => {});
+    }
+  };
+
+  const handleCreateFolder = (folderName: string) => {
+    const clean = folderName.trim().slice(0, 48);
+    if (!clean) return;
+    setSessionFolders((prev) => {
+      if (prev.some((f) => f.toLowerCase() === clean.toLowerCase())) return prev;
+      const next = [...prev, clean];
+      saveStoredFolders(next, user.id);
+      return next;
+    });
+  };
+
+  const handleUpdateSessionCategory = (id: string, category: string) => {
+    const clean = category.trim().slice(0, 48) || 'General';
+    handleCreateFolder(clean);
+    const updated = sessions.map((s) =>
+      s.id === id ? { ...s, category: clean, updatedAt: Date.now() } : s
+    );
+    setSessions(updated);
+    saveStoredSessions(updated, user.id);
+    const target = updated.find((s) => s.id === id);
+    if (target && user.isLoggedIn) {
+      saveConversationAndMessagesToFirestore(user.id, target).catch(() => {});
+    }
+  };
+
   const handleDeleteSession = (id: string) => {
+    if (user.isLoggedIn) {
+      deleteConversationFromFirestore(user.id, id).catch(() => {});
+    }
     const remaining = sessions.filter((s) => s.id !== id);
     if (remaining.length === 0) {
       handleNewSession();
       return;
     }
     setSessions(remaining);
-    saveStoredSessions(remaining);
+    saveStoredSessions(remaining, user.id);
     if (currentSessionId === id) {
       setCurrentSessionId(remaining[0].id);
     }
   };
 
-  // Clear current session messages
   const handleClearCurrentSession = () => {
     const updated = sessions.map((s) => (s.id === currentSession.id ? { ...s, messages: [] } : s));
     setSessions(updated);
-    saveStoredSessions(updated);
+    saveStoredSessions(updated, user.id);
   };
 
-  // Update target language for current session
   const handleUpdateSessionTargetLang = (lang: string) => {
-    const updated = sessions.map((s) => (s.id === currentSession.id ? { ...s, targetLanguage: lang } : s));
+    const updated = sessions.map((s) =>
+      s.id === currentSession.id ? { ...s, targetLanguage: lang, updatedAt: Date.now() } : s
+    );
     setSessions(updated);
-    saveStoredSessions(updated);
+    saveStoredSessions(updated, user.id);
+    const target = updated.find((s) => s.id === currentSession.id);
+    if (target && user.isLoggedIn) {
+      saveConversationAndMessagesToFirestore(user.id, target).catch(() => {});
+    }
   };
 
-  // Add media to Geotag gallery
+  const handleFeedbackMessage = (messageId: string, feedback: 'up' | 'down') => {
+    const updatedSessions = sessions.map((s) => {
+      if (s.id !== currentSession.id) return s;
+      return {
+        ...s,
+        messages: s.messages.map((m) =>
+          m.id === messageId
+            ? { ...m, feedback: m.feedback === feedback ? undefined : feedback }
+            : m
+        ),
+      };
+    });
+    setSessions(updatedSessions);
+    saveStoredSessions(updatedSessions, user.id);
+
+    const updatedMsg = updatedSessions
+      .find((s) => s.id === currentSession.id)
+      ?.messages.find((m) => m.id === messageId);
+    if (updatedMsg && user.isLoggedIn) {
+      saveSingleMessageToFirestore(user.id, currentSession.id, updatedMsg).catch(() => {});
+    }
+  };
+
+  const handleTogglePinMessage = (messageId: string) => {
+    const updatedSessions = sessions.map((s) => {
+      if (s.id !== currentSession.id) return s;
+      return {
+        ...s,
+        messages: s.messages.map((m) =>
+          m.id === messageId
+            ? {
+                ...m,
+                isPinned: !m.isPinned,
+                pinnedAt: !m.isPinned ? Date.now() : undefined,
+              }
+            : m
+        ),
+      };
+    });
+    setSessions(updatedSessions);
+    saveStoredSessions(updatedSessions, user.id);
+
+    const updatedMsg = updatedSessions
+      .find((s) => s.id === currentSession.id)
+      ?.messages.find((m) => m.id === messageId);
+    if (updatedMsg && user.isLoggedIn) {
+      saveSingleMessageToFirestore(user.id, currentSession.id, updatedMsg).catch(() => {});
+    }
+  };
+
+  const handleReactToMessage = (messageId: string, emoji: string) => {
+    const updatedSessions = sessions.map((s) => {
+      if (s.id !== currentSession.id) return s;
+      return {
+        ...s,
+        messages: s.messages.map((m) => {
+          if (m.id !== messageId) return m;
+          const prevUserReactions = Array.isArray(m.userReactions) ? m.userReactions : [];
+          const hasReacted = prevUserReactions.includes(emoji);
+          const nextUserReactions = hasReacted
+            ? prevUserReactions.filter((e) => e !== emoji)
+            : [...prevUserReactions, emoji].slice(0, 6);
+
+          const nextReactions: Record<string, number> = { ...(m.reactions || {}) };
+          const currentCount = typeof nextReactions[emoji] === 'number' ? nextReactions[emoji] : 0;
+          if (hasReacted) {
+            const decremented = currentCount - 1;
+            if (decremented <= 0) {
+              delete nextReactions[emoji];
+            } else {
+              nextReactions[emoji] = decremented;
+            }
+          } else {
+            nextReactions[emoji] = Math.min(999, currentCount + 1);
+          }
+
+          return {
+            ...m,
+            reactions: nextReactions,
+            userReactions: nextUserReactions,
+          };
+        }),
+      };
+    });
+
+    setSessions(updatedSessions);
+    saveStoredSessions(updatedSessions, user.id);
+
+    const updatedMsg = updatedSessions
+      .find((s) => s.id === currentSession.id)
+      ?.messages.find((m) => m.id === messageId);
+    if (updatedMsg && user.isLoggedIn) {
+      saveSingleMessageToFirestore(user.id, currentSession.id, updatedMsg).catch(() => {});
+    }
+  };
+
+  const handleTranslateMessage = async (messageId: string, targetLangCode: string): Promise<string> => {
+    const targetMsg = currentSession.messages.find((m) => m.id === messageId);
+    if (!targetMsg) throw new Error('Message not found');
+
+    const targetLangObj =
+      SUPPORTED_LANGUAGES.find((l) => l.code === targetLangCode) || SUPPORTED_LANGUAGES[0];
+
+    let translatedText = '';
+    let latencyMs = 150;
+
+    if (!isOnline) {
+      translatedText = `[Offline Translated (${targetLangObj.name})] ${targetMsg.content}`;
+    } else {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (settings.customGeminiApiKey) {
+        headers['x-gemini-api-key'] = settings.customGeminiApiKey;
+      }
+
+      const res = await fetch('/api/translate', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          text: targetMsg.content,
+          sourceLang: targetMsg.detectedLanguage || 'auto',
+          targetLang: targetLangCode,
+          customApiKey: settings.customGeminiApiKey,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || `Translation failed (${res.status})`);
+      }
+      translatedText = data.translatedText || targetMsg.content;
+      latencyMs = data.latencyMs || 250;
+    }
+
+    const updatedSessions = sessions.map((s) => {
+      if (s.id !== currentSession.id) return s;
+      return {
+        ...s,
+        messages: s.messages.map((m) =>
+          m.id === messageId
+            ? { ...m, translation: translatedText, translationLanguage: targetLangCode }
+            : m
+        ),
+      };
+    });
+    setSessions(updatedSessions);
+    saveStoredSessions(updatedSessions, user.id);
+
+    const updatedMsg = updatedSessions
+      .find((s) => s.id === currentSession.id)
+      ?.messages.find((m) => m.id === messageId);
+    if (updatedMsg && user.isLoggedIn) {
+      saveSingleMessageToFirestore(user.id, currentSession.id, updatedMsg).catch(() => {});
+      recordUsageAnalyticsToFirestore({
+        eventType: 'translation',
+        language: targetLangCode,
+        latencyMs,
+      }).catch(() => {});
+    }
+
+    recordMetricEvent({
+      isTranslation: true,
+      language: targetLangCode,
+      latencyMs,
+      sentiment: 'positive',
+    });
+    setMetrics(getStoredMetrics());
+
+    return translatedText;
+  };
+
+  const handleDeleteVoiceEntry = (id: string) => {
+    const updated = voiceHistory.filter((v) => v.id !== id);
+    setVoiceHistory(updated);
+    saveStoredVoiceHistory(updated, user.id);
+  };
+
+  const handleClearAllVoiceHistory = () => {
+    setVoiceHistory([]);
+    saveStoredVoiceHistory([], user.id);
+  };
+
+  const handleSendVoiceToChat = (transcript: string) => {
+    setActiveTab('chat');
+    handleSendMessage({
+      text: transcript,
+      targetLanguage: currentSession.targetLanguage || settings.defaultTargetLanguage,
+      isVoice: true,
+    });
+  };
+
+  const handleAddNewVoiceFromVault = (text: string, language: string) => {
+    const entry = addVoiceHistoryEntry(
+      {
+        transcript: text,
+        language,
+        durationSeconds: Math.max(2, Math.round(text.split(' ').length / 2.5)),
+      },
+      user.id
+    );
+    setVoiceHistory((prev) => [entry, ...prev]);
+  };
+
   const handleAddMedia = (media: GeotaggedMedia) => {
     const updated = [media, ...mediaItems];
     setMediaItems(updated);
@@ -286,25 +834,18 @@ export default function App() {
     });
     setMetrics(getStoredMetrics());
 
-    // Trigger joyful celebration confetti
     try {
-      confetti({
-        particleCount: 70,
-        spread: 60,
-        origin: { y: 0.7 },
-      });
+      confetti({ particleCount: 70, spread: 60, origin: { y: 0.7 } });
     } catch {}
   };
 
-  // Delete media
   const handleDeleteMedia = (id: string) => {
     const updated = mediaItems.filter((m) => m.id !== id);
     setMediaItems(updated);
     saveStoredMedia(updated);
   };
 
-  // Record translation metric from interpreter
-  const handleRecordTranslationMetric = (langA: string, langB: string, latencyMs: number) => {
+  const handleRecordTranslationMetric = (_langA: string, langB: string, latencyMs: number) => {
     recordMetricEvent({
       isTranslation: true,
       language: langB,
@@ -314,23 +855,33 @@ export default function App() {
     setMetrics(getStoredMetrics());
   };
 
-  // Reset all local storage data
   const handleClearAllData = () => {
     localStorage.clear();
     setSettings(DEFAULT_SETTINGS);
     setSessions(getStoredSessions());
+    setVoiceHistory([]);
     setMediaItems(getStoredMedia());
     setMetrics(getStoredMetrics());
     setIsSettingsModalOpen(false);
   };
 
+  const totalMessageCount = sessions.reduce((acc, s) => acc + s.messages.length, 0);
+
   return (
     <div className="min-h-screen relative flex flex-col justify-between selection:bg-purple-500/30 selection:text-purple-200">
-      {/* Ambient Glowing Background Orbs & 3D Spheres (Matching user's attachment) */}
-      <div className="orb w-[380px] h-[380px] bg-purple-600/25 top-[-40px] left-[-90px] animate-pulse-glow" />
-      <div className="orb w-[500px] h-[500px] bg-indigo-600/20 top-[25%] right-[-140px] animate-float-slow" />
-      <div className="orb w-[340px] h-[340px] bg-violet-600/20 bottom-[15%] left-[25%] animate-float-delayed" />
-      {/* Glossy 3D Purple Floating Spheres matching screenshot mockup */}
+      {/* Ambient Glowing Background Orbs & 3D Spheres */}
+      <div
+        className="orb w-[380px] h-[380px] top-[-40px] left-[-90px] animate-pulse-glow transition-colors duration-500"
+        style={{ backgroundColor: 'rgba(var(--theme-accent-rgb), 0.24)' }}
+      />
+      <div
+        className="orb w-[500px] h-[500px] top-[25%] right-[-140px] animate-float-slow transition-colors duration-500"
+        style={{ backgroundColor: 'rgba(var(--theme-accent-sec-rgb), 0.20)' }}
+      />
+      <div
+        className="orb w-[340px] h-[340px] bottom-[15%] left-[25%] animate-float-delayed transition-colors duration-500"
+        style={{ backgroundColor: 'rgba(var(--theme-accent-light-rgb), 0.18)' }}
+      />
       <div className="sphere-3d w-28 h-28 absolute top-20 right-12 opacity-35 animate-float-slow hidden lg:block" />
       <div className="sphere-3d w-16 h-16 absolute top-1/2 left-8 opacity-25 animate-float-delayed hidden md:block" />
       <div className="sphere-3d w-20 h-20 absolute bottom-28 right-1/4 opacity-30 animate-pulse-glow hidden sm:block" />
@@ -339,6 +890,8 @@ export default function App() {
       <Header
         settings={settings}
         onUpdateSettings={handleUpdateSettings}
+        aiStatus={aiStatus}
+        onRefreshAIStatus={checkAIHealth}
         isOnline={isOnline}
         onToggleForceOffline={handleToggleForceOffline}
         activeTab={activeTab}
@@ -347,77 +900,17 @@ export default function App() {
         onSearchChange={setSearchQuery}
         onOpenSettings={() => setIsSettingsModalOpen(true)}
         totalTranslations={metrics.totalTranslations}
+        user={user}
+        isOwnerAdmin={isOwnerAdmin}
+        onOpenAuth={(mode = 'signin') => {
+          setAuthModalMode(mode);
+          setIsAuthModalOpen(true);
+        }}
+        onOpenGamification={() => setIsGamificationModalOpen(true)}
+        onOpenInstall={() => setIsInstallModalOpen(true)}
       />
 
-      {/* Offline Alert Strip if Offline */}
-      {!isOnline && (
-        <div className="bg-amber-950/80 border-b border-amber-500/40 text-amber-200 text-xs py-1.5 px-4 text-center z-30 font-medium flex items-center justify-center gap-2">
-          <span>⚠️ Offline Mode Active: Conversations and geotags are saved locally. Cloud AI will sync once reconnected.</span>
-          <button
-            onClick={handleToggleForceOffline}
-            className="underline hover:text-white font-bold ml-1"
-          >
-            Reconnect
-          </button>
-        </div>
-      )}
-
-      {/* MAIN VIEWPORT */}
-      <main className="relative z-10 flex-grow w-full flex flex-col">
-        {/* VIEW 1: CHAT & VISION BOT */}
-        {activeTab === 'chat' && (
-          <ChatView
-            currentSession={currentSession}
-            allSessions={sessions}
-            onSelectSession={setCurrentSessionId}
-            onNewSession={handleNewSession}
-            onDeleteSession={handleDeleteSession}
-            onClearCurrentSession={handleClearCurrentSession}
-            onSendMessage={handleSendMessage}
-            onUpdateSessionTargetLang={handleUpdateSessionTargetLang}
-            settings={settings}
-            isOnline={isOnline}
-            isLoading={isLoading}
-            searchFilter={searchQuery}
-          />
-        )}
-
-        {/* VIEW 2: LIVE REAL-TIME INTERPRETER */}
-        {activeTab === 'interpret' && (
-          <InterpreterView
-            settings={settings}
-            isOnline={isOnline}
-            onRecordTranslationMetric={handleRecordTranslationMetric}
-          />
-        )}
-
-        {/* VIEW 3: GEOTAG GALLERY & CONTENT MANAGEMENT */}
-        {activeTab === 'gallery' && (
-          <GeotagGalleryView
-            mediaItems={mediaItems}
-            onAddMedia={handleAddMedia}
-            onDeleteMedia={handleDeleteMedia}
-            isOnline={isOnline}
-          />
-        )}
-
-        {/* VIEW 4: ANALYTICS DASHBOARD */}
-        {activeTab === 'analytics' && <AnalyticsDashboard metrics={metrics} />}
-
-        {/* VIEW 5: SETTINGS DIRECT VIEW (also reachable via modal) */}
-        {activeTab === 'settings' && (
-          <div className="max-w-4xl mx-auto px-4 py-8 w-full pb-28">
-            <button
-              onClick={() => setIsSettingsModalOpen(true)}
-              className="purple-glow-btn text-white text-sm font-semibold py-3 px-6 rounded-2xl flex items-center gap-2 mx-auto"
-            >
-              Open Full Personalization Settings Modal
-            </button>
-          </div>
-        )}
-      </main>
-
-      {/* FLOATING GLASS NAVIGATION DOCK */}
+      {/* NAVIGATION BAR (Desktop Top Bar + Mobile Floating Bottom Dock across 8+ items) */}
       <NavigationDock
         activeTab={activeTab}
         onSelectTab={(tab) => {
@@ -428,7 +921,135 @@ export default function App() {
           }
         }}
         uiLanguage={settings.uiLanguage}
+        isOwnerAdmin={isOwnerAdmin}
+        onOpenInstall={() => setIsInstallModalOpen(true)}
       />
+
+      {/* Owner Announcement Banner if active */}
+      {platformNotice?.announcement && (
+        <div className="bg-purple-950/85 border-b border-purple-500/40 text-purple-100 text-xs py-1.5 px-4 text-center z-20 font-medium">
+          📢 {platformNotice.announcement}
+        </div>
+      )}
+
+      {/* Offline Alert Strip if Offline */}
+      {!isOnline && (
+        <div className="bg-amber-950/80 border-b border-amber-500/40 text-amber-200 text-xs py-1.5 px-4 text-center z-20 font-medium flex items-center justify-center gap-2">
+          <span>⚠️ Offline Mode Active: Conversations saved locally. Syncs when reconnected.</span>
+          <button
+            onClick={handleToggleForceOffline}
+            className="underline hover:text-white font-bold ml-1 cursor-pointer"
+          >
+            Reconnect
+          </button>
+        </div>
+      )}
+
+      {/* MAIN VIEWPORT */}
+      <main className="relative z-10 flex-grow w-full flex flex-col">
+        {activeTab === 'chat' && (
+          <ChatView
+            currentSession={currentSession}
+            allSessions={sessions}
+            sessionFolders={sessionFolders}
+            onSelectSession={setCurrentSessionId}
+            onNewSession={handleNewSession}
+            onRenameSession={handleRenameSession}
+            onUpdateSessionCategory={handleUpdateSessionCategory}
+            onCreateFolder={handleCreateFolder}
+            onDeleteSession={handleDeleteSession}
+            onClearCurrentSession={handleClearCurrentSession}
+            onSendMessage={async (params) => {
+              await handleSendMessage(params);
+            }}
+            onUpdateSessionTargetLang={handleUpdateSessionTargetLang}
+            onTranslateMessage={handleTranslateMessage}
+            onFeedbackMessage={handleFeedbackMessage}
+            onTogglePinMessage={handleTogglePinMessage}
+            onReactMessage={handleReactToMessage}
+            user={user}
+            settings={settings}
+            isOnline={isOnline}
+            isLoading={isLoading}
+            searchFilter={searchQuery}
+            onSearchChange={setSearchQuery}
+          />
+        )}
+
+        {activeTab === 'voice' && (
+          <ActiveVoiceView
+            settings={settings}
+            onUpdateSettings={handleUpdateSettings}
+            isOnline={isOnline}
+            onReturnToChat={() => setActiveTab('chat')}
+            onSendVoiceMessage={async ({ text, isVoice, targetLanguage }) =>
+              handleSendMessage({ text, isVoice, targetLanguage })
+            }
+          />
+        )}
+
+        {activeTab === 'voiceHistory' && (
+          <VoiceHistoryView
+            entries={voiceHistory}
+            onDeleteEntry={handleDeleteVoiceEntry}
+            onClearAll={handleClearAllVoiceHistory}
+            onSendToChat={handleSendVoiceToChat}
+            settings={settings}
+            user={user}
+            onAddNewVoiceInput={handleAddNewVoiceFromVault}
+          />
+        )}
+
+        {activeTab === 'interpret' && (
+          <InterpreterView
+            settings={settings}
+            isOnline={isOnline}
+            onRecordTranslationMetric={handleRecordTranslationMetric}
+          />
+        )}
+
+        {activeTab === 'gallery' && (
+          <GeotagGalleryView
+            mediaItems={mediaItems}
+            onAddMedia={handleAddMedia}
+            onDeleteMedia={handleDeleteMedia}
+            isOnline={isOnline}
+            customGeminiApiKey={settings.customGeminiApiKey}
+          />
+        )}
+
+        {activeTab === 'analytics' && <AnalyticsDashboard metrics={metrics} />}
+
+        {activeTab === 'profile' && (
+          <ProfileView
+            user={user}
+            settings={settings}
+            metrics={metrics}
+            sessionCount={sessions.length}
+            totalMessages={totalMessageCount}
+            onUpdateSettings={handleUpdateSettings}
+            onUpdateUser={handleUpdateUser}
+            onOpenAuth={(mode = 'signin') => {
+              setAuthModalMode(mode);
+              setIsAuthModalOpen(true);
+            }}
+            onSignOut={handleSignOut}
+            onOpenSettings={() => setIsSettingsModalOpen(true)}
+            onOpenAdmin={() => setActiveTab('admin')}
+            isOwnerAdmin={isOwnerAdmin}
+          />
+        )}
+
+        {activeTab === 'admin' && (
+          <AdminDashboardView
+            currentUser={user}
+            onOpenAuth={() => {
+              setAuthModalMode('signin');
+              setIsAuthModalOpen(true);
+            }}
+          />
+        )}
+      </main>
 
       {/* FULL SETTINGS MODAL */}
       <SettingsModal
@@ -441,6 +1062,33 @@ export default function App() {
         onClearAllData={handleClearAllData}
         sessionCount={sessions.length}
         mediaCount={mediaItems.length}
+        mediaItems={mediaItems}
+        sessions={sessions}
+        currentSession={currentSession}
+        userName={user.name}
+      />
+
+      {/* MULTI-ACCOUNT AUTH MODAL */}
+      <AuthModal
+        isOpen={isAuthModalOpen}
+        onClose={() => setIsAuthModalOpen(false)}
+        currentUser={user}
+        onUpdateUser={handleUpdateUser}
+        onSignOut={handleSignOut}
+        initialMode={authModalMode}
+      />
+
+      {/* GAMIFICATION & STREAKS MODAL */}
+      <GamificationModal
+        isOpen={isGamificationModalOpen}
+        onClose={() => setIsGamificationModalOpen(false)}
+        user={user}
+      />
+
+      {/* ANDROID, IOS & DESKTOP STORE INSTALL MODAL */}
+      <InstallAppModal
+        isOpen={isInstallModalOpen}
+        onClose={() => setIsInstallModalOpen(false)}
       />
     </div>
   );

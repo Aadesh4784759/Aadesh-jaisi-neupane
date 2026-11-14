@@ -1,0 +1,421 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile document",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Unique Firebase Authentication UID",
+          "maxLength": 128
+        },
+        "displayName": {
+          "type": "string",
+          "description": "User display name",
+          "maxLength": 100
+        },
+        "username": {
+          "type": "string",
+          "description": "User handle",
+          "maxLength": 64
+        },
+        "email": {
+          "type": "string",
+          "description": "User email address",
+          "maxLength": 160
+        },
+        "photoURL": {
+          "type": "string",
+          "description": "Profile avatar URL",
+          "maxLength": 1000
+        },
+        "preferredLanguage": {
+          "type": "string",
+          "description": "Preferred UI/conversation language code",
+          "maxLength": 20
+        },
+        "status": {
+          "type": "string",
+          "description": "Account status",
+          "enum": ["active", "suspended"]
+        },
+        "role": {
+          "type": "string",
+          "description": "Account role",
+          "enum": ["user", "admin"]
+        },
+        "provider": {
+          "type": "string",
+          "description": "Authentication provider",
+          "maxLength": 32
+        },
+        "messageCount": {
+          "type": "number",
+          "description": "Total user messages sent"
+        },
+        "conversationCount": {
+          "type": "number",
+          "description": "Total conversations created"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Creation ISO timestamp",
+          "maxLength": 50
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "Last update ISO timestamp",
+          "maxLength": 50
+        },
+        "lastActiveAt": {
+          "type": "string",
+          "description": "Last active ISO timestamp",
+          "maxLength": 50
+        }
+      },
+      "required": ["userId", "displayName", "createdAt"]
+    },
+    "Conversation": {
+      "title": "Conversation",
+      "description": "User private chat session",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Conversation unique ID",
+          "maxLength": 128
+        },
+        "userId": {
+          "type": "string",
+          "description": "Author user ID",
+          "maxLength": 128
+        },
+        "title": {
+          "type": "string",
+          "description": "Title of conversation",
+          "maxLength": 200
+        },
+        "language": {
+          "type": "string",
+          "description": "Conversation primary target language",
+          "maxLength": 20
+        },
+        "category": {
+          "type": "string",
+          "description": "Folder or category label for grouping the conversation",
+          "maxLength": 48
+        },
+        "messageCount": {
+          "type": "number",
+          "description": "Count of messages in conversation"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Creation ISO timestamp",
+          "maxLength": 50
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "Last updated ISO timestamp",
+          "maxLength": 50
+        }
+      },
+      "required": ["id", "userId", "title"]
+    },
+    "ChatMessage": {
+      "title": "ChatMessage",
+      "description": "Message within a conversation",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Message ID",
+          "maxLength": 128
+        },
+        "userId": {
+          "type": "string",
+          "description": "User owner ID",
+          "maxLength": 128
+        },
+        "conversationId": {
+          "type": "string",
+          "description": "Parent conversation ID",
+          "maxLength": 128
+        },
+        "role": {
+          "type": "string",
+          "description": "user, model, or participant",
+          "enum": ["user", "model", "participant", "system"]
+        },
+        "senderName": {
+          "type": "string",
+          "description": "Sender display name for user or group participant",
+          "maxLength": 100
+        },
+        "senderAvatarUrl": {
+          "type": "string",
+          "description": "Sender avatar photo URL",
+          "maxLength": 1000
+        },
+        "content": {
+          "type": "string",
+          "description": "Message content",
+          "maxLength": 50000
+        },
+        "translation": {
+          "type": "string",
+          "description": "Multilingual translation",
+          "maxLength": 50000
+        },
+        "translationLanguage": {
+          "type": "string",
+          "description": "Target translation language code",
+          "maxLength": 20
+        },
+        "feedback": {
+          "type": "string",
+          "description": "User rating on response",
+          "enum": ["up", "down"]
+        },
+        "reactions": {
+          "type": "object",
+          "description": "Map of emoji reactions to reaction counts"
+        },
+        "userReactions": {
+          "type": "array",
+          "description": "List of emojis toggled by the current user"
+        },
+        "isPinned": {
+          "type": "boolean",
+          "description": "Whether the message is pinned to the top of the conversation"
+        },
+        "pinnedAt": {
+          "type": "string",
+          "description": "ISO timestamp when pinned, or empty string when unpinned",
+          "maxLength": 50
+        },
+        "attachmentName": {
+          "type": "string",
+          "description": "Attached file name",
+          "maxLength": 256
+        },
+        "imageUrl": {
+          "type": "string",
+          "description": "Optional attached image reference",
+          "maxLength": 1000
+        },
+        "isVoice": {
+          "type": "boolean",
+          "description": "Whether message originated via voice"
+        },
+        "timestamp": {
+          "type": "string",
+          "description": "ISO timestamp",
+          "maxLength": 50
+        },
+        "editedAt": {
+          "type": "string",
+          "description": "ISO timestamp when edited by user",
+          "maxLength": 50
+        }
+      },
+      "required": ["id", "userId", "conversationId", "role", "content"]
+    },
+    "VoiceInput": {
+      "title": "VoiceInput",
+      "description": "Voice-to-text recording history",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Voice log ID",
+          "maxLength": 128
+        },
+        "userId": {
+          "type": "string",
+          "description": "User ID",
+          "maxLength": 128
+        },
+        "transcript": {
+          "type": "string",
+          "description": "Transcribed speech text",
+          "maxLength": 10000
+        },
+        "language": {
+          "type": "string",
+          "description": "Language used for speech recognition",
+          "maxLength": 20
+        },
+        "durationSeconds": {
+          "type": "number",
+          "description": "Estimated audio recording duration in seconds"
+        },
+        "timestamp": {
+          "type": "string",
+          "description": "Creation timestamp",
+          "maxLength": 50
+        }
+      },
+      "required": ["id", "userId", "transcript", "timestamp"]
+    },
+    "UsageAnalytics": {
+      "title": "UsageAnalytics",
+      "description": "Daily usage telemetry event",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Event ID",
+          "maxLength": 128
+        },
+        "userId": {
+          "type": "string",
+          "description": "Actor UID",
+          "maxLength": 128
+        },
+        "eventType": {
+          "type": "string",
+          "description": "chat, voice, image, translation, file",
+          "maxLength": 40
+        },
+        "language": {
+          "type": "string",
+          "description": "Language code",
+          "maxLength": 20
+        },
+        "latencyMs": {
+          "type": "number",
+          "description": "Response latency in ms"
+        },
+        "dateKey": {
+          "type": "string",
+          "description": "YYYY-MM-DD",
+          "maxLength": 20
+        },
+        "timestamp": {
+          "type": "string",
+          "description": "ISO timestamp",
+          "maxLength": 50
+        }
+      },
+      "required": ["id", "userId", "eventType", "dateKey", "timestamp"]
+    },
+    "AdminSettings": {
+      "title": "AdminSettings",
+      "description": "Owner-only platform configuration",
+      "type": "object",
+      "properties": {
+        "platformName": {
+          "type": "string",
+          "description": "Display platform name",
+          "maxLength": 120
+        },
+        "maintenanceMode": {
+          "type": "boolean",
+          "description": "Whether maintenance banner is shown"
+        },
+        "announcement": {
+          "type": "string",
+          "description": "Global owner announcement banner",
+          "maxLength": 500
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "ISO timestamp",
+          "maxLength": 50
+        }
+      },
+      "required": ["platformName", "updatedAt"]
+    },
+    "AIMemory": {
+      "title": "AIMemory",
+      "description": "User-approved AI memory preference or instruction",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "category": { "type": "string", "enum": ["preference", "instruction", "fact", "goal"] },
+        "content": { "type": "string", "maxLength": 2000 },
+        "approved": { "type": "boolean" },
+        "createdAt": { "type": "string", "maxLength": 50 },
+        "updatedAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "userId", "category", "content", "approved", "createdAt", "updatedAt"]
+    },
+    "PersonalTask": {
+      "title": "PersonalTask",
+      "description": "Personal assistant task or reminder",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "title": { "type": "string", "maxLength": 240 },
+        "notes": { "type": "string", "maxLength": 2000 },
+        "dueDate": { "type": "string", "maxLength": 20 },
+        "dueTime": { "type": "string", "maxLength": 20 },
+        "priority": { "type": "string", "enum": ["low", "medium", "high"] },
+        "category": { "type": "string", "maxLength": 48 },
+        "completed": { "type": "boolean" },
+        "reminderMinutes": { "type": "number" },
+        "createdAt": { "type": "string", "maxLength": 50 },
+        "updatedAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "userId", "title", "priority", "category", "completed", "createdAt", "updatedAt"]
+    },
+    "StudyProgress": {
+      "title": "StudyProgress",
+      "description": "Study Hub learning quiz and test progress",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "topic": { "type": "string", "maxLength": 200 },
+        "mode": { "type": "string", "maxLength": 40 },
+        "score": { "type": "number" },
+        "totalQuestions": { "type": "number" },
+        "language": { "type": "string", "maxLength": 20 },
+        "completedAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "userId", "topic", "mode", "score", "totalQuestions", "completedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profile document accessible by owner and platform admin"
+    },
+    "/users/{userId}/conversations/{conversationId}": {
+      "schema": "Conversation",
+      "description": "Private user conversations"
+    },
+    "/users/{userId}/conversations/{conversationId}/messages/{messageId}": {
+      "schema": "ChatMessage",
+      "description": "Messages within a conversation"
+    },
+    "/users/{userId}/voiceHistory/{voiceId}": {
+      "schema": "VoiceInput",
+      "description": "User voice history and transcripts"
+    },
+    "/users/{userId}/memories/{memoryId}": {
+      "schema": "AIMemory",
+      "description": "User-approved AI memory items"
+    },
+    "/users/{userId}/tasks/{taskId}": {
+      "schema": "PersonalTask",
+      "description": "User personal tasks and reminders"
+    },
+    "/users/{userId}/studyProgress/{progressId}": {
+      "schema": "StudyProgress",
+      "description": "User Study Hub progress records"
+    },
+    "/usage_analytics/{eventId}": {
+      "schema": "UsageAnalytics",
+      "description": "Platform usage analytics written by authenticated users and read by owner admin"
+    },
+    "/admin_settings/{docId}": {
+      "schema": "AdminSettings",
+      "description": "Platform settings managed strictly by verified owner admin"
+    }
+  }
+}

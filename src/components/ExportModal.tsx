@@ -43,7 +43,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, sessi
     if (selectedFormat === 'json') {
       const backupData = {
         exportVersion: '2.5',
-        generator: 'Aadesh AI - AI Learning Platform (Built by Aadesh Jaisi)',
+        generator: 'Aadesh AI Global Hub - Worldwide Multimodal Intelligence',
         backupType: 'Local Chat Session Backup',
         exportedAt: new Date().toISOString(),
         exportedTimestamp: Date.now(),
@@ -90,14 +90,14 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, sessi
       const subDivider = '-'.repeat(78);
 
       let text = `${divider}\n`;
-      text += `AADESH AI - AI LEARNING PLATFORM CONVERSATION BACKUP\n`;
-      text += `Built by Aadesh Jaisi (आदेश जैसी)\n`;
+      text += `AADESH AI GLOBAL HUB - CONVERSATION BACKUP\n`;
+      text += `Worldwide Multimodal Intelligence\n`;
       text += `${divider}\n`;
       text += `Session Title   : ${safeTitle}\n`;
       text += `Target Language : ${targetLangObj.name} (${session.targetLanguage})\n`;
       text += `Export Date     : ${new Date().toLocaleString()}\n`;
       text += `Total Messages  : ${messageList.length}\n`;
-      text += `Platform        : Aadesh AI - AI Learning Platform\n`;
+      text += `Platform        : Aadesh AI Global Hub\n`;
       text += `${divider}\n\n`;
 
       messageList.forEach((m, idx) => {
@@ -134,14 +134,14 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, sessi
       });
 
       text += `${divider}\n`;
-      text += `End of Conversation Backup. Aadesh AI - AI Learning Platform (Built by Aadesh Jaisi).\n`;
+      text += `End of Conversation Backup. Aadesh AI Global Hub.\n`;
       text += `${divider}\n`;
       return text;
     }
 
     // Markdown (.md)
-    let md = `# Aadesh AI - AI Learning Platform Conversation Backup\n\n`;
-    md += `*Built by Aadesh Jaisi (आदेश जैसी)*\n\n`;
+    let md = `# Aadesh AI Global Hub Conversation Backup\n\n`;
+    md += `*Worldwide Multimodal Intelligence*\n\n`;
     md += `> **Session Title:** ${safeTitle}  \n`;
     md += `> **Target Language:** ${targetLangObj.name} (\`${session.targetLanguage}\`)  \n`;
     md += `> **Export Date:** ${new Date().toLocaleString()}  \n`;

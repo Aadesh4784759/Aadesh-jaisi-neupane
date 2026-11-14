@@ -1,0 +1,39 @@
+{
+  "id": "/",
+  "name": "Aadesh AI Global Hub",
+  "short_name": "Aadesh AI",
+  "description": "Aadesh AI Global Hub: Worldwide intelligent AI assistant with real-time translation, hands-free voice interaction, photo vision analysis, and streak tracking.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#090a0f",
+  "theme_color": "#8b5cf6",
+  "categories": ["education", "productivity", "utilities"],
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

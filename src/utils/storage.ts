@@ -1,4 +1,14 @@
-import { AppSettings, ChatSession, EngagementMetrics, GeotaggedMedia } from '../types';
+import {
+  AIMemoryItem,
+  AppSettings,
+  ChatSession,
+  EngagementMetrics,
+  GeotaggedMedia,
+  PersonalTask,
+  StudyProgressItem,
+  UserProfile,
+} from '../types';
+import { INITIAL_BADGES, generateStreakHistory } from './gamification';
 
 const STORAGE_KEYS = {
   SESSIONS: 'aadesh_ai_sessions_v1',
@@ -6,20 +16,69 @@ const STORAGE_KEYS = {
   MEDIA: 'aadesh_ai_media_v1',
   SETTINGS: 'aadesh_ai_settings_v1',
   METRICS: 'aadesh_ai_metrics_v1',
+  USER: 'aadesh_ai_user_v1',
+  VOICE_HISTORY: 'aadesh_ai_voice_history_v1',
+  FOLDERS: 'aadesh_ai_folders_v1',
+  MEMORIES: 'aadesh_ai_memories_v1',
+  TASKS: 'aadesh_ai_tasks_v1',
+  STUDY_PROGRESS: 'aadesh_ai_study_progress_v1',
+};
+
+export const DEFAULT_SESSION_CATEGORIES = [
+  'General',
+  'Work',
+  'Personal',
+  'Language Practice',
+  'Study & Code',
+];
+
+export const OWNER_ADMIN_EMAIL = 'aadeshjaisi6@gmail.com';
+
+// Never display Aadesh Jaisi as every visitor's personal name; keep creator credit in footer/branding.
+export const DEFAULT_USER: UserProfile = {
+  id: 'guest_explorer',
+  name: 'Guest Explorer',
+  username: 'guest',
+  email: '',
+  avatarUrl: '',
+  avatarColor: '#8b5cf6',
+  provider: 'guest',
+  linkedProviders: [],
+  isLoggedIn: false,
+  role: 'user',
+  status: 'active',
+  createdAt: Date.now(),
+  lastActiveAt: Date.now(),
+  preferredLanguage: 'en',
+  streakDays: 1,
+  longestStreak: 1,
+  xp: 50,
+  level: 1,
+  levelTitle: 'Global Explorer',
+  dailyGoalTarget: 5,
+  dailyGoalCurrent: 0,
+  lastActiveDate: new Date().toISOString().slice(0, 10),
+  streakHistory: generateStreakHistory(1),
+  badges: INITIAL_BADGES,
 };
 
 export const DEFAULT_SETTINGS: AppSettings = {
   uiLanguage: 'en',
-  defaultTargetLanguage: 'es',
+  defaultTargetLanguage: 'ne', // Prioritize English & Nepali
   autoSpeakAIResponses: false,
   voiceSpeed: 1.0,
   voicePitch: 1.0,
+  voiceVolume: 1.0,
   voicePersona: 'friendly',
   highContrast: false,
+  theme: 'dark',
+  dynamicAvatarTheme: true,
   fontSize: 'normal',
   handsFreeMode: false,
   offlineModeForce: false,
   screenReaderAnnounce: false,
+  streamingResponses: true,
+  aiMemoryEnabled: true,
 };
 
 export const INITIAL_METRICS: EngagementMetrics = {
@@ -29,22 +88,21 @@ export const INITIAL_METRICS: EngagementMetrics = {
   totalTranslations: 62,
   languageCounts: {
     en: 22,
-    es: 15,
-    ja: 11,
-    ne: 9,
-    fr: 8,
-    zh: 7,
-    hi: 6,
-    de: 4,
+    ne: 16,
+    hi: 8,
+    ur: 5,
+    ar: 4,
+    es: 10,
+    ja: 9,
+    fr: 7,
   },
   regionalActivity: {
-    'Tokyo, Japan': 12,
-    'Kathmandu, Nepal': 9,
+    'Kathmandu, Nepal': 14,
+    'Tokyo, Japan': 11,
     'Paris, France': 8,
     'New York, USA': 7,
-    'Rome, Italy': 5,
-    'Cairo, Egypt': 4,
-    'São Paulo, Brazil': 3,
+    'Dubai, UAE': 5,
+    'London, UK': 4,
   },
   avgLatencyMs: 420,
   latencySamples: [380, 410, 460, 390, 440],
@@ -58,7 +116,6 @@ export const INITIAL_METRICS: EngagementMetrics = {
   },
 };
 
-// Vibrant seed media gallery with geotags across world regions
 export const INITIAL_MEDIA: GeotaggedMedia[] = [
   {
     id: 'media-1',
@@ -131,36 +188,39 @@ export const INITIAL_MEDIA: GeotaggedMedia[] = [
   },
 ];
 
-export const getStoredSessions = (): ChatSession[] => {
+export const getStoredSessions = (userId?: string): ChatSession[] => {
   try {
-    const raw = localStorage.getItem(STORAGE_KEYS.SESSIONS);
+    const key = userId ? `${STORAGE_KEYS.SESSIONS}_${userId}` : STORAGE_KEYS.SESSIONS;
+    const raw = localStorage.getItem(key);
     if (!raw) {
-      // Default initial welcome session
       const initialSession: ChatSession = {
-        id: 'session-default-welcome',
-        title: 'Welcome to Aadesh AI',
-        createdAt: Date.now() - 3600000 * 2,
-        updatedAt: Date.now() - 3600000 * 2,
-        targetLanguage: 'es',
+        id: `session-welcome-${Date.now()}`,
+        title: 'Welcome to Aadesh AI Global Hub',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        targetLanguage: 'ne',
+        category: 'General',
         messages: [
           {
             id: 'm-1',
             role: 'model',
-            content: 'Hello and welcome! I am Aadesh AI, your next-generation AI Learning Platform built by Aadesh Jaisi (आदेश जैसी). I support hands-free voice personas (Calm, Energetic, Professional, Friendly), real-time multilingual translation across 18+ languages, and visual photo learning with geotagging. What would you like to explore or learn today?',
-            translation: '¡Hola y bienvenido! Soy Aadesh AI, tu plataforma de aprendizaje de IA de próxima generación creada por Aadesh Jaisi. Cuento con personas de voz manos libres, traducción en tiempo real y aprendizaje visual.',
+            content:
+              'Hello! I am **Aadesh AI Global Hub** (created by **Aadesh Jaisi**), your worldwide multilingual AI assistant powered by Google Gemini.\n\nI can help with:\n- Step-by-step explanations & study guidance\n- Clean programming help with formatted code blocks\n- Multilingual translation across **English, नेपाली, हिन्दी, اردو, العربية** & 15+ languages\n- Photo, file & hands-free voice understanding\n\nHow can I assist you today?',
+            translation:
+              'नमस्ते! म **आदेश एआई ग्लोबल हब** हुँ (निर्माता: **आदेश जैसी**)। म तपाईंलाई अध्ययन, प्रोग्रामिङ, तस्बिर विश्लेषण, र नेपाली/अङ्ग्रेजी लगायत विभिन्न भाषामा सहयोग गर्न तयार छु। आज म के सहयोग गर्न सक्छु?',
+            translationLanguage: 'ne',
             detectedLanguage: 'en',
-            timestamp: Date.now() - 3600000 * 2,
+            timestamp: Date.now(),
             sentiment: 'positive',
             suggestedQuestions: [
-              'How can Aadesh AI help me learn languages?',
-              'Switch AI voice persona to Calm or Energetic',
-              'Explain how photo geotagging works',
-              'How to say "Thank you" in Nepali and Japanese?',
+              'नेपालीमा अनुवाद गर्नुहोस् (Translate to Nepali)',
+              'Explain how neural networks work step by step',
+              'Help me write a clean TypeScript or Python function',
             ],
           },
         ],
       };
-      saveStoredSessions([initialSession]);
+      saveStoredSessions([initialSession], userId);
       return [initialSession];
     }
     return JSON.parse(raw);
@@ -169,12 +229,89 @@ export const getStoredSessions = (): ChatSession[] => {
   }
 };
 
-export const saveStoredSessions = (sessions: ChatSession[]): void => {
+export const saveStoredSessions = (sessions: ChatSession[], userId?: string): void => {
   try {
-    localStorage.setItem(STORAGE_KEYS.SESSIONS, JSON.stringify(sessions));
+    const key = userId ? `${STORAGE_KEYS.SESSIONS}_${userId}` : STORAGE_KEYS.SESSIONS;
+    localStorage.setItem(key, JSON.stringify(sessions));
   } catch (err) {
     console.error('Failed to save sessions:', err);
   }
+};
+
+export const getStoredFolders = (userId?: string): string[] => {
+  try {
+    const key = userId ? `${STORAGE_KEYS.FOLDERS}_${userId}` : STORAGE_KEYS.FOLDERS;
+    const raw = localStorage.getItem(key);
+    if (!raw) return DEFAULT_SESSION_CATEGORIES;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return DEFAULT_SESSION_CATEGORIES;
+    const merged = Array.from(
+      new Set([
+        ...DEFAULT_SESSION_CATEGORIES,
+        ...parsed.filter((item): item is string => typeof item === 'string' && item.trim().length > 0),
+      ])
+    );
+    return merged;
+  } catch {
+    return DEFAULT_SESSION_CATEGORIES;
+  }
+};
+
+export const saveStoredFolders = (folders: string[], userId?: string): void => {
+  try {
+    const key = userId ? `${STORAGE_KEYS.FOLDERS}_${userId}` : STORAGE_KEYS.FOLDERS;
+    const unique = Array.from(
+      new Set([
+        ...DEFAULT_SESSION_CATEGORIES,
+        ...folders.map((f) => f.trim()).filter(Boolean),
+      ])
+    );
+    localStorage.setItem(key, JSON.stringify(unique));
+  } catch (err) {
+    console.error('Failed to save folders:', err);
+  }
+};
+
+export const getStoredVoiceHistory = (userId?: string): import('../types').VoiceHistoryEntry[] => {
+  try {
+    const key = userId ? `${STORAGE_KEYS.VOICE_HISTORY}_${userId}` : STORAGE_KEYS.VOICE_HISTORY;
+    const raw = localStorage.getItem(key);
+    if (!raw) return [];
+    return JSON.parse(raw);
+  } catch {
+    return [];
+  }
+};
+
+export const saveStoredVoiceHistory = (
+  entries: import('../types').VoiceHistoryEntry[],
+  userId?: string
+): void => {
+  try {
+    const key = userId ? `${STORAGE_KEYS.VOICE_HISTORY}_${userId}` : STORAGE_KEYS.VOICE_HISTORY;
+    localStorage.setItem(key, JSON.stringify(entries));
+  } catch (err) {
+    console.error('Failed to save voice history:', err);
+  }
+};
+
+export const addVoiceHistoryEntry = (
+  entry: { transcript: string; language: string; durationSeconds?: number; targetTranslation?: string },
+  userId?: string
+): import('../types').VoiceHistoryEntry => {
+  const current = getStoredVoiceHistory(userId);
+  const newEntry: import('../types').VoiceHistoryEntry = {
+    id: `vh-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+    userId,
+    transcript: entry.transcript,
+    language: entry.language,
+    durationSeconds: entry.durationSeconds || 3,
+    targetTranslation: entry.targetTranslation,
+    timestamp: Date.now(),
+  };
+  const updated = [newEntry, ...current].slice(0, 100);
+  saveStoredVoiceHistory(updated, userId);
+  return newEntry;
 };
 
 export const getStoredMedia = (): GeotaggedMedia[] => {
@@ -211,7 +348,6 @@ export const getStoredSettings = (): AppSettings => {
 export const saveStoredSettings = (settings: AppSettings): void => {
   try {
     localStorage.setItem(STORAGE_KEYS.SETTINGS, JSON.stringify(settings));
-    // Apply accessibility classes to document body
     if (settings.highContrast) {
       document.body.classList.add('high-contrast');
     } else {
@@ -226,6 +362,33 @@ export const saveStoredSettings = (settings: AppSettings): void => {
     }
   } catch (err) {
     console.error('Failed to save settings:', err);
+  }
+};
+
+export const getStoredUser = (): UserProfile => {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.USER);
+    if (!raw) {
+      saveStoredUser(DEFAULT_USER);
+      return DEFAULT_USER;
+    }
+    const parsed = JSON.parse(raw);
+    // Migrate away from legacy placeholder where everyone was named Aadesh Jaisi without signing in
+    if (!parsed.isLoggedIn && parsed.id === 'aadesh_global_user_1') {
+      saveStoredUser(DEFAULT_USER);
+      return DEFAULT_USER;
+    }
+    return { ...DEFAULT_USER, ...parsed };
+  } catch {
+    return DEFAULT_USER;
+  }
+};
+
+export const saveStoredUser = (user: UserProfile): void => {
+  try {
+    localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(user));
+  } catch (err) {
+    console.error('Failed to save user:', err);
   }
 };
 
@@ -289,4 +452,67 @@ export const recordMetricEvent = (params: {
   }
 
   saveStoredMetrics(current);
+};
+
+export const getStoredMemories = (userId?: string): AIMemoryItem[] => {
+  try {
+    const key = userId ? `${STORAGE_KEYS.MEMORIES}_${userId}` : STORAGE_KEYS.MEMORIES;
+    const raw = localStorage.getItem(key);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+};
+
+export const saveStoredMemories = (memories: AIMemoryItem[], userId?: string): void => {
+  try {
+    const key = userId ? `${STORAGE_KEYS.MEMORIES}_${userId}` : STORAGE_KEYS.MEMORIES;
+    localStorage.setItem(key, JSON.stringify(memories));
+  } catch (err) {
+    console.error('Failed to save AI memories:', err);
+  }
+};
+
+export const getStoredTasks = (userId?: string): PersonalTask[] => {
+  try {
+    const key = userId ? `${STORAGE_KEYS.TASKS}_${userId}` : STORAGE_KEYS.TASKS;
+    const raw = localStorage.getItem(key);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+};
+
+export const saveStoredTasks = (tasks: PersonalTask[], userId?: string): void => {
+  try {
+    const key = userId ? `${STORAGE_KEYS.TASKS}_${userId}` : STORAGE_KEYS.TASKS;
+    localStorage.setItem(key, JSON.stringify(tasks));
+  } catch (err) {
+    console.error('Failed to save personal tasks:', err);
+  }
+};
+
+export const getStoredStudyProgress = (userId?: string): StudyProgressItem[] => {
+  try {
+    const key = userId ? `${STORAGE_KEYS.STUDY_PROGRESS}_${userId}` : STORAGE_KEYS.STUDY_PROGRESS;
+    const raw = localStorage.getItem(key);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+};
+
+export const saveStoredStudyProgress = (items: StudyProgressItem[], userId?: string): void => {
+  try {
+    const key = userId ? `${STORAGE_KEYS.STUDY_PROGRESS}_${userId}` : STORAGE_KEYS.STUDY_PROGRESS;
+    localStorage.setItem(key, JSON.stringify(items));
+  } catch (err) {
+    console.error('Failed to save study progress:', err);
+  }
 };

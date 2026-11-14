@@ -15,16 +15,43 @@ import {
   X,
   Check,
   Compass,
+  LocateFixed,
+  Loader2,
 } from 'lucide-react';
 import { GeotaggedMedia, LocationData } from '../types';
 import { PRESET_LOCATIONS, SUPPORTED_LANGUAGES } from '../data/languages';
 import { GeotagPickerModal } from './GeotagPickerModal';
+
+const NEAR_ME_RADIUS_KM = 5;
+
+function toRadians(deg: number): number {
+  return (deg * Math.PI) / 180;
+}
+
+function calculateDistanceKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const earthRadiusKm = 6371;
+  const dLat = toRadians(lat2 - lat1);
+  const dLng = toRadians(lng2 - lng1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRadians(lat1)) * Math.cos(toRadians(lat2)) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return earthRadiusKm * c;
+}
+
+function formatDistanceLabel(km: number): string {
+  if (km < 1) {
+    return `${Math.round(km * 1000)} m away`;
+  }
+  return `${km < 10 ? km.toFixed(1) : Math.round(km)} km away`;
+}
 
 interface GeotagGalleryViewProps {
   mediaItems: GeotaggedMedia[];
   onAddMedia: (media: GeotaggedMedia) => void;
   onDeleteMedia: (id: string) => void;
   isOnline: boolean;
+  customGeminiApiKey?: string;
 }
 
 export const GeotagGalleryView: React.FC<GeotagGalleryViewProps> = ({
@@ -32,6 +59,7 @@ export const GeotagGalleryView: React.FC<GeotagGalleryViewProps> = ({
   onAddMedia,
   onDeleteMedia,
   isOnline,
+  customGeminiApiKey,
 }) => {
   const [selectedLocationFilter, setSelectedLocationFilter] = useState<string>('all');
   const [selectedTagFilter, setSelectedTagFilter] = useState<string>('all');
@@ -48,28 +76,100 @@ export const GeotagGalleryView: React.FC<GeotagGalleryViewProps> = ({
   const [showLocationPicker, setShowLocationPicker] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [copiedShareLink, setCopiedShareLink] = useState(false);
+  const [nearMeActive, setNearMeActive] = useState(false);
+  const [userCoords, setUserCoords] = useState<{ lat: number; lng: number } | null>(null);
+  const [isLocatingNearMe, setIsLocatingNearMe] = useState(false);
+  const [nearMeError, setNearMeError] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Request current browser Geolocation coordinates for the 5 km Near Me filter
+  const requestUserLocation = () => {
+    if (typeof navigator === 'undefined' || !('geolocation' in navigator)) {
+      setNearMeError('Geolocation is not supported by your browser.');
+      setNearMeActive(false);
+      return;
+    }
+
+    setIsLocatingNearMe(true);
+    setNearMeError(null);
+
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const coords = {
+          lat: Number(position.coords.latitude.toFixed(6)),
+          lng: Number(position.coords.longitude.toFixed(6)),
+        };
+        setUserCoords(coords);
+        setNearMeActive(true);
+        setSelectedLocationFilter('all');
+        setIsLocatingNearMe(false);
+      },
+      (error) => {
+        let message = 'Unable to determine your current location.';
+        if (error.code === error.PERMISSION_DENIED) {
+          message = 'Location permission was denied. Please allow location access in your browser to filter media within 5 km.';
+        } else if (error.code === error.POSITION_UNAVAILABLE) {
+          message = 'Your device location is currently unavailable.';
+        } else if (error.code === error.TIMEOUT) {
+          message = 'Location request timed out. Please try again.';
+        }
+        setNearMeError(message);
+        setNearMeActive(false);
+        setIsLocatingNearMe(false);
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 10000,
+        maximumAge: 60000,
+      }
+    );
+  };
+
+  const handleToggleNearMe = () => {
+    if (isLocatingNearMe) return;
+    if (nearMeActive) {
+      setNearMeActive(false);
+      setNearMeError(null);
+      return;
+    }
+    requestUserLocation();
+  };
 
   // Extract unique locations and tags for filtering
   const allLocations = Array.from(new Set(mediaItems.map((m) => m.location.city || m.location.name)));
   const allTags = Array.from(new Set(mediaItems.flatMap((m) => m.tags)));
 
-  // Filtered media
-  const filteredMedia = mediaItems.filter((item) => {
-    const matchesLoc =
-      selectedLocationFilter === 'all' ||
-      item.location.city === selectedLocationFilter ||
-      item.location.name === selectedLocationFilter;
-    const matchesTag = selectedTagFilter === 'all' || item.tags.includes(selectedTagFilter);
-    const matchesSearch =
-      !searchQuery ||
-      item.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      item.location.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      item.caption?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      item.detectedLandmark?.toLowerCase().includes(searchQuery.toLowerCase());
-    return matchesLoc && matchesTag && matchesSearch;
-  });
+  // Filtered media (with optional 5-kilometer Near Me Haversine filter & distance sorting)
+  const filteredMedia = mediaItems
+    .map((item) => ({
+      item,
+      distanceKm: userCoords
+        ? calculateDistanceKm(userCoords.lat, userCoords.lng, item.location.lat, item.location.lng)
+        : null,
+    }))
+    .filter(({ item, distanceKm }) => {
+      const matchesLoc =
+        selectedLocationFilter === 'all' ||
+        item.location.city === selectedLocationFilter ||
+        item.location.name === selectedLocationFilter;
+      const matchesTag = selectedTagFilter === 'all' || item.tags.includes(selectedTagFilter);
+      const matchesSearch =
+        !searchQuery ||
+        item.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        item.location.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        item.caption?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        item.detectedLandmark?.toLowerCase().includes(searchQuery.toLowerCase());
+      const matchesNearMe =
+        !nearMeActive || (distanceKm !== null && distanceKm <= NEAR_ME_RADIUS_KM);
+      return matchesLoc && matchesTag && matchesSearch && matchesNearMe;
+    })
+    .sort((a, b) => {
+      if (nearMeActive && a.distanceKm !== null && b.distanceKm !== null) {
+        return a.distanceKm - b.distanceKm;
+      }
+      return b.item.timestamp - a.item.timestamp;
+    });
 
   // Handle file selection
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -109,19 +209,27 @@ export const GeotagGalleryView: React.FC<GeotagGalleryViewProps> = ({
         return;
       }
 
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (customGeminiApiKey) {
+        headers['x-gemini-api-key'] = customGeminiApiKey;
+      }
       const res = await fetch('/api/analyze-geotag', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           imageData: uploadFile.url,
           imageMimeType: uploadFile.mimeType,
           locationName: uploadLocation.name,
           lat: uploadLocation.lat,
           lng: uploadLocation.lng,
+          customApiKey: customGeminiApiKey,
         }),
       });
 
       const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || `Analyze failed (${res.status})`);
+      }
       if (data.title) setUploadTitle(data.title);
       if (data.culturalSummary) setUploadCaption(data.culturalSummary);
     } catch (err) {
@@ -220,12 +328,18 @@ export const GeotagGalleryView: React.FC<GeotagGalleryViewProps> = ({
             const xPercent = Math.max(5, Math.min(95, ((item.location.lng + 180) / 360) * 100));
             const yPercent = Math.max(8, Math.min(92, ((90 - item.location.lat) / 180) * 100));
             const isSelected = selectedPinItem?.id === item.id;
+            const distanceKm = userCoords
+              ? calculateDistanceKm(userCoords.lat, userCoords.lng, item.location.lat, item.location.lng)
+              : null;
+            const isWithinRadius = distanceKm !== null && distanceKm <= NEAR_ME_RADIUS_KM;
 
             return (
               <div
                 key={item.id}
                 style={{ left: `${xPercent}%`, top: `${yPercent}%` }}
-                className="absolute -translate-x-1/2 -translate-y-1/2 z-20 group cursor-pointer"
+                className={`absolute -translate-x-1/2 -translate-y-1/2 z-20 group cursor-pointer transition-opacity ${
+                  nearMeActive && !isWithinRadius ? 'opacity-30' : 'opacity-100'
+                }`}
                 onClick={() => setSelectedPinItem(item)}
               >
                 {/* Glowing Pulse Ring */}
@@ -233,6 +347,8 @@ export const GeotagGalleryView: React.FC<GeotagGalleryViewProps> = ({
                   className={`w-6 h-6 rounded-full flex items-center justify-center transition-transform hover:scale-125 ${
                     isSelected
                       ? 'bg-purple-500 shadow-lg shadow-purple-500/80 scale-125'
+                      : isWithinRadius && nearMeActive
+                      ? 'bg-emerald-500 shadow-lg shadow-emerald-500/70'
                       : 'bg-purple-600/80 hover:bg-purple-500 shadow-md shadow-purple-900/50'
                   }`}
                 >
@@ -242,10 +358,26 @@ export const GeotagGalleryView: React.FC<GeotagGalleryViewProps> = ({
                 {/* Tooltip on Hover */}
                 <div className="hidden group-hover:block absolute bottom-8 left-1/2 -translate-x-1/2 whitespace-nowrap bg-[#131520] border border-purple-500/50 text-white text-[10px] px-2.5 py-1 rounded-lg shadow-xl z-30">
                   <span className="font-bold">{item.title}</span> • {item.location.city || item.location.name}
+                  {distanceKm !== null && ` (${formatDistanceLabel(distanceKm)})`}
                 </div>
               </div>
             );
           })}
+
+          {/* User's Current GPS Position Beacon */}
+          {userCoords && (
+            <div
+              style={{
+                left: `${Math.max(5, Math.min(95, ((userCoords.lng + 180) / 360) * 100))}%`,
+                top: `${Math.max(8, Math.min(92, ((90 - userCoords.lat) / 180) * 100))}%`,
+              }}
+              className="absolute -translate-x-1/2 -translate-y-1/2 z-25 group pointer-events-auto"
+              title={`Your Position: ${userCoords.lat.toFixed(4)}°, ${userCoords.lng.toFixed(4)}°`}
+            >
+              <span className="absolute -inset-2 rounded-full bg-emerald-400/30 animate-ping" />
+              <div className="relative w-4 h-4 rounded-full bg-emerald-400 border-2 border-white shadow-[0_0_12px_rgba(16,185,129,0.9)]" />
+            </div>
+          )}
 
           {/* Selected Pin Mini Card Overlay */}
           {selectedPinItem && (
@@ -282,151 +414,280 @@ export const GeotagGalleryView: React.FC<GeotagGalleryViewProps> = ({
       </div>
 
       {/* FILTER & SEARCH BAR */}
-      <div className="flex flex-col sm:flex-row gap-3 items-stretch sm:items-center justify-between">
-        {/* Search Input */}
-        <div className="relative flex-1 max-w-md">
-          <Search className="w-4 h-4 text-gray-400 absolute left-3 top-3" />
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search landmarks, tags, cities, or captions..."
-            className="w-full bg-[#131520] border border-[#232738] focus:border-purple-500 rounded-xl pl-9 pr-3 py-2 text-xs sm:text-sm text-gray-200 outline-none placeholder-gray-500"
-          />
-        </div>
+      <div className="space-y-3">
+        <div className="flex flex-col sm:flex-row gap-3 items-stretch sm:items-center justify-between">
+          {/* Search Input */}
+          <div className="relative flex-1 max-w-md">
+            <Search className="w-4 h-4 text-gray-400 absolute left-3 top-3" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search landmarks, tags, cities, or captions..."
+              className="w-full bg-[#131520] border border-[#232738] focus:border-purple-500 rounded-xl pl-9 pr-3 py-2 text-xs sm:text-sm text-gray-200 outline-none placeholder-gray-500"
+            />
+          </div>
 
-        {/* Filters */}
-        <div className="flex items-center gap-2 overflow-x-auto pb-1 sm:pb-0">
-          {/* Location Filter */}
-          <select
-            value={selectedLocationFilter}
-            onChange={(e) => setSelectedLocationFilter(e.target.value)}
-            className="bg-[#131520] border border-[#232738] text-xs font-medium text-gray-300 rounded-xl px-3 py-2 outline-none cursor-pointer"
-          >
-            <option value="all">All Locations</option>
-            {allLocations.map((loc) => (
-              <option key={loc} value={loc}>
-                {loc}
-              </option>
-            ))}
-          </select>
-
-          {/* Tag Filter */}
-          <select
-            value={selectedTagFilter}
-            onChange={(e) => setSelectedTagFilter(e.target.value)}
-            className="bg-[#131520] border border-[#232738] text-xs font-medium text-gray-300 rounded-xl px-3 py-2 outline-none cursor-pointer"
-          >
-            <option value="all">All Tags</option>
-            {allTags.map((t) => (
-              <option key={t} value={t}>
-                #{t}
-              </option>
-            ))}
-          </select>
-        </div>
-      </div>
-
-      {/* MEDIA GRID */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5">
-        {filteredMedia.map((item) => (
-          <div
-            key={item.id}
-            className="glass-card glass-card-hover rounded-2xl overflow-hidden border border-[#232738] hover:border-purple-500/50 flex flex-col justify-between group shadow-lg"
-          >
-            {/* Media Thumbnail Container */}
-            <div className="relative aspect-4/3 w-full overflow-hidden bg-[#090a0f]">
-              {item.type === 'video' ? (
-                <video src={item.mediaUrl} className="w-full h-full object-cover" controls />
+          {/* Filters */}
+          <div className="flex items-center gap-2 overflow-x-auto pb-1 sm:pb-0">
+            {/* Near Me (5 km Radius) Filter Button */}
+            <button
+              type="button"
+              onClick={handleToggleNearMe}
+              disabled={isLocatingNearMe}
+              aria-pressed={nearMeActive}
+              title="Filter media captured within 5 km of your current GPS position"
+              className={`px-3 py-2 rounded-xl border text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap transition-all cursor-pointer shrink-0 ${
+                nearMeActive
+                  ? 'bg-emerald-950/70 border-emerald-400/70 text-emerald-200 shadow-[0_0_16px_rgba(16,185,129,0.28)]'
+                  : 'bg-[#131520] hover:bg-purple-900/30 border-[#232738] hover:border-purple-500/50 text-gray-200'
+              } disabled:opacity-60 disabled:cursor-wait`}
+            >
+              {isLocatingNearMe ? (
+                <Loader2 className="w-3.5 h-3.5 text-emerald-400 animate-spin" />
               ) : (
-                <img
-                  src={item.mediaUrl}
-                  alt={item.title}
-                  className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
-                  loading="lazy"
-                />
+                <LocateFixed className={`w-3.5 h-3.5 ${nearMeActive ? 'text-emerald-300' : 'text-purple-400'}`} />
               )}
+              <span>
+                {isLocatingNearMe
+                  ? 'Locating...'
+                  : nearMeActive
+                  ? `Near Me · 5 km (${filteredMedia.length})`
+                  : 'Near Me (5 km)'}
+              </span>
+            </button>
 
-              {/* Type Badge */}
-              <div className="absolute top-2.5 left-2.5 bg-black/60 backdrop-blur-md px-2 py-0.5 rounded-full border border-white/10 text-[10px] text-white flex items-center gap-1">
-                {item.type === 'video' ? <Video className="w-3 h-3 text-red-400" /> : <ImageIcon className="w-3 h-3 text-purple-400" />}
-                <span className="capitalize">{item.type}</span>
-              </div>
+            {/* Location Filter */}
+            <select
+              value={selectedLocationFilter}
+              onChange={(e) => setSelectedLocationFilter(e.target.value)}
+              className="bg-[#131520] border border-[#232738] text-xs font-medium text-gray-300 rounded-xl px-3 py-2 outline-none cursor-pointer"
+            >
+              <option value="all">All Locations</option>
+              {allLocations.map((loc) => (
+                <option key={loc} value={loc}>
+                  {loc}
+                </option>
+              ))}
+            </select>
 
-              {/* Coordinates Badge */}
-              <div className="absolute top-2.5 right-2.5 bg-black/60 backdrop-blur-md px-2 py-0.5 rounded-full border border-white/10 text-[9px] text-purple-300 flex items-center gap-1">
-                <MapPin className="w-2.5 h-2.5" />
-                <span>
-                  {item.location.lat}°, {item.location.lng}°
-                </span>
-              </div>
+            {/* Tag Filter */}
+            <select
+              value={selectedTagFilter}
+              onChange={(e) => setSelectedTagFilter(e.target.value)}
+              className="bg-[#131520] border border-[#232738] text-xs font-medium text-gray-300 rounded-xl px-3 py-2 outline-none cursor-pointer"
+            >
+              <option value="all">All Tags</option>
+              {allTags.map((t) => (
+                <option key={t} value={t}>
+                  #{t}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        {/* Active Near Me Status Banner */}
+        {nearMeActive && userCoords && (
+          <div className="glass-card rounded-xl px-3.5 py-2.5 border border-emerald-500/40 bg-emerald-950/25 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+            <div className="flex items-center gap-2 text-emerald-200">
+              <LocateFixed className="w-4 h-4 text-emerald-400 shrink-0" />
+              <span>
+                Showing media captured within <strong>{NEAR_ME_RADIUS_KM} km</strong> of{' '}
+                <span className="font-mono text-emerald-300">
+                  {userCoords.lat.toFixed(4)}°, {userCoords.lng.toFixed(4)}°
+                </span>{' '}
+                • <strong>{filteredMedia.length}</strong> {filteredMedia.length === 1 ? 'result' : 'results'}
+              </span>
             </div>
-
-            {/* Info Body */}
-            <div className="p-4 space-y-3 flex-grow flex flex-col justify-between">
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between text-[11px] text-purple-400 font-semibold">
-                  <span className="flex items-center gap-1 truncate">
-                    <MapPin className="w-3 h-3 shrink-0" />
-                    <span className="truncate">{item.location.name}</span>
-                  </span>
-                  <span className="text-[10px] text-gray-500">
-                    {new Date(item.timestamp).toLocaleDateString()}
-                  </span>
-                </div>
-
-                <h4 className="text-sm font-bold text-white group-hover:text-purple-300 transition-colors line-clamp-1">
-                  {item.title}
-                </h4>
-
-                {item.caption && (
-                  <p className="text-xs text-gray-400 line-clamp-2">
-                    {item.caption}
-                  </p>
-                )}
-
-                {item.detectedLandmark && (
-                  <div className="text-[10px] bg-purple-950/40 text-purple-300 border border-purple-500/20 px-2 py-0.5 rounded-md inline-block">
-                    Landmark: {item.detectedLandmark}
-                  </div>
-                )}
-              </div>
-
-              {/* Tags & Action Buttons */}
-              <div className="space-y-3 pt-2 border-t border-[#232738]">
-                <div className="flex flex-wrap gap-1">
-                  {item.tags.slice(0, 3).map((tag, idx) => (
-                    <span
-                      key={idx}
-                      className="text-[10px] bg-[#090a0f] text-gray-400 border border-[#232738] px-2 py-0.5 rounded-md"
-                    >
-                      #{tag}
-                    </span>
-                  ))}
-                </div>
-
-                <div className="flex items-center justify-between pt-1">
-                  <button
-                    onClick={() => setActiveMediaForShare(item)}
-                    className="text-xs text-purple-400 hover:text-purple-300 font-semibold flex items-center gap-1.5 transition-colors"
-                  >
-                    <Share2 className="w-3.5 h-3.5" />
-                    <span>Share Card</span>
-                  </button>
-
-                  <button
-                    onClick={() => onDeleteMedia(item.id)}
-                    className="text-gray-500 hover:text-red-400 transition-colors text-xs"
-                    title="Delete Media"
-                  >
-                    Remove
-                  </button>
-                </div>
-              </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={requestUserLocation}
+                disabled={isLocatingNearMe}
+                className="px-2.5 py-1 rounded-lg bg-[#090a0f] hover:bg-emerald-900/40 border border-emerald-500/35 text-[11px] font-semibold text-emerald-200 cursor-pointer"
+              >
+                Refresh GPS
+              </button>
+              <button
+                type="button"
+                onClick={() => setNearMeActive(false)}
+                className="px-2.5 py-1 rounded-lg bg-[#090a0f] hover:bg-white/10 border border-white/15 text-[11px] text-gray-300 hover:text-white cursor-pointer"
+              >
+                Clear Filter
+              </button>
             </div>
           </div>
-        ))}
+        )}
+
+        {/* Geolocation Permission / Availability Error Banner */}
+        {nearMeError && (
+          <div className="glass-card rounded-xl px-3.5 py-2.5 border border-rose-500/40 bg-rose-950/30 flex items-center justify-between gap-2 text-xs text-rose-200">
+            <span>{nearMeError}</span>
+            <button
+              type="button"
+              onClick={() => setNearMeError(null)}
+              className="p-1 text-rose-300 hover:text-white cursor-pointer"
+              aria-label="Dismiss location error"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
       </div>
+
+      {/* EMPTY STATE WHEN NO MEDIA MATCHES */}
+      {filteredMedia.length === 0 ? (
+        <div className="glass-card rounded-2xl p-8 border border-purple-500/25 text-center space-y-3">
+          <div className="w-12 h-12 rounded-2xl bg-purple-950/70 border border-purple-500/30 flex items-center justify-center mx-auto text-purple-300">
+            {nearMeActive ? <LocateFixed className="w-6 h-6 text-emerald-400" /> : <MapPin className="w-6 h-6" />}
+          </div>
+          <h3 className="text-base font-bold text-white">
+            {nearMeActive
+              ? `No geotagged media found within ${NEAR_ME_RADIUS_KM} km of your current position`
+              : 'No geotagged media matches your current filters'}
+          </h3>
+          <p className="text-xs text-gray-400 max-w-md mx-auto">
+            {nearMeActive
+              ? 'Upload a photo or video tagged at your current GPS coordinates, or turn off the 5 km filter to browse all global captures.'
+              : 'Try clearing your search query or switching back to All Locations and All Tags.'}
+          </p>
+          <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+            {nearMeActive && userCoords && (
+              <button
+                type="button"
+                onClick={() => {
+                  setUploadLocation({
+                    name: `Current Position (${userCoords.lat.toFixed(3)}°, ${userCoords.lng.toFixed(3)}°)`,
+                    lat: userCoords.lat,
+                    lng: userCoords.lng,
+                  });
+                  setIsUploadModalOpen(true);
+                }}
+                className="purple-glow-btn px-4 py-2 rounded-xl text-xs font-semibold text-white flex items-center gap-1.5 cursor-pointer"
+              >
+                <Upload className="w-3.5 h-3.5" />
+                <span>Upload Media at My Location</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                setNearMeActive(false);
+                setSelectedLocationFilter('all');
+                setSelectedTagFilter('all');
+                setSearchQuery('');
+              }}
+              className="px-4 py-2 rounded-xl bg-[#131520] hover:bg-white/10 border border-[#232738] text-xs font-semibold text-gray-200 cursor-pointer"
+            >
+              Show All Worldwide Media
+            </button>
+          </div>
+        </div>
+      ) : (
+        /* MEDIA GRID */
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5">
+          {filteredMedia.map(({ item, distanceKm }) => (
+            <div
+              key={item.id}
+              className="glass-card glass-card-hover rounded-2xl overflow-hidden border border-[#232738] hover:border-purple-500/50 flex flex-col justify-between group shadow-lg"
+            >
+              {/* Media Thumbnail Container */}
+              <div className="relative aspect-4/3 w-full overflow-hidden bg-[#090a0f]">
+                {item.type === 'video' ? (
+                  <video src={item.mediaUrl} className="w-full h-full object-cover" controls />
+                ) : (
+                  <img
+                    src={item.mediaUrl}
+                    alt={item.title}
+                    className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                    loading="lazy"
+                  />
+                )}
+
+                {/* Type Badge */}
+                <div className="absolute top-2.5 left-2.5 bg-black/60 backdrop-blur-md px-2 py-0.5 rounded-full border border-white/10 text-[10px] text-white flex items-center gap-1">
+                  {item.type === 'video' ? <Video className="w-3 h-3 text-red-400" /> : <ImageIcon className="w-3 h-3 text-purple-400" />}
+                  <span className="capitalize">{item.type}</span>
+                </div>
+
+                {/* Coordinates / Distance Badge */}
+                <div className="absolute top-2.5 right-2.5 bg-black/60 backdrop-blur-md px-2 py-0.5 rounded-full border border-white/10 text-[9px] text-purple-300 flex items-center gap-1">
+                  <MapPin className="w-2.5 h-2.5" />
+                  <span>
+                    {distanceKm !== null
+                      ? formatDistanceLabel(distanceKm)
+                      : `${item.location.lat}°, ${item.location.lng}°`}
+                  </span>
+                </div>
+              </div>
+
+              {/* Info Body */}
+              <div className="p-4 space-y-3 flex-grow flex flex-col justify-between">
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between text-[11px] text-purple-400 font-semibold">
+                    <span className="flex items-center gap-1 truncate">
+                      <MapPin className="w-3 h-3 shrink-0" />
+                      <span className="truncate">{item.location.name}</span>
+                    </span>
+                    <span className="text-[10px] text-gray-500">
+                      {new Date(item.timestamp).toLocaleDateString()}
+                    </span>
+                  </div>
+
+                  <h4 className="text-sm font-bold text-white group-hover:text-purple-300 transition-colors line-clamp-1">
+                    {item.title}
+                  </h4>
+
+                  {item.caption && (
+                    <p className="text-xs text-gray-400 line-clamp-2">
+                      {item.caption}
+                    </p>
+                  )}
+
+                  {item.detectedLandmark && (
+                    <div className="text-[10px] bg-purple-950/40 text-purple-300 border border-purple-500/20 px-2 py-0.5 rounded-md inline-block">
+                      Landmark: {item.detectedLandmark}
+                    </div>
+                  )}
+                </div>
+
+                {/* Tags & Action Buttons */}
+                <div className="space-y-3 pt-2 border-t border-[#232738]">
+                  <div className="flex flex-wrap gap-1">
+                    {item.tags.slice(0, 3).map((tag, idx) => (
+                      <span
+                        key={idx}
+                        className="text-[10px] bg-[#090a0f] text-gray-400 border border-[#232738] px-2 py-0.5 rounded-md"
+                      >
+                        #{tag}
+                      </span>
+                    ))}
+                  </div>
+
+                  <div className="flex items-center justify-between pt-1">
+                    <button
+                      onClick={() => setActiveMediaForShare(item)}
+                      className="text-xs text-purple-400 hover:text-purple-300 font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                    >
+                      <Share2 className="w-3.5 h-3.5" />
+                      <span>Share Card</span>
+                    </button>
+
+                    <button
+                      onClick={() => onDeleteMedia(item.id)}
+                      className="text-gray-500 hover:text-red-400 transition-colors text-xs cursor-pointer"
+                      title="Delete Media"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* SHAREABLE MEDIA GEOTAG CARD MODAL */}
       {activeMediaForShare && (

@@ -109,16 +109,24 @@ export const InterpreterView: React.FC<InterpreterViewProps> = ({
         translatedText = `[Offline Translated (${targetLangObj.name})] ${sourceText}`;
         culturalNote = 'Translated via local offline dictionary cache.';
       } else {
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (settings.customGeminiApiKey) {
+          headers['x-gemini-api-key'] = settings.customGeminiApiKey;
+        }
         const res = await fetch('/api/translate', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers,
           body: JSON.stringify({
             text: sourceText,
             sourceLang,
             targetLang,
+            customApiKey: settings.customGeminiApiKey,
           }),
         });
         const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.error || `Translation failed (${res.status})`);
+        }
         translatedText = data.translatedText || sourceText;
         pronunciation = data.pronunciation || '';
         culturalNote = data.culturalNote || '';
@@ -145,6 +153,7 @@ export const InterpreterView: React.FC<InterpreterViewProps> = ({
         voiceAssistant.speak(translatedText, targetLangObj.speechCode, {
           rate: settings.voiceSpeed,
           pitch: settings.voicePitch,
+          volume: settings.voiceVolume ?? 1.0,
         });
       }
     } catch (err) {
@@ -205,6 +214,7 @@ export const InterpreterView: React.FC<InterpreterViewProps> = ({
     voiceAssistant.speak(text, langObj?.speechCode || 'en-US', {
       rate: settings.voiceSpeed,
       pitch: settings.voicePitch,
+      volume: settings.voiceVolume ?? 1.0,
     });
   };
 
