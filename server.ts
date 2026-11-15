@@ -13,14 +13,20 @@ const __dirname = path.dirname(__filename);
 const OWNER_ADMIN_EMAIL = (process.env.ADMIN_EMAIL || 'aadeshjaisi6@gmail.com').trim().toLowerCase();
 
 function getFirebaseWebApiKey(): string {
-  try {
-    const configPath = path.resolve(__dirname, 'firebase-applet-config.json');
-    if (fs.existsSync(configPath)) {
-      const parsed = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-      return String(parsed.apiKey || '').trim();
-    }
-  } catch {}
-  return String(process.env.VITE_FIREBASE_API_KEY || '').trim();
+  const candidates = [
+    path.resolve(__dirname, 'firebase-applet-config.json'),
+    path.resolve(process.cwd(), 'firebase-applet-config.json'),
+  ];
+  for (const configPath of candidates) {
+    try {
+      if (fs.existsSync(configPath)) {
+        const parsed = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+        const key = String(parsed.apiKey || '').trim();
+        if (key) return key;
+      }
+    } catch {}
+  }
+  return String(process.env.FIREBASE_API_KEY || process.env.VITE_FIREBASE_API_KEY || '').trim();
 }
 
 async function verifyOwnerFromRequest(req: Request): Promise<{
@@ -544,6 +550,8 @@ app.post('/api/chat/stream', async (req: Request, res: Response): Promise<void> 
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders?.();
 
     const targetLangName = LANGUAGE_NAMES[targetLanguage] || targetLanguage;
     const userLangName = LANGUAGE_NAMES[userLanguage] || userLanguage;
@@ -628,8 +636,12 @@ Tone: ${personaInstruction}${memoryBlock}`;
     res.end();
   } catch (err: any) {
     const safeError = sanitizeErrorMessage(err);
-    res.write(`data: ${JSON.stringify({ error: safeError, done: true })}\n\n`);
-    res.end();
+    if (res.headersSent) {
+      res.write(`data: ${JSON.stringify({ error: safeError, done: true })}\n\n`);
+      res.end();
+    } else {
+      res.status(isAuthFailure(err) ? 401 : 502).json({ error: safeError });
+    }
   }
 });
 
@@ -2331,7 +2343,15 @@ Create a clear 3 to 5 step execution plan with substantive Markdown output for e
   }
 });
 
-// Vite middleware in dev or static files in production
+// Structured JSON 404 for unknown /api/* endpoints (prevents HTML SPA fallback on missing API routes)
+app.all('/api/*', (req: Request, res: Response): void => {
+  res.status(404).json({
+    ok: false,
+    error: `API endpoint not found: ${req.method} ${req.originalUrl}`,
+  });
+});
+
+// Vite middleware in dev or static files in local production
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
     const { createServer } = await import('vite');
@@ -2353,4 +2373,10 @@ async function startServer() {
   });
 }
 
-startServer();
+// Only start HTTP listener locally; on Vercel, /api/index.ts invokes the exported Express app
+if (!process.env.VERCEL && !process.env.VERCEL_ENV) {
+  void startServer();
+}
+
+export { app };
+export default app;
