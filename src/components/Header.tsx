@@ -11,7 +11,6 @@ import {
   Moon,
   Sparkles,
   Flame,
-  Search,
   Check,
   User as UserIcon,
   LogIn,
@@ -24,16 +23,9 @@ import {
   Edit3,
   Download,
   Smartphone,
-  Clock,
-  Globe2,
 } from 'lucide-react';
 import { AIConnectionState, AppSettings, UserProfile } from '../types';
 import { SUPPORTED_LANGUAGES, UI_TRANSLATIONS } from '../data/languages';
-import {
-  ALL_COUNTRY_CLOCKS,
-  DEFAULT_PINNED_COUNTRY_CODES,
-  formatCountryTime,
-} from '../data/worldClocks';
 import { computeLevelInfo } from '../utils/gamification';
 import { GamificationWidget } from './GamificationWidget';
 import { generateThemeTokensFromColor } from '../utils/avatarTheme';
@@ -80,27 +72,16 @@ export const Header: React.FC<HeaderProps> = ({
   const [langDropdownOpen, setLangDropdownOpen] = useState(false);
   const [accessMenuOpen, setAccessMenuOpen] = useState(false);
   const [profileDropdownOpen, setProfileDropdownOpen] = useState(false);
-  const [clockDropdownOpen, setClockDropdownOpen] = useState(false);
-  const [now, setNow] = useState<Date>(() => new Date());
 
   const profileRef = useRef<HTMLDivElement>(null);
   const langRef = useRef<HTMLDivElement>(null);
   const accessRef = useRef<HTMLDivElement>(null);
-  const clockRef = useRef<HTMLDivElement>(null);
 
   const t = UI_TRANSLATIONS[settings.uiLanguage] || UI_TRANSLATIONS.en;
   const currentLang =
     SUPPORTED_LANGUAGES.find((l) => l.code === settings.uiLanguage) || SUPPORTED_LANGUAGES[0];
 
   const levelInfo = computeLevelInfo(user.xp || 0);
-
-  // Live 1-second tick for real-time local & world clocks
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      setNow(new Date());
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, []);
 
   // Close dropdowns when clicking outside
   useEffect(() => {
@@ -113,9 +94,6 @@ export const Header: React.FC<HeaderProps> = ({
       }
       if (accessRef.current && !accessRef.current.contains(event.target as Node)) {
         setAccessMenuOpen(false);
-      }
-      if (clockRef.current && !clockRef.current.contains(event.target as Node)) {
-        setClockDropdownOpen(false);
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
@@ -137,7 +115,7 @@ export const Header: React.FC<HeaderProps> = ({
             onClick={() => onSelectTab('chat')}
             className="cursor-pointer flex items-center gap-1.5"
           >
-            <span className="text-sm sm:text-lg font-black tracking-tight text-white flex items-center gap-1 whitespace-nowrap">
+            <span className="text-sm sm:text-lg font-black tracking-tight px-2.5 py-0.5 rounded-lg bg-gradient-to-r from-purple-600/35 via-indigo-500/30 to-amber-500/25 border border-purple-400/60 shadow-[0_0_16px_rgba(139,92,246,0.45)] text-white flex items-center gap-1 whitespace-nowrap transition-all hover:shadow-[0_0_24px_rgba(168,85,247,0.65)]">
               Aadesh <span className="text-gradient">AI</span>
             </span>
             <span className="text-xs font-semibold text-purple-300 hidden md:inline whitespace-nowrap">
@@ -192,106 +170,8 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
       </div>
 
-      {/* CENTER SEARCH BAR */}
-      <div className="hidden md:flex items-center relative w-1/3 max-w-md min-w-0">
-        <Search className="absolute left-3.5 w-4 h-4 text-gray-400" />
-        <input
-          type="text"
-          value={searchQuery}
-          onChange={(e) => onSearchChange(e.target.value)}
-          placeholder={t.searchPlaceholder || 'Search messages, sessions, or geotags...'}
-          className="w-full bg-[#131520]/80 border border-[#232738] focus:border-purple-500 text-xs sm:text-sm rounded-xl pl-10 pr-4 py-2 text-gray-200 placeholder-gray-500 outline-none transition-all focus:ring-1 focus:ring-purple-500/50"
-        />
-        {searchQuery && (
-          <button
-            onClick={() => onSearchChange('')}
-            className="absolute right-3 text-xs text-gray-400 hover:text-white cursor-pointer"
-          >
-            ✕
-          </button>
-        )}
-      </div>
-
-      {/* RIGHT CONTROLS: LIVE WORLD CLOCK + STREAK/XP PILL + USER IDENTITY WITH ORANGE HIGHLIGHT + UTILITIES */}
+      {/* RIGHT CONTROLS: STREAK/XP PILL + USER IDENTITY WITH ORANGE HIGHLIGHT + UTILITIES */}
       <div className="flex items-center gap-1.5 sm:gap-2.5 shrink-0">
-        {/* LIVE REAL-TIME WORLD CLOCK TICKER */}
-        <div className="relative" ref={clockRef}>
-          <button
-            type="button"
-            onClick={() => {
-              setClockDropdownOpen((prev) => !prev);
-              setProfileDropdownOpen(false);
-              setLangDropdownOpen(false);
-              setAccessMenuOpen(false);
-            }}
-            className={`flex items-center justify-center p-2 rounded-xl border text-xs transition-all cursor-pointer min-h-[38px] min-w-[38px] ${
-              activeTab === 'worldTime' || clockDropdownOpen
-                ? 'bg-purple-900/50 border-purple-400/70 text-white'
-                : 'bg-[#131520] hover:bg-purple-900/30 border-[#232738] hover:border-purple-500/40 text-purple-200'
-            }`}
-            title="Live Real-Time World Clock (All Countries)"
-            aria-label="Open live world clock across all countries"
-          >
-            <Clock className="w-4 h-4 text-emerald-400 shrink-0" />
-          </button>
-
-          {clockDropdownOpen && (
-            <div className="absolute right-0 mt-2 w-72 max-w-[calc(100vw-1rem)] glass-card rounded-2xl p-3 border border-purple-500/45 shadow-2xl z-50 animate-in fade-in zoom-in-95 duration-150 space-y-2.5">
-              <div className="flex items-center justify-between border-b border-white/10 pb-2">
-                <span className="text-xs font-bold text-white flex items-center gap-1.5">
-                  <Globe2 className="w-4 h-4 text-purple-400" />
-                  <span>Live World Clocks</span>
-                </span>
-                <span className="text-[10px] font-bold text-emerald-300 flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                  <span>Real-Time</span>
-                </span>
-              </div>
-
-              <div className="space-y-1.5 max-h-64 overflow-y-auto pr-0.5">
-                {DEFAULT_PINNED_COUNTRY_CODES.map((code) => {
-                  const entry = ALL_COUNTRY_CLOCKS.find((c) => c.code === code);
-                  if (!entry) return null;
-                  const formatted = formatCountryTime(now, entry.timeZone, false);
-                  return (
-                    <div
-                      key={entry.code}
-                      className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-xl bg-[#090a0f]/85 border border-white/5 text-xs"
-                    >
-                      <div className="flex items-center gap-2 min-w-0">
-                        <span className="text-base leading-none">{entry.flag}</span>
-                        <div className="min-w-0">
-                          <div className="font-semibold text-white truncate">{entry.country}</div>
-                          <div className="text-[10px] text-gray-400 truncate">
-                            {entry.city} · {formatted.utcOffsetLabel}
-                          </div>
-                        </div>
-                      </div>
-                      <div className="text-right shrink-0">
-                        <div className="font-mono tabular-nums font-bold text-purple-200">
-                          {formatted.timeString}
-                        </div>
-                        <div className="text-[9px] text-gray-400">{formatted.relativeDayLabel}</div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-
-              <button
-                type="button"
-                onClick={() => {
-                  setClockDropdownOpen(false);
-                  onSelectTab('worldTime');
-                }}
-                className="purple-glow-btn w-full py-2 px-3 rounded-xl text-xs font-bold text-white flex items-center justify-center gap-1.5 cursor-pointer"
-              >
-                <Globe2 className="w-3.5 h-3.5" />
-                <span>View All {ALL_COUNTRY_CLOCKS.length} Countries →</span>
-              </button>
-            </div>
-          )}
-        </div>
 
         {/* GAMIFICATION STREAK, XP & DAILY GOALS WIDGET */}
         <GamificationWidget user={user} onClick={onOpenGamification} className="hidden md:flex" />

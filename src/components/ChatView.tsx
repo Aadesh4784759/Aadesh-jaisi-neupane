@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { motion, AnimatePresence, useReducedMotion } from 'motion/react';
 import {
   Send,
   Image as ImageIcon,
@@ -54,6 +55,8 @@ import {
   User as UserIcon,
   GraduationCap,
   Tag,
+  BookOpen,
+  GripVertical,
 } from 'lucide-react';
 import { AppSettings, ChatMessage, ChatSession, LocationData, UserProfile } from '../types';
 import { SUPPORTED_LANGUAGES, UI_TRANSLATIONS, VOICE_PERSONAS, isRtlLanguage } from '../data/languages';
@@ -65,6 +68,9 @@ import { HighlightText } from './HighlightText';
 import { voiceAssistant, VoicePlaybackState } from '../utils/speech';
 import { generateThemeTokensFromColor } from '../utils/avatarTheme';
 import { DEFAULT_SESSION_CATEGORIES } from '../utils/storage';
+import { DocumentAssistantModal } from './DocumentAssistantModal';
+import { AnimatedWelcomeHero } from './AnimatedWelcomeHero';
+import { AgentModePanel } from './AgentModePanel';
 
 interface ChatViewProps {
   currentSession: ChatSession;
@@ -173,11 +179,14 @@ export const ChatView: React.FC<ChatViewProps> = ({
   onSearchChange,
   isKeyboardOpen = false,
 }) => {
+  const prefersReducedMotion = useReducedMotion();
   const [inputText, setInputText] = useState('');
   const [selectedImage, setSelectedImage] = useState<{ base64: string; mimeType: string } | null>(null);
   const [selectedFile, setSelectedFile] = useState<{ name: string; content: string } | null>(null);
   const [attachedLocation, setAttachedLocation] = useState<LocationData | undefined>(undefined);
   const [showGeotagModal, setShowGeotagModal] = useState(false);
+  const [showDocAssistant, setShowDocAssistant] = useState(false);
+  const [aiMode, setAiMode] = useState<'chatbot' | 'agent'>('chatbot');
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState<string>('');
   const [isRecording, setIsRecording] = useState(false);
@@ -208,6 +217,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const [isCreatingFolder, setIsCreatingFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [folderAssignSessionId, setFolderAssignSessionId] = useState<string | null>(null);
+  const [draggedSessionId, setDraggedSessionId] = useState<string | null>(null);
+  const [dragOverFolder, setDragOverFolder] = useState<string | null>(null);
   const [quickContextMenu, setQuickContextMenu] = useState<{
     msgId: string;
     x: number;
@@ -1162,6 +1173,50 @@ export const ChatView: React.FC<ChatViewProps> = ({
     setTimeout(() => setExportToast(null), 2000);
   };
 
+  const handleSessionDragStart = (e: React.DragEvent, sessionId: string) => {
+    if (!onUpdateSessionCategory) return;
+    e.dataTransfer.setData('text/plain', sessionId);
+    e.dataTransfer.effectAllowed = 'move';
+    setDraggedSessionId(sessionId);
+    setFolderAssignSessionId(null);
+  };
+
+  const handleSessionDragEnd = () => {
+    setDraggedSessionId(null);
+    setDragOverFolder(null);
+  };
+
+  const handleFolderDragOver = (e: React.DragEvent, folder: string) => {
+    if (!onUpdateSessionCategory) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    if (dragOverFolder !== folder) {
+      setDragOverFolder(folder);
+    }
+  };
+
+  const handleFolderDragLeave = (e: React.DragEvent, folder: string) => {
+    if (!e.currentTarget.contains(e.relatedTarget as Node) && dragOverFolder === folder) {
+      setDragOverFolder(null);
+    }
+  };
+
+  const handleFolderDrop = (e: React.DragEvent, targetFolder: string) => {
+    e.preventDefault();
+    const droppedId = e.dataTransfer.getData('text/plain') || draggedSessionId;
+    setDraggedSessionId(null);
+    setDragOverFolder(null);
+    if (!droppedId || !onUpdateSessionCategory) return;
+
+    const targetSession = allSessions.find((item) => item.id === droppedId);
+    if (targetSession && (targetSession.category || 'General') === targetFolder) {
+      return;
+    }
+
+    setCollapsedFolders((prev) => ({ ...prev, [targetFolder]: false }));
+    handleQuickAssignFolder(droppedId, targetFolder);
+  };
+
   const quickSwitcherFilteredLangs = SUPPORTED_LANGUAGES.filter((lang) => {
     const q = langSearchQuery.trim().toLowerCase();
     if (!q) return true;
@@ -1196,10 +1251,15 @@ export const ChatView: React.FC<ChatViewProps> = ({
     const sessionCategory = s.category || 'General';
     const folderMeta = getFolderMeta(sessionCategory);
     const isAssignOpen = folderAssignSessionId === s.id;
+    const isDragging = draggedSessionId === s.id;
+    const canDrag = Boolean(onUpdateSessionCategory) && editingSessionId !== s.id;
 
     return (
       <div
         key={s.id}
+        draggable={canDrag}
+        onDragStart={(e) => handleSessionDragStart(e, s.id)}
+        onDragEnd={handleSessionDragEnd}
         onClick={() => {
           onSelectSession(s.id);
           if (trimmedDrawerQuery && matchCount > 0 && onSearchChange) {
@@ -1207,13 +1267,24 @@ export const ChatView: React.FC<ChatViewProps> = ({
           }
           setSessionsSidebarOpen(false);
         }}
-        className={`group relative p-2.5 rounded-xl border cursor-pointer transition-all flex items-center justify-between ${
-          isSelected
+        className={`group relative p-2.5 rounded-xl border cursor-pointer transition-all flex items-center justify-between gap-1.5 ${
+          isDragging
+            ? 'opacity-50 scale-[0.98] border-cyan-400/70 bg-cyan-950/30 shadow-[0_0_16px_rgba(34,211,238,0.25)]'
+            : isSelected
             ? 'bg-purple-900/35 border-purple-500/50 text-white shadow-md'
             : 'bg-[#131520]/70 border-transparent text-gray-400 hover:text-gray-200 hover:bg-white/5'
         }`}
       >
-        <div className="min-w-0 flex-grow pr-2">
+        {canDrag && (
+          <span
+            className="text-gray-600 group-hover:text-purple-300 transition-colors cursor-grab active:cursor-grabbing shrink-0"
+            title="Drag to move to another folder"
+            aria-hidden="true"
+          >
+            <GripVertical className="w-3.5 h-3.5" />
+          </span>
+        )}
+        <div className="min-w-0 flex-grow pr-1">
           {editingSessionId === s.id ? (
             <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
               <input
@@ -1477,14 +1548,20 @@ export const ChatView: React.FC<ChatViewProps> = ({
               {availableFolders.map((folder) => {
                 const count = folderSessionCounts[folder] || 0;
                 const isSelected = activeFolderFilter === folder;
+                const isDropHover = dragOverFolder === folder;
                 const meta = getFolderMeta(folder);
                 return (
                   <button
                     key={`tab-${folder}`}
                     type="button"
                     onClick={() => setActiveFolderFilter(folder)}
+                    onDragOver={(e) => handleFolderDragOver(e, folder)}
+                    onDragLeave={(e) => handleFolderDragLeave(e, folder)}
+                    onDrop={(e) => handleFolderDrop(e, folder)}
                     className={`px-2 py-1 rounded-lg border text-[10px] font-semibold whitespace-nowrap transition-all cursor-pointer flex items-center gap-1 shrink-0 ${
-                      isSelected
+                      isDropHover
+                        ? 'bg-cyan-600/45 border-cyan-400 text-white ring-2 ring-cyan-400/50 scale-105 shadow-[0_0_12px_rgba(34,211,238,0.4)]'
+                        : isSelected
                         ? 'bg-purple-600/35 border-purple-400/70 text-white shadow-sm'
                         : 'bg-[#090a0f]/80 border-[#232738] text-gray-400 hover:text-white'
                     }`}
@@ -1496,6 +1573,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 );
               })}
             </div>
+            {draggedSessionId && (
+              <div className="px-2 py-1 rounded-lg bg-cyan-950/50 border border-cyan-500/40 text-[10px] text-cyan-200 font-medium text-center">
+                Drop conversation onto any folder tab or section below to move it
+              </div>
+            )}
           </div>
 
           {/* Full-Text & Date Session Drawer Search Bar */}
@@ -1599,13 +1681,26 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 );
                 const isCustomEmpty =
                   items.length === 0 && !DEFAULT_SESSION_CATEGORIES.includes(folder);
-                if (items.length === 0 && !isCustomEmpty) return null;
+                if (items.length === 0 && !isCustomEmpty && !draggedSessionId) return null;
 
                 const isCollapsed = Boolean(collapsedFolders[folder]);
+                const isDropHover = dragOverFolder === folder;
                 const meta = getFolderMeta(folder);
 
                 return (
-                  <div key={`group-${folder}`} className="space-y-1">
+                  <div
+                    key={`group-${folder}`}
+                    onDragOver={(e) => handleFolderDragOver(e, folder)}
+                    onDragLeave={(e) => handleFolderDragLeave(e, folder)}
+                    onDrop={(e) => handleFolderDrop(e, folder)}
+                    className={`space-y-1 rounded-xl p-1 transition-all ${
+                      isDropHover
+                        ? 'bg-cyan-950/35 ring-2 ring-cyan-400/70 shadow-[0_0_18px_rgba(34,211,238,0.22)]'
+                        : draggedSessionId
+                        ? 'bg-white/[0.02] border border-dashed border-white/10'
+                        : ''
+                    }`}
+                  >
                     <div className="flex items-center justify-between px-1.5 py-1 rounded-lg bg-[#0d0f1a]/80 border border-white/5">
                       <button
                         type="button"
@@ -1623,6 +1718,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
                         <span className={`px-1.5 py-0.2 rounded text-[9px] border ${meta.badgeClass}`}>
                           {items.length}
                         </span>
+                        {isDropHover && (
+                          <span className="text-[9px] text-cyan-300 font-semibold ml-auto pr-1">
+                            Drop here
+                          </span>
+                        )}
                       </button>
 
                       <button
@@ -1639,15 +1739,23 @@ export const ChatView: React.FC<ChatViewProps> = ({
                     {!isCollapsed && (
                       <div className="space-y-1.5 pl-1">
                         {items.length === 0 ? (
-                          <div className="px-2.5 py-2 rounded-lg border border-dashed border-white/10 text-[10px] text-gray-500 flex items-center justify-between">
-                            <span>Empty folder</span>
-                            <button
-                              type="button"
-                              onClick={() => onNewSession(folder)}
-                              className="text-purple-300 hover:text-white font-semibold cursor-pointer"
-                            >
-                              + Add Chat
-                            </button>
+                          <div
+                            className={`px-2.5 py-2 rounded-lg border border-dashed text-[10px] flex items-center justify-between transition-colors ${
+                              isDropHover
+                                ? 'border-cyan-400/70 text-cyan-200 bg-cyan-950/40'
+                                : 'border-white/10 text-gray-500'
+                            }`}
+                          >
+                            <span>{isDropHover ? `Drop to move into "${folder}"` : 'Empty folder'}</span>
+                            {!draggedSessionId && (
+                              <button
+                                type="button"
+                                onClick={() => onNewSession(folder)}
+                                className="text-purple-300 hover:text-white font-semibold cursor-pointer"
+                              >
+                                + Add Chat
+                              </button>
+                            )}
                           </div>
                         ) : (
                           items.map((entry) => renderSessionRow(entry))
@@ -1737,6 +1845,42 @@ export const ChatView: React.FC<ChatViewProps> = ({
           </div>
 
           <div className="flex items-center space-x-1.5 sm:space-x-2 shrink-0">
+            {/* Two AI Modes Switcher: AI Chatbot vs AI Agent */}
+            <div
+              className="inline-flex items-center p-0.5 rounded-xl bg-[#090a0f] border border-[#232738]"
+              role="tablist"
+              aria-label="Select AI Mode"
+            >
+              <button
+                type="button"
+                role="tab"
+                aria-selected={aiMode === 'chatbot'}
+                onClick={() => setAiMode('chatbot')}
+                className={`px-2 sm:px-2.5 py-1 rounded-lg text-[11px] font-bold flex items-center gap-1 transition-all duration-200 active:scale-95 cursor-pointer ${
+                  aiMode === 'chatbot'
+                    ? 'bg-purple-600/40 text-purple-100 border border-purple-400/50 shadow-[0_0_12px_rgba(139,92,246,0.28)]'
+                    : 'text-gray-400 hover:text-white hover:bg-white/5 border border-transparent'
+                }`}
+              >
+                <Sparkles className="w-3 h-3 text-purple-400" />
+                <span className="hidden sm:inline">Chatbot</span>
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={aiMode === 'agent'}
+                onClick={() => setAiMode('agent')}
+                className={`px-2 sm:px-2.5 py-1 rounded-lg text-[11px] font-bold flex items-center gap-1 transition-all duration-200 active:scale-95 cursor-pointer ${
+                  aiMode === 'agent'
+                    ? 'bg-cyan-600/35 text-cyan-100 border border-cyan-400/50 shadow-[0_0_14px_rgba(34,211,238,0.3)]'
+                    : 'text-gray-400 hover:text-white hover:bg-white/5 border border-transparent'
+                }`}
+              >
+                <Bot className="w-3 h-3 text-cyan-400" />
+                <span className="hidden sm:inline">Agent</span>
+              </button>
+            </div>
+
             {/* Inline Conversation Session Search Bar (Filters existing sessions by title or content keywords) */}
             <div className="relative hidden md:block" ref={sessionSearchRef}>
               <div className="relative flex items-center">
@@ -2277,6 +2421,35 @@ export const ChatView: React.FC<ChatViewProps> = ({
           </div>
         )}
 
+        <AnimatePresence mode="wait" initial={false}>
+          {aiMode === 'agent' ? (
+            <motion.div
+              key="agent-mode-view"
+              initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 6 }}
+              animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, y: 0 }}
+              exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: -6 }}
+              transition={{ duration: prefersReducedMotion ? 0.1 : 0.2, ease: 'easeOut' }}
+              className="flex-1 min-h-0 flex flex-col"
+            >
+              <AgentModePanel
+                settings={settings}
+                isOnline={isOnline}
+                onSendOutputToChat={(content) => {
+                  setAiMode('chatbot');
+                  setInputText(content);
+                  setTimeout(() => textareaRef.current?.focus(), 30);
+                }}
+              />
+            </motion.div>
+          ) : (
+            <motion.div
+              key="chatbot-mode-view"
+              initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 6 }}
+              animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, y: 0 }}
+              exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: -6 }}
+              transition={{ duration: prefersReducedMotion ? 0.1 : 0.2, ease: 'easeOut' }}
+              className="flex-1 min-h-0 flex flex-col"
+            >
         {/* Message Feed */}
         <div className="flex-1 min-h-0 overflow-y-auto chat-feed-scroll px-2.5 sm:px-6 py-4 space-y-5">
           {/* No Search Results Empty State */}
@@ -2301,74 +2474,23 @@ export const ChatView: React.FC<ChatViewProps> = ({
             </div>
           )}
 
-          {/* Hero Welcome banner when starting */}
+          {/* Hero Welcome banner with Animated Welcome Text and Rotating Smart Suggestions */}
           {!trimmedSearch && displayedMessages.length <= 1 && (
-            <div className="relative text-center py-4 sm:py-8 space-y-4 max-w-2xl mx-auto overflow-hidden">
-              {/* Subtle 3D Spheres floating in background matching attached photo */}
-              <div className="sphere-3d w-14 h-14 absolute -top-2 left-6 opacity-60 animate-float-slow" />
-              <div className="sphere-3d w-20 h-20 absolute -top-4 right-10 opacity-70 animate-float-delayed" />
-              <div className="sphere-3d w-8 h-8 absolute bottom-0 left-1/4 opacity-50 animate-pulse-glow" />
-
-              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-purple-950/60 border border-purple-500/30 text-purple-300 text-[11px] sm:text-xs font-semibold shadow-inner">
-                <Sparkles className="w-3.5 h-3.5 text-purple-400 shrink-0" />
-                <span>Aadesh AI Global Hub • Worldwide Intelligence</span>
-              </div>
-
-              <h1 className="text-2xl sm:text-4xl font-black text-white tracking-tight px-1">
-                Explore &amp; Learn with <span className="text-gradient">Aadesh AI</span>
-              </h1>
-
-              <p className="text-xs sm:text-sm text-gray-400 max-w-lg mx-auto px-2">
-                Multilingual AI, photo &amp; document analysis, voice intelligence, and contextual reasoning across 20+ world languages.
-              </p>
-
-              {/* Quick Topic Starter Cards (Single column on mobile, 2 columns sm+) */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-2 text-left">
-                <button
-                  onClick={() => handleSend('Design a scalable clean architecture for a modern full-stack web application with TypeScript')}
-                  className="glass-card glass-card-hover p-3 rounded-xl border border-purple-500/25 text-left group cursor-pointer"
-                >
-                  <div className="text-xs font-bold text-white flex items-center justify-between">
-                    <span>💻 Code & Software Architecture</span>
-                    <ArrowUpRight className="w-3.5 h-3.5 text-purple-400 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-transform" />
-                  </div>
-                  <p className="text-[11px] text-gray-400 mt-1 line-clamp-1">TypeScript, system architecture, API design</p>
-                </button>
-
-                <button
-                  onClick={() => handleSend('Provide a helpful comparison between Nepali and English phrasing for clear communication')}
-                  className="glass-card glass-card-hover p-3 rounded-xl border border-purple-500/25 text-left group cursor-pointer"
-                >
-                  <div className="text-xs font-bold text-white flex items-center justify-between">
-                    <span>🌐 Nepali & English Intelligence</span>
-                    <ArrowUpRight className="w-3.5 h-3.5 text-purple-400 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-transform" />
-                  </div>
-                  <p className="text-[11px] text-gray-400 mt-1 line-clamp-1">Nepali & English suggestions + all-language translation</p>
-                </button>
-
-                <button
-                  onClick={() => handleSend('What are the best practices for multimodal AI vision analysis on documents and architectural photos?')}
-                  className="glass-card glass-card-hover p-3 rounded-xl border border-purple-500/25 text-left group cursor-pointer"
-                >
-                  <div className="text-xs font-bold text-white flex items-center justify-between">
-                    <span>📸 Scene & Document Vision</span>
-                    <ArrowUpRight className="w-3.5 h-3.5 text-purple-400 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-transform" />
-                  </div>
-                  <p className="text-[11px] text-gray-400 mt-1 line-clamp-1">Inspect photos, diagrams & visual text</p>
-                </button>
-
-                <button
-                  onClick={() => handleSend('Start an interactive hands-free voice learning session on algorithmic thinking')}
-                  className="glass-card glass-card-hover p-3 rounded-xl border border-purple-500/25 text-left group cursor-pointer"
-                >
-                  <div className="text-xs font-bold text-white flex items-center justify-between">
-                    <span>🎙️ Real-Time Voice Conversation</span>
-                    <ArrowUpRight className="w-3.5 h-3.5 text-purple-400 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-transform" />
-                  </div>
-                  <p className="text-[11px] text-gray-400 mt-1 line-clamp-1">Hands-free speech with emotional personas</p>
-                </button>
-              </div>
-            </div>
+            <AnimatedWelcomeHero
+              recentContext={allSessions
+                .flatMap((s) => [
+                  s.title,
+                  ...s.messages.filter((m) => m.role === 'user').slice(-2).map((m) => m.content),
+                ])
+                .filter((t): t is string => Boolean(t && t.trim() && t !== 'New Conversation'))
+                .slice(0, 6)}
+              onSelectSuggestion={(txt) => {
+                setInputText(txt);
+                setTimeout(() => {
+                  textareaRef.current?.focus();
+                }, 20);
+              }}
+            />
           )}
 
           {/* Render Messages */}
@@ -2403,9 +2525,16 @@ export const ChatView: React.FC<ChatViewProps> = ({
               : 'Contains location metadata';
 
             return (
-              <div
+              <motion.div
                 key={msg.id}
                 id={`chat-msg-${msg.id}`}
+                initial={
+                  prefersReducedMotion
+                    ? { opacity: 0 }
+                    : { opacity: 0, x: isUser ? 26 : -26 }
+                }
+                animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, x: 0 }}
+                transition={{ duration: prefersReducedMotion ? 0.12 : 0.3, ease: [0.22, 1, 0.36, 1] }}
                 className={`flex flex-col ${isUser ? 'items-end' : 'items-start'} space-y-2 max-w-3xl mx-auto w-full scroll-mt-6`}
               >
                 {/* Geotag Location Pill Above Bubble */}
@@ -3147,22 +3276,30 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
                     <div className="flex flex-wrap gap-2">
                       {msg.suggestedQuestions.map((q, idx) => (
-                        <button
-                          key={idx}
+                        <motion.button
+                          key={`${msg.id}-sugg-${idx}`}
                           type="button"
                           disabled={isLoading}
+                          initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, x: 28 }}
+                          animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, x: 0 }}
+                          transition={{
+                            duration: prefersReducedMotion ? 0.12 : 0.34,
+                            delay: prefersReducedMotion ? 0 : idx * 0.06,
+                            ease: [0.22, 1, 0.36, 1],
+                          }}
+                          whileTap={prefersReducedMotion ? undefined : { scale: 0.96 }}
                           onClick={() => handleSend(q)}
                           className="smart-reply-chip text-xs text-purple-200 px-3.5 py-1.5 rounded-xl flex items-center gap-1.5 group cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                         >
                           <span className="w-1.5 h-1.5 rounded-full bg-purple-400 group-hover:scale-125 transition-transform" />
                           <span>{q}</span>
                           <ArrowUpRight className="w-3 h-3 text-purple-400/70 group-hover:text-purple-200 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-transform" />
-                        </button>
+                        </motion.button>
                       ))}
                     </div>
                   </div>
                 )}
-              </div>
+              </motion.div>
             );
           })}
 
@@ -3468,8 +3605,19 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
                     {/* Bottom Action Toolbar inside Composer */}
                     <div className="flex items-center justify-between gap-2 pt-0.5">
-                      {/* Left: File Attachment, Image Upload, Geotag */}
+                      {/* Left: Document Assistant, File Attachment, Image Upload, Geotag */}
                       <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => setShowDocAssistant(true)}
+                          className="min-w-[38px] min-h-[38px] px-2.5 py-2 rounded-xl transition-all border cursor-pointer flex items-center gap-1.5 bg-[#181a29]/80 text-purple-300 border-purple-500/30 hover:border-purple-400 hover:bg-purple-900/30"
+                          title="AI Document Assistant & Uploader"
+                          aria-label="Open Document Assistant"
+                        >
+                          <BookOpen className="w-4 h-4 text-purple-400" />
+                          <span className="text-xs font-semibold hidden sm:inline">Upload</span>
+                        </button>
+
                         <input
                           type="file"
                           ref={docFileInputRef}
@@ -3563,6 +3711,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
             </div>
           </div>
         </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
 
       {/* Geotag Picker Modal */}
@@ -3571,6 +3722,19 @@ export const ChatView: React.FC<ChatViewProps> = ({
         onClose={() => setShowGeotagModal(false)}
         onSelectLocation={(loc) => setAttachedLocation(loc)}
         currentSelected={attachedLocation}
+      />
+
+      {/* AI Document Assistant Modal */}
+      <DocumentAssistantModal
+        isOpen={showDocAssistant}
+        onClose={() => setShowDocAssistant(false)}
+        onAttachToChat={(name, content) => {
+          setSelectedFile({ name, content });
+          setExportToast(`Attached "${name}" to chat input`);
+          setTimeout(() => setExportToast(null), 2500);
+        }}
+        settings={settings}
+        isOnline={isOnline}
       />
 
       {/* Export & Backup Modal */}

@@ -49,9 +49,10 @@ import { SettingsModal } from './components/SettingsModal';
 import { AuthModal } from './components/AuthModal';
 import { GamificationModal } from './components/GamificationModal';
 import { InstallAppModal } from './components/InstallAppModal';
+import { SplashScreen } from './components/SplashScreen';
 import { recordGamificationActivity } from './utils/gamification';
 import { voiceAssistant } from './utils/speech';
-import { applyAvatarDynamicTheme } from './utils/avatarTheme';
+import { applyAvatarDynamicTheme, COLOR_THEME_PRESETS } from './utils/avatarTheme';
 import {
   subscribeToAuth,
   syncUserProfileToFirestore,
@@ -98,6 +99,9 @@ export default function App() {
     typeof navigator !== 'undefined' ? navigator.onLine : true
   );
   const [isKeyboardOpen, setIsKeyboardOpen] = useState<boolean>(false);
+  const [isAuthInitialized, setIsAuthInitialized] = useState<boolean>(false);
+
+  const isAppReady = isAuthInitialized && aiStatus !== 'connecting';
 
   const isOnline = isBrowserOnline && !settings.offlineModeForce;
   const isOwnerAdmin = Boolean(
@@ -106,10 +110,13 @@ export default function App() {
       user.role === 'admin'
   );
 
-  // Apply dynamic UI color theme derived from user's selected avatar color
+  // Apply dynamic UI color theme derived from selected color theme or user's avatar color
   useEffect(() => {
-    applyAvatarDynamicTheme(user.avatarColor, settings.dynamicAvatarTheme !== false);
-  }, [user.avatarColor, settings.dynamicAvatarTheme]);
+    const presetHex = settings.colorTheme
+      ? COLOR_THEME_PRESETS.find((t) => t.id === settings.colorTheme)?.hex
+      : undefined;
+    applyAvatarDynamicTheme(presetHex || user.avatarColor, settings.dynamicAvatarTheme !== false || Boolean(presetHex));
+  }, [settings.colorTheme, user.avatarColor, settings.dynamicAvatarTheme]);
 
   // Detect Android/iOS virtual keyboard open state via visualViewport
   useEffect(() => {
@@ -163,6 +170,7 @@ export default function App() {
     });
 
     const unsubscribeAuth = subscribeToAuth(async (fbUser) => {
+      setIsAuthInitialized(true);
       if (fbUser) {
         const emailLower = (fbUser.email || '').toLowerCase();
         const isVerifiedOwner = emailLower === OWNER_ADMIN_EMAIL && fbUser.emailVerified;
@@ -207,6 +215,9 @@ export default function App() {
         }
       }
     });
+    if (!unsubscribeAuth) {
+      setIsAuthInitialized(true);
+    }
 
     return () => {
       window.removeEventListener('online', handleOnline);
@@ -959,6 +970,8 @@ export default function App() {
         activeTab === 'chat' ? 'app-shell-chat' : 'app-shell-scroll'
       } relative flex flex-col justify-between selection:bg-purple-500/30 selection:text-purple-200 max-w-full overflow-x-hidden`}
     >
+      <SplashScreen isAppReady={isAppReady} theme={settings.theme} />
+
       {/* Ambient Glowing Background Orbs & 3D Spheres */}
       <div
         className="orb w-[380px] h-[380px] top-[-40px] left-[-90px] animate-pulse-glow transition-colors duration-500"

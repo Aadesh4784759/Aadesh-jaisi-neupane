@@ -24,6 +24,7 @@ import {
   deleteDoc,
   collection,
   query,
+  where,
   orderBy,
   limit,
   onSnapshot,
@@ -468,6 +469,79 @@ export async function recordUsageAnalyticsToFirestore(params: {
       handleFirestoreError(err, OperationType.CREATE, path);
     }
   }
+}
+
+export interface FirestoreUsageStreakResult {
+  dateCounts: Record<string, number>;
+  totalInteractions: number;
+  source: 'firestore' | 'local';
+}
+
+export async function fetchUserUsageDatesFromFirestore(
+  userId: string
+): Promise<FirestoreUsageStreakResult> {
+  if (!db || !auth?.currentUser || auth.currentUser.uid !== userId) {
+    return { dateCounts: {}, totalInteractions: 0, source: 'local' };
+  }
+  const uid = safeDocId(userId);
+  const dateCounts: Record<string, number> = {};
+  let totalInteractions = 0;
+
+  // 1. Query user's usage_analytics logs
+  const analyticsPath = 'usage_analytics';
+  try {
+    const analyticsSnap = await getDocs(
+      query(collection(db, analyticsPath), where('userId', '==', uid), limit(300))
+    );
+    analyticsSnap.docs.forEach((d) => {
+      const data = d.data();
+      const dateKey =
+        typeof data.dateKey === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(data.dateKey)
+          ? data.dateKey
+          : typeof data.timestamp === 'string'
+          ? data.timestamp.slice(0, 10)
+          : '';
+      if (dateKey && /^\d{4}-\d{2}-\d{2}$/.test(dateKey)) {
+        dateCounts[dateKey] = (dateCounts[dateKey] || 0) + 1;
+        totalInteractions += 1;
+      }
+    });
+  } catch (err) {
+    if (err instanceof Error && err.message.toLowerCase().includes('permission')) {
+      handleFirestoreError(err, OperationType.LIST, analyticsPath);
+    }
+    console.warn('Firestore usage_analytics streak fetch warning:', err);
+  }
+
+  // 2. Also incorporate user conversation activity timestamps so historical sessions count
+  const convPath = `users/${uid}/conversations`;
+  try {
+    const convSnap = await getDocs(query(collection(db, 'users', uid, 'conversations'), limit(100)));
+    convSnap.docs.forEach((d) => {
+      const data = d.data();
+      const updatedKey = typeof data.updatedAt === 'string' ? data.updatedAt.slice(0, 10) : '';
+      const createdKey = typeof data.createdAt === 'string' ? data.createdAt.slice(0, 10) : '';
+      if (updatedKey && /^\d{4}-\d{2}-\d{2}$/.test(updatedKey)) {
+        dateCounts[updatedKey] = Math.max(dateCounts[updatedKey] || 0, 1);
+      }
+      if (createdKey && /^\d{4}-\d{2}-\d{2}$/.test(createdKey)) {
+        dateCounts[createdKey] = Math.max(dateCounts[createdKey] || 0, 1);
+      }
+    });
+  } catch (err) {
+    if (err instanceof Error && err.message.toLowerCase().includes('permission')) {
+      handleFirestoreError(err, OperationType.LIST, convPath);
+    }
+  }
+
+  return {
+    dateCounts,
+    totalInteractions: Math.max(
+      totalInteractions,
+      Object.values(dateCounts).reduce((sum, n) => sum + n, 0)
+    ),
+    source: 'firestore',
+  };
 }
 
 // ---------------- OWNER ADMIN FIRESTORE QUERIES ----------------

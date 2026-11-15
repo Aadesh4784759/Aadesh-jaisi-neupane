@@ -347,9 +347,9 @@ service cloud.firestore {
       }
     }
 
-    // Usage Analytics: authenticated users write their own events; only owner/admin can read/list all
+    // Usage Analytics: authenticated users write their own events and read their own logs; owner/admin can read/list all
     match /usage_analytics/{eventId} {
-      allow get, list: if isAdmin();
+      allow get, list: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
       allow create: if isValidId(eventId)
         && isSignedIn()
         && isValidAnalyticsDoc(incoming(), eventId);

@@ -207,9 +207,11 @@ export interface AppSettings {
   voiceSpeed: number; // 0.8 - 1.5
   voicePitch: number; // 0.8 - 1.2
   voiceVolume: number; // 0.0 - 1.0
+  voiceSensitivity?: number; // 0 - 100 dB threshold
   voicePersona: VoicePersona;
   highContrast: boolean;
   theme?: 'dark' | 'light';
+  colorTheme?: 'purple-galaxy' | 'ocean-blue' | 'emerald-green' | 'sunset-orange' | 'cyber-neon';
   dynamicAvatarTheme?: boolean;
   customGeminiApiKey?: string;
   geminiModel?: string;
@@ -282,6 +284,7 @@ export interface AgentProposedAction {
   description: string;
   payload: Record<string, string>;
   approved?: boolean;
+  denied?: boolean;
   executed?: boolean;
 }
 
@@ -289,8 +292,11 @@ export interface AgentStepPlan {
   stepNumber: number;
   title: string;
   detail: string;
-  status: 'pending' | 'running' | 'completed';
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'awaiting_approval' | 'denied';
   output?: string;
+  toolName?: string;
+  isSensitive?: boolean;
+  parentStepNumber?: number;
 }
 
 export type ImageAspectRatio = '1:1' | '16:9' | '9:16' | '4:3';

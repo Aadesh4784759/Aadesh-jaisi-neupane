@@ -213,12 +213,16 @@ body.high-contrast span {
 .purple-glow-btn {
   background: linear-gradient(135deg, var(--theme-accent) 0%, var(--theme-accent-light) 52%, var(--theme-accent-secondary) 100%);
   box-shadow: 0 0 22px rgba(var(--theme-accent-rgb), 0.45);
-  transition: all 0.3s ease;
+  transition: transform 0.2s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.25s ease, background 0.3s ease;
 }
 
 .purple-glow-btn:hover {
   box-shadow: 0 0 35px rgba(var(--theme-accent-rgb), 0.75);
   transform: scale(1.02);
+}
+
+.purple-glow-btn:active:not(:disabled) {
+  transform: scale(0.97);
 }
 
 .text-gradient {
@@ -329,9 +333,31 @@ body.high-contrast span {
 
 @media (prefers-reduced-motion: reduce) {
   .wave-bar,
-  .recording-pulse {
+  .recording-pulse,
+  .smart-marquee-track {
     animation: none !important;
   }
+}
+
+@keyframes marqueeRightToLeft {
+  0% {
+    transform: translate3d(0%, 0, 0);
+  }
+  100% {
+    transform: translate3d(-50%, 0, 0);
+  }
+}
+
+.smart-marquee-track {
+  display: flex;
+  width: max-content;
+  animation: marqueeRightToLeft 26s linear infinite;
+  will-change: transform;
+}
+
+.smart-marquee-container:hover .smart-marquee-track,
+.smart-marquee-container:focus-within .smart-marquee-track {
+  animation-play-state: paused;
 }
 
 @keyframes recordingPulse {

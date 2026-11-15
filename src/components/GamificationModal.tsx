@@ -1,18 +1,17 @@
-import React from 'react';
+import React, { useState } from 'react';
+import { motion, useReducedMotion } from 'motion/react';
 import {
   X,
   Flame,
   Sparkles,
   Trophy,
   Target,
-  Calendar,
-  CheckCircle2,
   Award,
   Zap,
-  TrendingUp,
 } from 'lucide-react';
 import { UserProfile } from '../types';
-import { computeLevelInfo } from '../utils/gamification';
+import { CalculatedStreakSummary, computeLevelInfo } from '../utils/gamification';
+import { DailyStreakTracker } from './DailyStreakTracker';
 
 interface GamificationModalProps {
   isOpen: boolean;
@@ -25,6 +24,9 @@ export const GamificationModal: React.FC<GamificationModalProps> = ({
   onClose,
   user,
 }) => {
+  const prefersReducedMotion = useReducedMotion();
+  const [liveStreakSummary, setLiveStreakSummary] = useState<CalculatedStreakSummary | null>(null);
+
   if (!isOpen) return null;
 
   const levelInfo = computeLevelInfo(user.xp || 0);
@@ -32,22 +34,71 @@ export const GamificationModal: React.FC<GamificationModalProps> = ({
     100,
     Math.round(((user.dailyGoalCurrent || 0) / (user.dailyGoalTarget || 5)) * 100)
   );
+  const consecutiveDays = liveStreakSummary?.consecutiveDays ?? user.streakDays ?? 1;
+  const bestStreak = liveStreakSummary?.longestStreak ?? user.longestStreak ?? 1;
 
   return (
     <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-3 sm:p-5 animate-in fade-in duration-200">
-      <div className="glass-card rounded-3xl max-w-lg w-full border border-purple-500/50 shadow-2xl relative flex flex-col max-h-[90vh] overflow-hidden">
+      <motion.div
+        initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, scale: 0.95, y: 10 }}
+        animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, scale: 1, y: 0 }}
+        transition={{ duration: prefersReducedMotion ? 0.12 : 0.25, ease: [0.22, 1, 0.36, 1] }}
+        className="glass-card rounded-3xl max-w-2xl w-full border border-purple-500/50 shadow-2xl relative flex flex-col max-h-[90vh] overflow-hidden"
+      >
         {/* Header */}
         <div className="p-4 sm:p-5 border-b border-white/10 flex items-center justify-between bg-gradient-to-r from-purple-950/40 via-indigo-950/20 to-transparent">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-amber-500 to-rose-500 flex items-center justify-center text-white shadow-lg shadow-amber-500/20">
+            <motion.div
+              initial={prefersReducedMotion ? { opacity: 0 } : { scale: 0.6, opacity: 0 }}
+              animate={
+                prefersReducedMotion
+                  ? { opacity: 1 }
+                  : {
+                      scale: [0.6, 1.2, 0.95, 1],
+                      opacity: 1,
+                      boxShadow: [
+                        '0 0 10px rgba(245,158,11,0.3)',
+                        '0 0 36px rgba(251,191,36,0.95)',
+                        '0 0 20px rgba(245,158,11,0.55)',
+                      ],
+                    }
+              }
+              transition={{ duration: prefersReducedMotion ? 0.12 : 0.75, ease: [0.22, 1, 0.36, 1] }}
+              className="w-11 h-11 rounded-2xl bg-gradient-to-tr from-amber-400 via-orange-500 to-rose-500 flex items-center justify-center text-white shrink-0"
+            >
               <Flame className="w-6 h-6 fill-white text-white" />
-            </div>
+            </motion.div>
             <div>
-              <h3 className="text-base sm:text-lg font-extrabold text-white flex items-center gap-2">
-                <span>Activity Streak & Gamification</span>
+              <h3 className="text-base sm:text-lg font-extrabold text-white flex flex-wrap items-center gap-2">
+                <span>Activity Streak &amp; Gamification</span>
+                <motion.span
+                  initial={prefersReducedMotion ? { opacity: 0 } : { scale: 0.7, opacity: 0 }}
+                  animate={
+                    prefersReducedMotion
+                      ? { opacity: 1 }
+                      : {
+                          scale: [0.7, 1.15, 1],
+                          opacity: 1,
+                          boxShadow: [
+                            '0 0 6px rgba(251,191,36,0.2)',
+                            '0 0 24px rgba(251,191,36,0.85)',
+                            '0 0 12px rgba(245,158,11,0.4)',
+                          ],
+                        }
+                  }
+                  transition={{
+                    duration: prefersReducedMotion ? 0.12 : 0.7,
+                    delay: prefersReducedMotion ? 0 : 0.1,
+                    ease: [0.22, 1, 0.36, 1],
+                  }}
+                  className="text-[11px] font-black px-2.5 py-0.5 rounded-full bg-gradient-to-r from-amber-400/30 to-orange-500/25 border border-amber-300/75 text-amber-200 inline-flex items-center gap-1"
+                >
+                  <Sparkles className="w-3 h-3 text-amber-300" />
+                  <span>{consecutiveDays}d Golden Streak</span>
+                </motion.span>
               </h3>
               <p className="text-xs text-gray-400">
-                Track your real daily momentum, XP points, and unlocked milestones
+                Track your consecutive interaction days from Firestore logs, XP points, and milestones
               </p>
             </div>
           </div>
@@ -61,24 +112,30 @@ export const GamificationModal: React.FC<GamificationModalProps> = ({
 
         {/* Body */}
         <div className="p-4 sm:p-6 overflow-y-auto space-y-5">
+          {/* Glowing Gamified DailyStreakTracker (Firestore Logs + Badge + Weekly Master Progress Bar + 30-Day Calendar Grid) */}
+          <DailyStreakTracker
+            user={user}
+            onStreakCalculated={setLiveStreakSummary}
+          />
+
           {/* Main Streak & XP Scoreboard */}
           <div className="grid grid-cols-2 gap-3">
-            <div className="p-4 rounded-2xl bg-[#090a0f] border border-amber-500/40 relative overflow-hidden shadow-lg">
+            <div className="p-4 rounded-2xl bg-[#090a0f] border border-amber-500/40 relative overflow-hidden shadow-[0_0_20px_rgba(245,158,11,0.12)]">
               <div className="flex items-center justify-between text-xs text-amber-400 font-bold mb-1">
                 <span className="flex items-center gap-1.5">
                   <Flame className="w-4 h-4 fill-amber-500 text-amber-500" />
                   <span>Current Streak</span>
                 </span>
                 <span className="text-[10px] text-gray-400 font-normal">
-                  Best: {user.longestStreak || 7}d
+                  Best: {bestStreak}d
                 </span>
               </div>
               <div className="text-3xl font-black text-white tracking-tight">
-                {user.streakDays || 1}{' '}
+                {consecutiveDays}{' '}
                 <span className="text-base font-semibold text-amber-300">Days</span>
               </div>
               <p className="text-[11px] text-gray-400 mt-1">
-                Active today • Keep returning daily to build consecutive momentum
+                Consecutive interaction days synced with activity logs
               </p>
             </div>
 
@@ -118,47 +175,6 @@ export const GamificationModal: React.FC<GamificationModalProps> = ({
                 style={{ width: `${levelInfo.progressPercent}%` }}
                 className="h-full rounded-full bg-gradient-to-r from-purple-500 via-indigo-500 to-amber-400 transition-all duration-500 shadow-sm shadow-purple-500/50"
               />
-            </div>
-          </div>
-
-          {/* 7-Day Streak History */}
-          <div className="p-4 rounded-2xl bg-[#090a0f] border border-[#232738] space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Calendar className="w-4 h-4 text-purple-400" />
-                <h4 className="text-xs sm:text-sm font-bold text-white">
-                  7-Day Streak History
-                </h4>
-              </div>
-              <span className="text-[11px] text-emerald-400 font-medium flex items-center gap-1">
-                <CheckCircle2 className="w-3.5 h-3.5" />
-                <span>Active Streak Maintained</span>
-              </span>
-            </div>
-
-            <div className="grid grid-cols-7 gap-1.5 pt-1">
-              {(user.streakHistory || []).map((day, idx) => (
-                <div
-                  key={idx}
-                  className={`p-2 rounded-xl text-center flex flex-col items-center justify-between border transition-all ${
-                    day.completed
-                      ? 'bg-amber-950/40 border-amber-500/50 text-white shadow-sm'
-                      : 'bg-[#131520]/60 border-[#232738] text-gray-500'
-                  }`}
-                >
-                  <span className="text-[10px] font-semibold uppercase">{day.dayLabel}</span>
-                  <div className="my-1.5">
-                    {day.completed ? (
-                      <Flame className="w-5 h-5 fill-amber-500 text-amber-500 animate-pulse" />
-                    ) : (
-                      <div className="w-5 h-5 rounded-full border border-gray-700 border-dashed" />
-                    )}
-                  </div>
-                  <span className="text-[9px] text-gray-400 font-mono">
-                    {day.date.slice(8)}
-                  </span>
-                </div>
-              ))}
             </div>
           </div>
 
@@ -247,7 +263,7 @@ export const GamificationModal: React.FC<GamificationModalProps> = ({
             Done
           </button>
         </div>
-      </div>
+      </motion.div>
     </div>
   );
 };

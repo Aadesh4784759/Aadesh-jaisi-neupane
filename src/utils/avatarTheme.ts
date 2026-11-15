@@ -18,6 +18,21 @@ export interface DynamicThemeTokens {
 
 export const DEFAULT_AVATAR_COLOR = '#8b5cf6';
 
+export interface ColorThemePreset {
+  id: 'purple-galaxy' | 'ocean-blue' | 'emerald-green' | 'sunset-orange' | 'cyber-neon';
+  name: string;
+  hex: string;
+  gradientClass: string;
+}
+
+export const COLOR_THEME_PRESETS: ColorThemePreset[] = [
+  { id: 'ocean-blue', name: 'Ocean Blue', hex: '#0ea5e9', gradientClass: 'from-sky-500 to-blue-600' },
+  { id: 'purple-galaxy', name: 'Purple Galaxy', hex: '#8b5cf6', gradientClass: 'from-purple-500 to-indigo-600' },
+  { id: 'emerald-green', name: 'Emerald Green', hex: '#10b981', gradientClass: 'from-emerald-500 to-teal-600' },
+  { id: 'sunset-orange', name: 'Sunset Orange', hex: '#f97316', gradientClass: 'from-orange-500 to-rose-500' },
+  { id: 'cyber-neon', name: 'Cyber Neon', hex: '#ec4899', gradientClass: 'from-fuchsia-500 to-cyan-500' },
+];
+
 export const AVATAR_COLOR_PRESETS: AvatarColorPreset[] = [
   { id: 'violet', name: 'Cosmic Violet', hex: '#8b5cf6', tagline: 'Classic Aadesh AI Glow' },
   { id: 'cyan', name: 'Ocean Cyan', hex: '#06b6d4', tagline: 'Electric Aqua & Teal' },

@@ -69,6 +69,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   voiceSpeed: 1.0,
   voicePitch: 1.0,
   voiceVolume: 1.0,
+  voiceSensitivity: 50,
   voicePersona: 'friendly',
   highContrast: false,
   theme: 'dark',

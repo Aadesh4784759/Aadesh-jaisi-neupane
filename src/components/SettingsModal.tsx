@@ -37,6 +37,7 @@ import {
 import { AppSettings, ChatSession, GeotaggedMedia, VoicePersona, VoicePersonaInfo } from '../types';
 import { OFFLINE_PHRASEBOOK, SUPPORTED_LANGUAGES, UI_TRANSLATIONS, VOICE_PERSONAS } from '../data/languages';
 import { voiceAssistant } from '../utils/speech';
+import { COLOR_THEME_PRESETS } from '../utils/avatarTheme';
 import {
   BulkExportFormat,
   ChatExportFormat,
@@ -921,6 +922,39 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 />
               </div>
 
+              {/* Visual Voice Sensitivity Threshold Slider (Decibel threshold for hands-free auto-recording) */}
+              <div className="p-4 rounded-2xl bg-[#090a0f] border border-purple-500/35 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <label className="text-xs sm:text-sm font-bold text-white flex items-center gap-1.5">
+                      <Mic className="w-3.5 h-3.5 text-purple-400" />
+                      <span>Voice Sensitivity Threshold (dB)</span>
+                    </label>
+                    <p className="text-[11px] text-gray-400">
+                      Minimum decibel threshold for triggering auto-recording in hands-free mode
+                    </p>
+                  </div>
+                  <span className="text-xs font-mono font-bold px-2.5 py-1 rounded-xl bg-purple-600/25 border border-purple-400/50 text-white">
+                    {settings.voiceSensitivity ?? 50} dB
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min="10"
+                  max="90"
+                  step="1"
+                  value={settings.voiceSensitivity ?? 50}
+                  onChange={(e) => onUpdateSettings({ voiceSensitivity: parseInt(e.target.value, 10) })}
+                  aria-label="Voice sensitivity decibel threshold"
+                  className="w-full accent-purple-500 cursor-pointer"
+                />
+                <div className="flex justify-between text-[10px] text-gray-500 font-mono">
+                  <span>10 dB (High Sensitivity / Quiet Room)</span>
+                  <span>50 dB (Balanced)</span>
+                  <span>90 dB (Low Sensitivity / Noisy Room)</span>
+                </div>
+              </div>
+
               {/* Voice Test Action */}
               <button
                 onClick={handleTestVoice}
@@ -937,9 +971,62 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           )}
 
-          {/* TAB 3: ACCESSIBILITY */}
+          {/* TAB 3: ACCESSIBILITY & THEMES */}
           {activeTab === 'accessibility' && (
             <div className="space-y-5">
+              {/* Colorful UI Themes & Dark/Light Mode */}
+              <div className="space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-semibold text-gray-300 flex items-center gap-1.5">
+                    <Sparkles className="w-4 h-4 text-purple-400" />
+                    <span>Interface Color Theme</span>
+                  </label>
+                  <div className="inline-flex rounded-xl bg-[#090a0f] border border-[#232738] p-0.5">
+                    {(['dark', 'light'] as const).map((mode) => (
+                      <button
+                        key={mode}
+                        type="button"
+                        onClick={() => {
+                          onUpdateSettings({ theme: mode });
+                          if (mode === 'light') {
+                            document.body.classList.add('light-theme');
+                          } else {
+                            document.body.classList.remove('light-theme');
+                          }
+                        }}
+                        className={`px-2.5 py-1 rounded-lg text-[11px] font-bold capitalize transition-all cursor-pointer ${
+                          (settings.theme || 'dark') === mode
+                            ? 'bg-purple-600/40 text-white border border-purple-400/50'
+                            : 'text-gray-400 hover:text-white border border-transparent'
+                        }`}
+                      >
+                        {mode} Mode
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                  {COLOR_THEME_PRESETS.map((preset) => {
+                    const isSelected = (settings.colorTheme || 'purple-galaxy') === preset.id;
+                    return (
+                      <button
+                        key={preset.id}
+                        type="button"
+                        onClick={() => onUpdateSettings({ colorTheme: preset.id })}
+                        className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                          isSelected
+                            ? 'bg-purple-900/40 border-purple-400 text-white shadow-md'
+                            : 'bg-[#090a0f] border-[#232738] text-gray-300 hover:border-white/25'
+                        }`}
+                      >
+                        <div className={`w-full h-3 rounded-full bg-gradient-to-r ${preset.gradientClass} mb-2`} />
+                        <div className="text-[11px] font-bold truncate">{preset.name}</div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
               {/* Font Size */}
               <div className="space-y-2">
                 <label className="text-xs font-semibold text-gray-300 flex items-center gap-1.5">

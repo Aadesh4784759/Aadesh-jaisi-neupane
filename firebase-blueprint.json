@@ -435,7 +435,7 @@
     },
     "/usage_analytics/{eventId}": {
       "schema": "UsageAnalytics",
-      "description": "Platform usage analytics written by authenticated users and read by owner admin"
+      "description": "Platform usage analytics written and read by the owning authenticated user for streaks/metrics, and read globally by owner admin"
     },
     "/admin_settings/{docId}": {
       "schema": "AdminSettings",
