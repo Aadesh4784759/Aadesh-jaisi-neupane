@@ -8,13 +8,15 @@ import mammoth from 'mammoth';
 
 dotenv.config();
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const safeDirname =
+  typeof import.meta !== 'undefined' && import.meta.url
+    ? path.dirname(fileURLToPath(import.meta.url))
+    : process.cwd();
 const OWNER_ADMIN_EMAIL = (process.env.ADMIN_EMAIL || 'aadeshjaisi6@gmail.com').trim().toLowerCase();
 
 function getFirebaseWebApiKey(): string {
   const candidates = [
-    path.resolve(__dirname, 'firebase-applet-config.json'),
+    path.resolve(safeDirname, 'firebase-applet-config.json'),
     path.resolve(process.cwd(), 'firebase-applet-config.json'),
   ];
   for (const configPath of candidates) {
@@ -2361,9 +2363,9 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    app.use(express.static(path.resolve(__dirname, 'dist')));
+    app.use(express.static(path.resolve(safeDirname, 'dist')));
     app.get('*', (_req: Request, res: Response) => {
-      res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
+      res.sendFile(path.resolve(safeDirname, 'dist', 'index.html'));
     });
   }
 
