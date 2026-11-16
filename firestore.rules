@@ -20,15 +20,22 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    function isVerifiedSignedIn() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
     function isOwner(userId) {
       return isSignedIn() && request.auth.uid == userId;
     }
 
+    function isVerifiedOwner(userId) {
+      return isVerifiedSignedIn() && request.auth.uid == userId;
+    }
+
     // Verified Platform Owner / Admin check
     function isAdmin() {
-      return isSignedIn() && (
-        (request.auth.token.email == 'aadeshjaisi@gmail.com'
-          && request.auth.token.email_verified == true)
+      return isVerifiedSignedIn() && (
+        request.auth.token.email == 'aadeshjaisi6@gmail.com'
         || exists(/databases/$(database)/documents/admins/$(request.auth.uid))
       );
     }
@@ -278,7 +285,7 @@ service cloud.firestore {
         && (!('role' in incoming()) || incoming().role == 'user' || isAdmin())
         && (!('status' in incoming()) || incoming().status == 'active' || isAdmin());
 
-      // Owners can update their own profile fields without escalating role or status;
+      // Verified owners can update their own safe profile fields without escalating role or status;
       // Verified Admin can update any user's status/role.
       allow update: if isValidId(userId)
         && isValidUserDoc(incoming(), userId)
@@ -286,7 +293,7 @@ service cloud.firestore {
         && (
           isAdmin()
           || (
-            isOwner(userId)
+            isVerifiedOwner(userId)
             && (!('role' in incoming()) || incoming().role == existing().get('role', 'user'))
             && (!('status' in incoming()) || incoming().status == existing().get('status', 'active'))
             && incoming().diff(existing()).affectedKeys().hasOnly([
@@ -297,123 +304,121 @@ service cloud.firestore {
           )
         );
 
-      allow delete: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow delete: if isValidId(userId) && (isVerifiedOwner(userId) || isAdmin());
 
       // User Conversations Subcollection
       match /conversations/{conversationId} {
-        allow get: if isValidId(userId) && isValidId(conversationId) && (isOwner(userId) || isAdmin());
-        allow list: if isOwner(userId) || isAdmin();
+        allow get: if isValidId(userId) && isValidId(conversationId) && (isVerifiedOwner(userId) || isAdmin());
+        allow list: if isValidId(userId) && (isVerifiedOwner(userId) || isAdmin());
         allow create: if isValidId(userId) && isValidId(conversationId)
-          && isOwner(userId)
+          && isVerifiedOwner(userId)
           && isValidConversationDoc(incoming(), userId, conversationId);
         allow update: if isValidId(userId) && isValidId(conversationId)
-          && isOwner(userId)
+          && isVerifiedOwner(userId)
           && isValidConversationDoc(incoming(), userId, conversationId)
           && incoming().diff(existing()).affectedKeys().hasOnly([
             'title', 'language', 'category', 'messageCount', 'updatedAt'
           ]);
-        allow delete: if isValidId(userId) && isValidId(conversationId) && (isOwner(userId) || isAdmin());
+        allow delete: if isValidId(userId) && isValidId(conversationId) && (isVerifiedOwner(userId) || isAdmin());
 
         // Messages Subcollection
         match /messages/{messageId} {
           allow get: if isValidId(userId) && isValidId(conversationId) && isValidId(messageId)
-            && (isOwner(userId) || isAdmin());
-          allow list: if isOwner(userId) || isAdmin();
+            && (isVerifiedOwner(userId) || isAdmin());
+          allow list: if isValidId(userId) && isValidId(conversationId) && (isVerifiedOwner(userId) || isAdmin());
           allow create: if isValidId(userId) && isValidId(conversationId) && isValidId(messageId)
-            && isOwner(userId)
+            && isVerifiedOwner(userId)
             && isValidMessageDoc(incoming(), userId, conversationId, messageId);
           allow update: if isValidId(userId) && isValidId(conversationId) && isValidId(messageId)
-            && isOwner(userId)
+            && isVerifiedOwner(userId)
             && isValidMessageDoc(incoming(), userId, conversationId, messageId)
             && incoming().diff(existing()).affectedKeys().hasOnly([
               'content', 'editedAt', 'translation', 'translationLanguage', 'feedback', 'reactions', 'userReactions', 'isPinned', 'pinnedAt'
             ]);
           allow delete: if isValidId(userId) && isValidId(conversationId) && isValidId(messageId)
-            && (isOwner(userId) || isAdmin());
+            && (isVerifiedOwner(userId) || isAdmin());
         }
       }
 
       // Voice-to-Text Input History Subcollection
       match /voiceHistory/{voiceId} {
-        allow get: if isValidId(userId) && isValidId(voiceId) && (isOwner(userId) || isAdmin());
-        allow list: if isOwner(userId) || isAdmin();
+        allow get: if isValidId(userId) && isValidId(voiceId) && (isVerifiedOwner(userId) || isAdmin());
+        allow list: if isValidId(userId) && (isVerifiedOwner(userId) || isAdmin());
         allow create: if isValidId(userId) && isValidId(voiceId)
-          && isOwner(userId)
+          && isVerifiedOwner(userId)
           && isValidVoiceDoc(incoming(), userId, voiceId);
         allow update: if isValidId(userId) && isValidId(voiceId)
-          && isOwner(userId)
+          && isVerifiedOwner(userId)
           && isValidVoiceDoc(incoming(), userId, voiceId)
           && incoming().diff(existing()).affectedKeys().hasOnly(['transcript', 'language']);
-        allow delete: if isValidId(userId) && isValidId(voiceId) && (isOwner(userId) || isAdmin());
+        allow delete: if isValidId(userId) && isValidId(voiceId) && (isVerifiedOwner(userId) || isAdmin());
       }
 
       // User-Approved AI Memory Subcollection
       match /memories/{memoryId} {
-        allow get: if isValidId(userId) && isValidId(memoryId) && (isOwner(userId) || isAdmin());
-        allow list: if isOwner(userId) || isAdmin();
+        allow get: if isValidId(userId) && isValidId(memoryId) && (isVerifiedOwner(userId) || isAdmin());
+        allow list: if isValidId(userId) && (isVerifiedOwner(userId) || isAdmin());
         allow create: if isValidId(userId) && isValidId(memoryId)
-          && isOwner(userId)
+          && isVerifiedOwner(userId)
           && isValidMemoryDoc(incoming(), userId, memoryId);
         allow update: if isValidId(userId) && isValidId(memoryId)
-          && isOwner(userId)
+          && isVerifiedOwner(userId)
           && isValidMemoryDoc(incoming(), userId, memoryId)
           && incoming().diff(existing()).affectedKeys().hasOnly(['category', 'content', 'approved', 'updatedAt']);
-        allow delete: if isValidId(userId) && isValidId(memoryId) && (isOwner(userId) || isAdmin());
+        allow delete: if isValidId(userId) && isValidId(memoryId) && (isVerifiedOwner(userId) || isAdmin());
       }
 
       // Personal Assistant Tasks & Reminders Subcollection
       match /tasks/{taskId} {
-        allow get: if isValidId(userId) && isValidId(taskId) && (isOwner(userId) || isAdmin());
-        allow list: if isOwner(userId) || isAdmin();
+        allow get: if isValidId(userId) && isValidId(taskId) && (isVerifiedOwner(userId) || isAdmin());
+        allow list: if isValidId(userId) && (isVerifiedOwner(userId) || isAdmin());
         allow create: if isValidId(userId) && isValidId(taskId)
-          && isOwner(userId)
+          && isVerifiedOwner(userId)
           && isValidTaskDoc(incoming(), userId, taskId);
         allow update: if isValidId(userId) && isValidId(taskId)
-          && isOwner(userId)
+          && isVerifiedOwner(userId)
           && isValidTaskDoc(incoming(), userId, taskId)
           && incoming().diff(existing()).affectedKeys().hasOnly([
             'title', 'notes', 'dueDate', 'dueTime', 'priority', 'category', 'completed', 'reminderMinutes', 'updatedAt'
           ]);
-        allow delete: if isValidId(userId) && isValidId(taskId) && (isOwner(userId) || isAdmin());
+        allow delete: if isValidId(userId) && isValidId(taskId) && (isVerifiedOwner(userId) || isAdmin());
       }
 
       // Study Hub Learning Progress Subcollection
       match /studyProgress/{progressId} {
-        allow get: if isValidId(userId) && isValidId(progressId) && (isOwner(userId) || isAdmin());
-        allow list: if isOwner(userId) || isAdmin();
+        allow get: if isValidId(userId) && isValidId(progressId) && (isVerifiedOwner(userId) || isAdmin());
+        allow list: if isValidId(userId) && (isVerifiedOwner(userId) || isAdmin());
         allow create: if isValidId(userId) && isValidId(progressId)
-          && isOwner(userId)
+          && isVerifiedOwner(userId)
           && isValidStudyProgressDoc(incoming(), userId, progressId);
         allow update: if isValidId(userId) && isValidId(progressId)
-          && isOwner(userId)
+          && isVerifiedOwner(userId)
           && isValidStudyProgressDoc(incoming(), userId, progressId)
           && incoming().diff(existing()).affectedKeys().hasOnly([
             'topic', 'mode', 'score', 'totalQuestions', 'language', 'completedAt'
           ]);
-        allow delete: if isValidId(userId) && isValidId(progressId) && (isOwner(userId) || isAdmin());
+        allow delete: if isValidId(userId) && isValidId(progressId) && (isVerifiedOwner(userId) || isAdmin());
       }
 
       // Generated Image Metadata Subcollection (pixels stored locally in IndexedDB)
       match /generatedImages/{imageId} {
-        allow get: if isValidId(userId) && isValidId(imageId) && (isOwner(userId) || isAdmin());
-        allow list: if isOwner(userId) || isAdmin();
+        allow get: if isValidId(userId) && isValidId(imageId) && (isVerifiedOwner(userId) || isAdmin());
+        allow list: if isValidId(userId) && (isVerifiedOwner(userId) || isAdmin());
         allow create: if isValidId(userId) && isValidId(imageId)
-          && isOwner(userId)
+          && isVerifiedOwner(userId)
           && isValidGeneratedImageDoc(incoming(), userId, imageId);
-        allow delete: if isValidId(userId) && isValidId(imageId) && (isOwner(userId) || isAdmin());
+        allow delete: if isValidId(userId) && isValidId(imageId) && (isVerifiedOwner(userId) || isAdmin());
       }
 
       // Recurring Automation Schedules Subcollection
       match /automationSchedules/{scheduleId} {
-        allow get: if isValidId(userId) && isValidId(scheduleId) && (isOwner(userId) || isAdmin());
-        allow list: if isOwner(userId) || isAdmin();
+        allow get: if isValidId(userId) && isValidId(scheduleId) && (isVerifiedOwner(userId) || isAdmin());
+        allow list: if isValidId(userId) && (isVerifiedOwner(userId) || isAdmin());
         allow create: if isValidId(userId) && isValidId(scheduleId)
-          && isOwner(userId)
-          && request.auth.token.email_verified == true
+          && isVerifiedOwner(userId)
           && isValidAutomationScheduleDoc(incoming(), userId, scheduleId);
         allow update: if isValidId(userId) && isValidId(scheduleId)
-          && isOwner(userId)
-          && request.auth.token.email_verified == true
+          && isVerifiedOwner(userId)
           && isValidAutomationScheduleDoc(incoming(), userId, scheduleId)
           && incoming().createdAt == existing().createdAt
           && incoming().diff(existing()).affectedKeys().hasOnly([
@@ -421,35 +426,33 @@ service cloud.firestore {
             'prompt', 'tone', 'targetLanguage', 'enabled',
             'nextRunAt', 'lastRunAt', 'lastStatus', 'runCount', 'updatedAt'
           ]);
-        allow delete: if isValidId(userId) && isValidId(scheduleId) && (isOwner(userId) || isAdmin());
+        allow delete: if isValidId(userId) && isValidId(scheduleId) && (isVerifiedOwner(userId) || isAdmin());
       }
 
       // Automation Activity Log Subcollection
       match /automationLogs/{logId} {
-        allow get: if isValidId(userId) && isValidId(logId) && (isOwner(userId) || isAdmin());
-        allow list: if isOwner(userId) || isAdmin();
+        allow get: if isValidId(userId) && isValidId(logId) && (isVerifiedOwner(userId) || isAdmin());
+        allow list: if isValidId(userId) && (isVerifiedOwner(userId) || isAdmin());
         allow create: if isValidId(userId) && isValidId(logId)
-          && isOwner(userId)
-          && request.auth.token.email_verified == true
+          && isVerifiedOwner(userId)
           && isValidAutomationLogDoc(incoming(), userId, logId);
         allow update: if isValidId(userId) && isValidId(logId)
-          && isOwner(userId)
-          && request.auth.token.email_verified == true
+          && isVerifiedOwner(userId)
           && isValidAutomationLogDoc(incoming(), userId, logId)
           && incoming().startedAt == existing().startedAt
           && incoming().diff(existing()).affectedKeys().hasOnly([
             'status', 'statusMessage', 'outputSummary', 'errorMessage',
             'modelUsed', 'latencyMs', 'completedAt'
           ]);
-        allow delete: if isValidId(userId) && isValidId(logId) && (isOwner(userId) || isAdmin());
+        allow delete: if isValidId(userId) && isValidId(logId) && (isVerifiedOwner(userId) || isAdmin());
       }
     }
 
-    // Usage Analytics: authenticated users write their own events and read their own logs; owner/admin can read/list all
+    // Usage Analytics: verified authenticated users write their own events and read their own logs; owner/admin can read/list all
     match /usage_analytics/{eventId} {
-      allow get, list: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow get, list: if isAdmin() || (isVerifiedSignedIn() && resource.data.userId == request.auth.uid);
       allow create: if isValidId(eventId)
-        && isSignedIn()
+        && isVerifiedSignedIn()
         && isValidAnalyticsDoc(incoming(), eventId);
       allow delete: if isValidId(eventId) && isAdmin();
     }
@@ -468,9 +471,9 @@ service cloud.firestore {
         && incoming().updatedAt is string && incoming().updatedAt.size() <= 50;
     }
 
-    // Explicit Admin UID lookup registry (read-only for owner)
+    // Explicit Admin UID lookup registry (read-only for verified owner)
     match /admins/{adminUid} {
-      allow get: if isSignedIn() && request.auth.uid == adminUid;
+      allow get: if isVerifiedSignedIn() && request.auth.uid == adminUid;
       allow write: if false;
     }
   }

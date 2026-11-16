@@ -85,8 +85,11 @@ try {
     app = getApps()[0];
   }
   auth = getAuth(app);
-  // CRITICAL: Bind explicitly to the provisioned Enterprise Firestore databaseId
-  db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+  const configuredDatabaseId = String(firebaseConfig.firestoreDatabaseId || '').trim();
+  db =
+    configuredDatabaseId && configuredDatabaseId !== '(default)'
+      ? getFirestore(app, configuredDatabaseId)
+      : getFirestore(app);
 } catch (err) {
   console.warn('Firebase initialization notice:', err);
 }

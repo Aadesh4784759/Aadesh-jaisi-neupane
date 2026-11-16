@@ -12,7 +12,7 @@ const safeDirname =
   typeof import.meta !== 'undefined' && import.meta.url
     ? path.dirname(fileURLToPath(import.meta.url))
     : process.cwd();
-const OWNER_ADMIN_EMAIL = (process.env.ADMIN_EMAIL || 'aadeshjaisi@gmail.com').trim().toLowerCase();
+const OWNER_ADMIN_EMAIL = (process.env.ADMIN_EMAIL || 'aadeshjaisi6@gmail.com').trim().toLowerCase();
 
 interface AuthenticatedFirebaseUser {
   uid: string;
@@ -24,6 +24,8 @@ interface AuthenticatedFirebaseUser {
 }
 
 function getFirebaseWebApiKey(): string {
+  const envKey = String(process.env.FIREBASE_API_KEY || '').trim();
+  if (envKey) return envKey;
   const candidates = [
     path.resolve(safeDirname, 'firebase-applet-config.json'),
     path.resolve(safeDirname, '..', 'firebase-applet-config.json'),
@@ -38,7 +40,7 @@ function getFirebaseWebApiKey(): string {
       }
     } catch {}
   }
-  return String(process.env.FIREBASE_API_KEY || process.env.VITE_FIREBASE_API_KEY || '').trim();
+  return String(process.env.VITE_FIREBASE_API_KEY || '').trim();
 }
 
 async function verifyFirebaseUserFromRequest(req: Request): Promise<{

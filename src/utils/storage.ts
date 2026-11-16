@@ -38,7 +38,7 @@ export const DEFAULT_SESSION_CATEGORIES = [
   'Study & Code',
 ];
 
-export const OWNER_ADMIN_EMAIL = 'aadeshjaisi@gmail.com';
+export const OWNER_ADMIN_EMAIL = 'aadeshjaisi6@gmail.com';
 
 // Never display Aadesh Jaisi as every visitor's personal name; keep creator credit in footer/branding.
 export const DEFAULT_USER: UserProfile = {
