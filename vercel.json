@@ -6,7 +6,7 @@
   "functions": {
     "api/index.ts": {
       "maxDuration": 60,
-      "includeFiles": "firebase-applet-config.json"
+      "includeFiles": "{firebase-applet-config.json,server.js}"
     }
   },
   "rewrites": [

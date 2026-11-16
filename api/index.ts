@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import type { Request, Response } from 'express';
-import app from '../server';
+import app from '../server.js';
 
 export default function handler(req: IncomingMessage, res: ServerResponse) {
   const rawUrl = req.url || '/';
