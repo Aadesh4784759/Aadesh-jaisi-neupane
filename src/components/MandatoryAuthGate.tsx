@@ -26,6 +26,7 @@ import {
   resetPassword,
   signInWithGoogle,
 } from '../utils/firebase';
+import { BrandLogo } from './BrandLogo';
 
 export type AuthGateStage = 'login' | 'signup' | 'verify-email' | 'forgot-password';
 
@@ -260,20 +261,21 @@ export const MandatoryAuthGate: React.FC<MandatoryAuthGateProps> = ({
       </div>
 
       <div className="relative z-10 w-full max-w-md space-y-5">
-        {/* Official Brand Header (Reusing existing /icon.svg logo asset unmodified) */}
-        <div className="text-center space-y-2">
-          <div className="mx-auto w-16 h-16 rounded-2xl p-1 bg-gradient-to-tr from-purple-500/40 via-indigo-500/30 to-cyan-400/40 border border-white/15 shadow-xl flex items-center justify-center">
-            <img
-              src="/icon.svg"
-              alt="Aadesh AI Logo"
-              className="w-full h-full object-contain rounded-xl"
-            />
+        {/* Official Aadesh AI Brand Header */}
+        <div className="text-center space-y-2.5">
+          <div className="mx-auto flex justify-center">
+            <BrandLogo size="lg" animated={true} />
           </div>
           <div>
-            <h1 className="text-2xl font-black tracking-tight text-white">
-              Aadesh AI Global Hub
-            </h1>
-            <p className="text-xs text-gray-400 mt-0.5">
+            <div className="inline-flex items-center gap-2">
+              <h1 className="text-2xl font-black tracking-tight text-white">
+                Aadesh <span className="text-gradient">AI</span>
+              </h1>
+              <span className="px-2 py-0.5 rounded-md text-[10px] font-extrabold uppercase tracking-wider bg-purple-500/20 border border-purple-400/40 text-purple-200">
+                Live AI
+              </span>
+            </div>
+            <p className="text-xs text-gray-400 mt-1">
               Verified account required • Private encrypted workspace &amp; history
             </p>
           </div>

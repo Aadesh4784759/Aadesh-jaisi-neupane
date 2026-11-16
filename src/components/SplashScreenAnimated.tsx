@@ -1,27 +1,35 @@
 import React, { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence, useReducedMotion } from 'motion/react';
+import { RefreshCw, Sparkles, WifiOff, AlertTriangle } from 'lucide-react';
+import { AIConnectionState } from '../types';
+import { BrandLogo } from './BrandLogo';
 
 const SplashAnimationEffects = lazy(() => import('./SplashAnimationEffects'));
 
 export interface SplashScreenProps {
   isAppReady?: boolean;
+  aiConnectionState?: AIConnectionState;
+  initError?: string | null;
   theme?: 'dark' | 'light';
+  onRetryInit?: () => void;
   onComplete?: () => void;
 }
 
-const BRAND_SUBTITLE = 'GLOBAL HUB';
-const BRAND_LETTERS = BRAND_SUBTITLE.split('');
+const LOADING_MESSAGES = {
+  initializing: 'Initializing Aadesh AI...',
+  connecting: 'Connecting to Google Gemini...',
+  welcome: 'Welcome to Aadesh AI',
+} as const;
 
-const LOADING_MESSAGES = [
-  'Initializing Aadesh AI...',
-  'Connecting Intelligence...',
-  'Preparing Your Global Experience...',
-  'Almost Ready...',
-];
+const MIN_SHOWCASE_MS = 1650;
+const STALL_RETRY_PROMPT_MS = 7500;
 
 const SplashScreenAnimated: React.FC<SplashScreenProps> = ({
-  isAppReady = true,
+  isAppReady = false,
+  aiConnectionState = 'connecting',
+  initError = null,
   theme,
+  onRetryInit,
   onComplete,
 }) => {
   const prefersReducedMotion = useReducedMotion();
@@ -32,8 +40,10 @@ const SplashScreenAnimated: React.FC<SplashScreenProps> = ({
       document.body.classList.contains('light-theme'));
 
   const [visible, setVisible] = useState<boolean>(true);
-  const [progress, setProgress] = useState<number>(prefersReducedMotion ? 100 : 0);
-  const [minShowcaseDone, setMinShowcaseDone] = useState<boolean>(false);
+  const [progress, setProgress] = useState<number>(prefersReducedMotion ? 50 : 4);
+  const [minShowcaseDone, setMinShowcaseDone] = useState<boolean>(Boolean(prefersReducedMotion));
+  const [timedOutWaiting, setTimedOutWaiting] = useState<boolean>(false);
+  const [isRetrying, setIsRetrying] = useState<boolean>(false);
   const completedRef = useRef(false);
   const readyRef = useRef(isAppReady);
   readyRef.current = isAppReady;
@@ -41,91 +51,137 @@ const SplashScreenAnimated: React.FC<SplashScreenProps> = ({
   const dismissSplash = () => {
     if (completedRef.current) return;
     completedRef.current = true;
-    try {
-      sessionStorage.setItem('aadesh_splash_shown_v1', '1');
-    } catch {}
     setVisible(false);
     onComplete?.();
   };
 
+  // Enforce honest progress ceiling (~88%) while backend/auth initialization is still in flight
   useEffect(() => {
     if (!visible) return;
 
-    try {
-      sessionStorage.setItem('aadesh_splash_shown_v1', '1');
-    } catch {}
-
     if (prefersReducedMotion) {
-      setProgress(100);
-      const reducedTimer = window.setTimeout(dismissSplash, 750);
-      return () => window.clearTimeout(reducedTimer);
+      setMinShowcaseDone(true);
+      setProgress(isAppReady && !initError ? 100 : 88);
+      return;
     }
 
     const startTime = Date.now();
-    // 3-second opening splash screen showcase (3000ms)
-    const targetDurationMs = 3000;
 
     const tickTimer = window.setInterval(() => {
       const elapsed = Date.now() - startTime;
-      const pct = Math.min(100, Math.round((elapsed / targetDurationMs) * 100));
-      setProgress(pct);
-
-      if (elapsed >= targetDurationMs) {
+      if (elapsed >= MIN_SHOWCASE_MS) {
         setMinShowcaseDone(true);
-        window.clearInterval(tickTimer);
       }
+      if (elapsed >= STALL_RETRY_PROMPT_MS && !readyRef.current) {
+        setTimedOutWaiting(true);
+      }
+
+      setProgress((prev) => {
+        // Honest progression: never fake 100% until essential init settles
+        if (!readyRef.current) {
+          const cap = elapsed < 650 ? 42 : 88;
+          if (prev >= cap) return prev;
+          const step = elapsed < 650 ? 4 : 2;
+          return Math.min(cap, prev + step);
+        }
+
+        if (elapsed < MIN_SHOWCASE_MS) {
+          const timeBoundTarget = Math.min(96, Math.round((elapsed / MIN_SHOWCASE_MS) * 96));
+          return Math.max(prev, timeBoundTarget);
+        }
+
+        return Math.min(100, prev + 6);
+      });
     }, 45);
 
     return () => {
       window.clearInterval(tickTimer);
     };
-  }, [visible, prefersReducedMotion]);
+  }, [visible, prefersReducedMotion, initError]);
 
-  // Smooth fade-out once the 3-second progress reaches 100%
+  // Move to 100% and dismiss once both real readiness and smooth reveal settle
   useEffect(() => {
-    if (!visible || prefersReducedMotion) return;
-    if (progress >= 100 && minShowcaseDone) {
-      const exitTimer = window.setTimeout(dismissSplash, 180);
+    if (!visible) return;
+    if (initError) return;
+
+    if (isAppReady && minShowcaseDone && progress >= 100) {
+      const exitDelay = prefersReducedMotion ? 320 : 480;
+      const exitTimer = window.setTimeout(dismissSplash, exitDelay);
       return () => window.clearTimeout(exitTimer);
     }
-  }, [progress, minShowcaseDone, visible, prefersReducedMotion]);
 
-  const messageIndex =
-    progress < 25 ? 0 : progress < 55 ? 1 : progress < 85 ? 2 : 3;
-  const activeMessage = LOADING_MESSAGES[messageIndex];
+    if (isAppReady && minShowcaseDone && prefersReducedMotion) {
+      setProgress(100);
+    }
+  }, [isAppReady, minShowcaseDone, progress, visible, prefersReducedMotion, initError]);
+
+  const handleRetryClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setTimedOutWaiting(false);
+    setIsRetrying(true);
+    setProgress(48);
+    onRetryInit?.();
+    window.setTimeout(() => setIsRetrying(false), 900);
+  };
+
+  const handleContinueClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setProgress(100);
+    dismissSplash();
+  };
+
+  const showFailureState = Boolean(initError) || (timedOutWaiting && !isAppReady);
+
+  let activeMessage: string = LOADING_MESSAGES.initializing;
+  if (progress >= 99 && isAppReady && !initError) {
+    activeMessage = LOADING_MESSAGES.welcome;
+  } else if (progress >= 42) {
+    activeMessage = LOADING_MESSAGES.connecting;
+  }
 
   return (
     <AnimatePresence>
       {visible && (
         <motion.div
-          key="aadesh-global-hub-splash"
+          key="aadesh-ai-gaming-splash"
           initial={{ opacity: 1 }}
           exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, scale: 1.02 }}
-          transition={{ duration: prefersReducedMotion ? 0.15 : 0.45, ease: 'easeOut' }}
-          onClick={dismissSplash}
+          transition={{ duration: prefersReducedMotion ? 0.15 : 0.4, ease: 'easeOut' }}
+          onClick={() => {
+            if (isAppReady && minShowcaseDone && !showFailureState) {
+              dismissSplash();
+            }
+          }}
           className={`fixed inset-0 z-[100] min-h-[100dvh] safe-top safe-bottom flex flex-col items-center justify-center px-5 py-8 select-none overflow-hidden ${
             isLightTheme
-              ? 'bg-[radial-gradient(ellipse_at_top,_#eef2ff_0%,_#f8fafc_52%,_#ede9fe_100%)] text-slate-900'
-              : 'bg-[radial-gradient(ellipse_at_top,_#1b1442_0%,_#090b14_55%,_#05060b_100%)] text-white'
+              ? 'bg-[radial-gradient(ellipse_at_top,_#eef2ff_0%,_#f5f3ff_50%,_#ede9fe_100%)] text-slate-900'
+              : 'bg-[radial-gradient(ellipse_at_top,_#241152_0%,_#0b071c_54%,_#05040d_100%)] text-white'
           }`}
           role="status"
           aria-live="polite"
-          aria-label="Aadesh AI Global Hub Loading"
+          aria-label="Aadesh AI Live AI Loading"
         >
-          {/* Subtle Ambient Gradient Glow */}
+          {/* Futuristic Cyber Grid Overlay */}
           <div
             aria-hidden="true"
-            className={`pointer-events-none absolute w-72 h-72 sm:w-96 sm:h-96 rounded-full blur-3xl ${
-              isLightTheme
-                ? 'bg-gradient-to-tr from-blue-400/25 via-purple-400/25 to-cyan-300/25'
-                : 'bg-gradient-to-tr from-blue-600/25 via-purple-600/30 to-cyan-400/20'
-            }`}
+            className="pointer-events-none absolute inset-0 opacity-20"
+            style={{
+              backgroundImage:
+                'radial-gradient(rgba(167, 139, 250, 0.35) 1px, transparent 1px)',
+              backgroundSize: '26px 26px',
+            }}
           />
 
-          {/* Central Logo Stage with 3D-Inspired Entry & Lazy-Loaded Particle/Wave Effects */}
+          {/* Ambient Dual-Tone Neon Glows */}
           <div
-            className="relative flex items-center justify-center mb-6 sm:mb-7"
-            style={{ perspective: '900px' }}
+            aria-hidden="true"
+            className="pointer-events-none absolute -top-24 left-1/2 -translate-x-1/2 w-[360px] h-[360px] sm:w-[460px] sm:h-[460px] rounded-full blur-3xl bg-gradient-to-tr from-purple-600/30 via-violet-500/25 to-blue-500/25"
+          />
+
+          {/* Central 3D Gaming Logo Portal Stage */}
+          <div
+            className="relative flex items-center justify-center mb-7 sm:mb-8"
+            style={{ perspective: '1000px' }}
           >
             {!prefersReducedMotion && (
               <Suspense fallback={null}>
@@ -133,121 +189,117 @@ const SplashScreenAnimated: React.FC<SplashScreenProps> = ({
               </Suspense>
             )}
 
-            {/* Existing Uploaded Official App Logo (/icon.svg) — Never Modified or Distorted */}
             <motion.div
               initial={
                 prefersReducedMotion
                   ? { opacity: 0 }
-                  : { opacity: 0, scale: 0.72, rotateX: 16, rotateY: -14 }
+                  : { opacity: 0, scale: 0.68, rotateX: 22, rotateY: -18 }
               }
               animate={
                 prefersReducedMotion
                   ? { opacity: 1 }
-                  : { opacity: 1, scale: 1, rotateX: 0, rotateY: 0 }
+                  : {
+                      opacity: 1,
+                      scale: 1,
+                      rotateX: [0, 4, 0, -4, 0],
+                      rotateY: [0, -5, 0, 5, 0],
+                    }
               }
-              transition={{
-                duration: prefersReducedMotion ? 0.2 : 0.75,
-                ease: [0.22, 1, 0.36, 1],
-              }}
-              className="relative z-10 rounded-[28px] shadow-[0_14px_45px_rgba(99,102,241,0.45),0_0_24px_rgba(34,211,238,0.25)]"
+              transition={
+                prefersReducedMotion
+                  ? { duration: 0.2 }
+                  : {
+                      opacity: { duration: 0.55 },
+                      scale: { duration: 0.75, ease: [0.22, 1, 0.36, 1] },
+                      rotateX: { duration: 6, repeat: Infinity, ease: 'easeInOut' },
+                      rotateY: { duration: 6, repeat: Infinity, ease: 'easeInOut' },
+                    }
+              }
+              className="relative z-10"
             >
-              <img
-                src="/icon.svg"
-                alt="Aadesh AI Global Hub Official Logo"
-                loading="eager"
-                decoding="async"
-                className="w-24 h-24 sm:w-28 sm:h-28 md:w-32 md:h-32 object-contain"
-              />
+              <BrandLogo size="xl" animated={true} />
             </motion.div>
           </div>
 
-          {/* Brand Identity Reveal */}
+          {/* Official App Name + Live AI Label */}
           <div className="text-center relative z-10 flex flex-col items-center">
-            <motion.h1
+            <motion.div
               initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 12 }}
-              animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, y: 0 }}
-              transition={{ duration: prefersReducedMotion ? 0.15 : 0.45, delay: prefersReducedMotion ? 0 : 0.16 }}
-              className={`text-2xl sm:text-3xl md:text-4xl font-black tracking-tight ${
-                isLightTheme ? 'text-slate-900' : 'text-white'
-              }`}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: prefersReducedMotion ? 0.15 : 0.45, delay: prefersReducedMotion ? 0 : 0.12 }}
+              className="flex flex-wrap items-center justify-center gap-2.5"
             >
-              Aadesh{' '}
-              <span className="bg-gradient-to-r from-blue-500 via-purple-500 to-cyan-400 bg-clip-text text-transparent">
-                AI
+              <h1
+                className={`text-3xl sm:text-4xl font-black tracking-tight ${
+                  isLightTheme ? 'text-slate-900' : 'text-white'
+                }`}
+              >
+                Aadesh{' '}
+                <span className="bg-gradient-to-r from-purple-400 via-violet-300 to-cyan-300 bg-clip-text text-transparent">
+                  AI
+                </span>
+              </h1>
+              <span
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-extrabold uppercase tracking-wider border ${
+                  isLightTheme
+                    ? 'bg-purple-100 border-purple-300 text-purple-800'
+                    : 'bg-purple-950/80 border-purple-400/45 text-purple-200 shadow-[0_0_16px_rgba(139,92,246,0.35)]'
+                }`}
+              >
+                <Sparkles className="w-3 h-3 text-cyan-300" />
+                <span>Live AI</span>
               </span>
-            </motion.h1>
+            </motion.div>
 
-            {/* "GLOBAL HUB" Letter-by-Letter Reveal */}
-            <div
-              className="mt-1.5 flex items-center justify-center gap-[0.18em] sm:gap-[0.22em]"
-              aria-label="GLOBAL HUB"
-            >
-              {BRAND_LETTERS.map((char, idx) => (
-                <motion.span
-                  key={`${char}-${idx}`}
-                  initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 8 }}
-                  animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, y: 0 }}
-                  transition={{
-                    duration: prefersReducedMotion ? 0.1 : 0.28,
-                    delay: prefersReducedMotion ? 0 : 0.3 + idx * 0.035,
-                    ease: 'easeOut',
-                  }}
-                  className={`text-xs sm:text-sm md:text-base font-extrabold tracking-widest ${
-                    char === ' '
-                      ? 'w-2'
-                      : isLightTheme
-                      ? 'text-indigo-700'
-                      : 'bg-gradient-to-r from-cyan-300 via-blue-300 to-purple-300 bg-clip-text text-transparent'
-                  }`}
-                >
-                  {char}
-                </motion.span>
-              ))}
-            </div>
-
-            {/* Tagline */}
             <motion.p
-              initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 6 }}
-              animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, y: 0 }}
-              transition={{ duration: 0.4, delay: prefersReducedMotion ? 0 : 0.65 }}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ duration: 0.4, delay: prefersReducedMotion ? 0 : 0.28 }}
               className={`mt-2 text-xs sm:text-sm font-medium ${
-                isLightTheme ? 'text-slate-600' : 'text-purple-100/85'
+                isLightTheme ? 'text-slate-600' : 'text-purple-200/80'
               }`}
             >
-              Your Intelligence. Your World.
+              Powered by Google Gemini
             </motion.p>
           </div>
 
-          {/* Glassmorphism Loading Card (0% -> 100% + Rotating Messages) */}
+          {/* Futuristic Glassmorphism HUD Progress Card */}
           <motion.div
-            initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 10 }}
-            animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, y: 0 }}
-            transition={{ duration: 0.35, delay: prefersReducedMotion ? 0 : 0.25 }}
-            className={`mt-7 w-full max-w-[290px] sm:max-w-[330px] rounded-2xl p-3.5 sm:p-4 backdrop-blur-xl border relative z-10 ${
+            initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.35, delay: prefersReducedMotion ? 0 : 0.2 }}
+            className={`mt-7 w-full max-w-[310px] sm:max-w-[350px] rounded-2xl p-4 backdrop-blur-xl border relative z-10 ${
               isLightTheme
-                ? 'bg-white/75 border-indigo-200/80 shadow-[0_12px_32px_rgba(99,102,241,0.12)]'
-                : 'bg-[#121422]/75 border-white/10 shadow-[0_12px_36px_rgba(0,0,0,0.45)]'
+                ? 'bg-white/85 border-purple-200 shadow-[0_14px_34px_rgba(91,33,182,0.12)]'
+                : 'bg-[#120d26]/82 border-purple-400/30 shadow-[0_14px_40px_rgba(0,0,0,0.55),inset_0_1px_0_rgba(255,255,255,0.08)]'
             }`}
           >
-            <div className="flex items-center justify-between gap-2 mb-2">
+            <div className="flex items-center justify-between gap-2 mb-2.5">
               <AnimatePresence mode="wait">
                 <motion.span
-                  key={activeMessage}
+                  key={showFailureState ? 'init-error' : activeMessage}
                   initial={prefersReducedMotion ? { opacity: 1 } : { opacity: 0, y: 4 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={prefersReducedMotion ? { opacity: 1 } : { opacity: 0, y: -4 }}
-                  transition={{ duration: 0.18 }}
-                  className={`text-[11px] sm:text-xs font-semibold truncate ${
-                    isLightTheme ? 'text-slate-700' : 'text-gray-200'
+                  transition={{ duration: 0.16 }}
+                  className={`text-xs font-semibold truncate ${
+                    showFailureState
+                      ? 'text-amber-300'
+                      : progress >= 99 && isAppReady
+                      ? 'text-emerald-300 font-bold'
+                      : isLightTheme
+                      ? 'text-slate-700'
+                      : 'text-purple-100'
                   }`}
                 >
-                  {activeMessage}
+                  {showFailureState ? 'Initialization taking longer than expected' : activeMessage}
                 </motion.span>
               </AnimatePresence>
+
               <span
-                className={`text-[11px] sm:text-xs font-mono font-bold shrink-0 ${
+                className={`text-xs font-mono font-extrabold tabular-nums shrink-0 ${
                   isLightTheme
-                    ? 'text-indigo-600'
+                    ? 'text-purple-700'
                     : 'bg-gradient-to-r from-cyan-300 to-purple-300 bg-clip-text text-transparent'
                 }`}
               >
@@ -255,38 +307,102 @@ const SplashScreenAnimated: React.FC<SplashScreenProps> = ({
               </span>
             </div>
 
-            {/* Animated Loading Progress Track */}
+            {/* Energy Progress Bar (0% -> 100%) */}
             <div
               role="progressbar"
               aria-valuenow={progress}
               aria-valuemin={0}
               aria-valuemax={100}
-              className={`w-full h-2 rounded-full overflow-hidden ${
-                isLightTheme ? 'bg-slate-200/90' : 'bg-[#080a12] border border-white/10'
+              className={`relative w-full h-2.5 rounded-full overflow-hidden ${
+                isLightTheme ? 'bg-purple-100' : 'bg-[#070512] border border-purple-400/20'
               }`}
             >
               <div
                 style={{ width: `${progress}%` }}
-                className="h-full rounded-full bg-gradient-to-r from-blue-500 via-indigo-500 via-purple-500 to-cyan-400 shadow-[0_0_16px_rgba(56,189,248,0.65)] transition-[width] duration-75 ease-out"
+                className="h-full rounded-full bg-gradient-to-r from-purple-600 via-violet-400 to-cyan-400 shadow-[0_0_16px_rgba(56,189,248,0.7)] transition-[width] duration-75 ease-out"
               />
             </div>
+
+            {/* Real Connection Verification Pill inside HUD */}
+            <div className="mt-2.5 flex items-center justify-between text-[11px]">
+              <span className={isLightTheme ? 'text-slate-500' : 'text-purple-300/75'}>
+                Gemini Link
+              </span>
+              <span
+                className={`inline-flex items-center gap-1.5 font-semibold ${
+                  aiConnectionState === 'connected'
+                    ? 'text-emerald-400'
+                    : aiConnectionState === 'offline'
+                    ? 'text-rose-400'
+                    : aiConnectionState === 'error'
+                    ? 'text-amber-400'
+                    : 'text-amber-300'
+                }`}
+              >
+                <span
+                  className={`w-1.5 h-1.5 rounded-full ${
+                    aiConnectionState === 'connected'
+                      ? 'bg-emerald-400 animate-pulse'
+                      : aiConnectionState === 'offline'
+                      ? 'bg-rose-400'
+                      : 'bg-amber-400 animate-pulse'
+                  }`}
+                />
+                {aiConnectionState === 'connected'
+                  ? 'Verified'
+                  : aiConnectionState === 'offline'
+                  ? 'Offline'
+                  : aiConnectionState === 'error'
+                  ? 'Service Issue'
+                  : 'Verifying...'}
+              </span>
+            </div>
+
+            {/* Honest Error / Retry Controls if Initialization Fails or Times Out */}
+            {showFailureState && (
+              <div className="mt-3 pt-3 border-t border-purple-400/20 space-y-2.5">
+                <div className="flex items-start gap-2 text-[11px] text-amber-200/90">
+                  {aiConnectionState === 'offline' ? (
+                    <WifiOff className="w-3.5 h-3.5 text-rose-400 shrink-0 mt-0.5" />
+                  ) : (
+                    <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
+                  )}
+                  <span>
+                    {initError || 'Unable to confirm live Gemini service yet. Retry or enter offline mode.'}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleRetryClick}
+                    className="flex-1 min-h-[38px] px-3 py-1.5 rounded-xl purple-glow-btn text-white text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isRetrying ? 'animate-spin' : ''}`} />
+                    <span>Retry</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleContinueClick}
+                    className="min-h-[38px] px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white/15 border border-purple-300/25 text-xs font-semibold text-purple-100 cursor-pointer"
+                  >
+                    Continue
+                  </button>
+                </div>
+              </div>
+            )}
           </motion.div>
 
-          {/* Subtle "Created by Aadesh Jaisi" Attribution */}
+          {/* Attribution */}
           <motion.p
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
-            transition={{ duration: 0.5, delay: prefersReducedMotion ? 0 : 0.85 }}
+            transition={{ duration: 0.4, delay: prefersReducedMotion ? 0 : 0.45 }}
             className={`mt-5 text-[11px] sm:text-xs font-medium tracking-wide relative z-10 ${
-              isLightTheme ? 'text-slate-500' : 'text-gray-400'
+              isLightTheme ? 'text-slate-500' : 'text-purple-200/65'
             }`}
           >
             Created by{' '}
-            <span
-              className={
-                isLightTheme ? 'text-indigo-700 font-semibold' : 'text-purple-300 font-semibold'
-              }
-            >
+            <span className={isLightTheme ? 'text-purple-700 font-semibold' : 'text-purple-300 font-semibold'}>
               Aadesh Jaisi
             </span>
           </motion.p>

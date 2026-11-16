@@ -413,21 +413,145 @@ const PERSONA_TONES: Record<string, string> = {
   friendly: 'Adopt a FRIENDLY voice persona: warm, welcoming, empathetic, and encouraging.',
 };
 
-// HEALTH & CONNECTION STATUS CHECK
-app.get('/api/health', (req: Request, res: Response): void => {
-  const customKey = (req.headers['x-gemini-api-key'] as string) || '';
+interface CachedGeminiHealth {
+  checkedAtMs: number;
+  geminiConnected: boolean;
+  model: string;
+  latencyMs: number;
+  error?: string;
+}
+
+const GEMINI_HEALTH_CACHE_TTL_MS = 25000;
+let defaultKeyHealthCache: CachedGeminiHealth | null = null;
+let lastSuccessfulGeminiConnectedAt: string | null = null;
+
+async function probeLiveGeminiConnection(
+  ai: GoogleGenAI,
+  candidates: string[]
+): Promise<{ ok: boolean; model: string; latencyMs: number; error?: string }> {
+  const startMs = Date.now();
+  let lastErr: unknown = null;
+
+  for (let i = 0; i < candidates.length; i++) {
+    const model = candidates[i];
+    try {
+      await withTimeout(ai.models.get({ model }), 4500);
+      return {
+        ok: true,
+        model,
+        latencyMs: Date.now() - startMs,
+      };
+    } catch (err) {
+      lastErr = err;
+      if (isAuthFailure(err)) {
+        return {
+          ok: false,
+          model,
+          latencyMs: Date.now() - startMs,
+          error: 'Gemini API key was rejected by Google Gemini. Please check your API key configuration.',
+        };
+      }
+    }
+  }
+
+  const sanitized = sanitizeErrorMessage(lastErr);
+  return {
+    ok: false,
+    model: candidates[0],
+    latencyMs: Date.now() - startMs,
+    error: sanitized || 'Unable to verify Google Gemini API availability.',
+  };
+}
+
+// HEALTH & REAL-TIME GOOGLE GEMINI CONNECTION STATUS CHECK
+app.get('/api/health', async (req: Request, res: Response): Promise<void> => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  const customKey = ((req.headers['x-gemini-api-key'] as string) || '').trim();
+  const forceRefresh = req.query.force === '1' || req.query.force === 'true';
   const ai = getGeminiClient(customKey);
   const candidates = getCandidateModels();
+
+  if (!ai) {
+    res.json({
+      status: 'ok',
+      authRequired: true,
+      backendConnected: true,
+      geminiConnected: false,
+      aiService: 'error',
+      isLiveAI: false,
+      model: candidates[0],
+      fallbackModels: candidates.slice(1),
+      checkedAt: new Date().toISOString(),
+      lastConnectedAt: lastSuccessfulGeminiConnectedAt,
+      latencyMs: 0,
+      error: 'Gemini API key is not configured on the server.',
+      version: '2.5.0',
+      platform: 'Aadesh AI',
+    });
+    return;
+  }
+
+  const now = Date.now();
+  const useDefaultCache =
+    !customKey &&
+    !forceRefresh &&
+    defaultKeyHealthCache &&
+    now - defaultKeyHealthCache.checkedAtMs < GEMINI_HEALTH_CACHE_TTL_MS;
+
+  if (useDefaultCache && defaultKeyHealthCache) {
+    res.json({
+      status: 'ok',
+      authRequired: true,
+      backendConnected: true,
+      geminiConnected: defaultKeyHealthCache.geminiConnected,
+      aiService: defaultKeyHealthCache.geminiConnected ? 'connected' : 'error',
+      isLiveAI: defaultKeyHealthCache.geminiConnected,
+      model: defaultKeyHealthCache.model,
+      fallbackModels: candidates.filter((m) => m !== defaultKeyHealthCache?.model),
+      checkedAt: new Date(defaultKeyHealthCache.checkedAtMs).toISOString(),
+      lastConnectedAt: lastSuccessfulGeminiConnectedAt,
+      latencyMs: defaultKeyHealthCache.latencyMs,
+      ...(defaultKeyHealthCache.error ? { error: defaultKeyHealthCache.error } : {}),
+      cached: true,
+      version: '2.5.0',
+      platform: 'Aadesh AI',
+    });
+    return;
+  }
+
+  const probe = await probeLiveGeminiConnection(ai, candidates);
+  const checkedAtIso = new Date().toISOString();
+
+  if (probe.ok) {
+    lastSuccessfulGeminiConnectedAt = checkedAtIso;
+  }
+
+  if (!customKey) {
+    defaultKeyHealthCache = {
+      checkedAtMs: Date.now(),
+      geminiConnected: probe.ok,
+      model: probe.model,
+      latencyMs: probe.latencyMs,
+      error: probe.error,
+    };
+  }
 
   res.json({
     status: 'ok',
     authRequired: true,
-    aiService: ai ? 'connected' : 'disconnected',
-    isLiveAI: Boolean(ai),
-    model: candidates[0],
-    fallbackModels: candidates.slice(1),
+    backendConnected: true,
+    geminiConnected: probe.ok,
+    aiService: probe.ok ? 'connected' : 'error',
+    isLiveAI: probe.ok,
+    model: probe.model,
+    fallbackModels: candidates.filter((m) => m !== probe.model),
+    checkedAt: checkedAtIso,
+    lastConnectedAt: lastSuccessfulGeminiConnectedAt,
+    latencyMs: probe.latencyMs,
+    ...(probe.error ? { error: probe.error } : {}),
+    cached: false,
     version: '2.5.0',
-    platform: 'Aadesh AI Global Hub',
+    platform: 'Aadesh AI',
   });
 });
 

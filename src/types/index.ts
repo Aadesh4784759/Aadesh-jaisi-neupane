@@ -114,7 +114,18 @@ export interface VoicePersonaInfo {
   sampleAudioText: string;
 }
 
-export type AIConnectionState = 'connected' | 'connecting' | 'disconnected';
+export type AIConnectionState = 'connected' | 'connecting' | 'offline' | 'error';
+
+export interface AIConnectionHealth {
+  state: AIConnectionState;
+  backendConnected: boolean;
+  geminiConnected: boolean;
+  model: string;
+  checkedAt: number | null;
+  lastConnectedAt: number | null;
+  latencyMs?: number;
+  error?: string;
+}
 
 export interface AchievementBadge {
   id: string;

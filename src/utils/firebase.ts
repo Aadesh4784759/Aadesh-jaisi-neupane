@@ -122,11 +122,11 @@ export function handleFirestoreError(
   throw new Error(JSON.stringify(errInfo));
 }
 
-// Required boot connectivity verification against Enterprise Firestore
+// Boot connectivity verification against Firestore using a rules-permitted config document
 async function testFirestoreConnection() {
   if (!db) return;
   try {
-    await getDocFromServer(doc(db, 'test', 'connection'));
+    await getDocFromServer(doc(db, 'admin_settings', 'platform'));
   } catch (error) {
     if (error instanceof Error && error.message.includes('the client is offline')) {
       console.error('Please check your Firebase configuration (Firestore client offline).');

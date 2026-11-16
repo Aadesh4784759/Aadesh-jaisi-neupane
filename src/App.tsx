@@ -3,7 +3,7 @@ import { User as FirebaseUser } from 'firebase/auth';
 import confetti from 'canvas-confetti';
 import { ArrowLeft } from 'lucide-react';
 import {
-  AIConnectionState,
+  AIConnectionHealth,
   AppSettings,
   ChatMessage,
   ChatSession,
@@ -110,7 +110,18 @@ export default function App() {
   const [authModalMode, setAuthModalMode] = useState<'signin' | 'register' | 'profile'>('signin');
   const [isGamificationModalOpen, setIsGamificationModalOpen] = useState<boolean>(false);
   const [isInstallModalOpen, setIsInstallModalOpen] = useState<boolean>(false);
-  const [aiStatus, setAiStatus] = useState<AIConnectionState>('connecting');
+  const [aiHealth, setAiHealth] = useState<AIConnectionHealth>({
+    state: 'connecting',
+    backendConnected: false,
+    geminiConnected: false,
+    model: 'gemini-4-hydrogen',
+    checkedAt: null,
+    lastConnectedAt: null,
+  });
+  const [hasInitialHealthSettled, setHasInitialHealthSettled] = useState<boolean>(false);
+  const [initError, setInitError] = useState<string | null>(null);
+  const [splashDismissed, setSplashDismissed] = useState<boolean>(false);
+  const healthRequestInFlightRef = useRef<boolean>(false);
   const [sessions, setSessions] = useState<ChatSession[]>(() => getStoredSessions(getStoredUser().id));
   const [sessionFolders, setSessionFolders] = useState<string[]>(() =>
     getStoredFolders(getStoredUser().id)
@@ -146,9 +157,8 @@ export default function App() {
   const [isAuthInitialized, setIsAuthInitialized] = useState<boolean>(false);
 
   const isAuthenticatedVerified = Boolean(fbAuthUser && fbAuthUser.emailVerified);
-  const isAppReady = isAuthInitialized && (isAuthenticatedVerified ? aiStatus !== 'connecting' : true);
-
   const isOnline = isBrowserOnline && !settings.offlineModeForce;
+  const isAppReady = isAuthInitialized && hasInitialHealthSettled;
   const isOwnerAdmin = Boolean(
     isAuthenticatedVerified &&
       user.isLoggedIn &&
@@ -349,29 +359,122 @@ export default function App() {
     setCurrentSessionId(userSessions[0]?.id || `session-${Date.now()}`);
   }, [user.id]);
 
-  // Check AI Service connectivity health
-  const checkAIHealth = async () => {
-    setAiStatus('connecting');
+  // Real-time AI & Backend connectivity verification
+  const checkAIHealth = async (forceRefresh = false) => {
+    if (!isBrowserOnline || settings.offlineModeForce) {
+      setAiHealth((prev) => ({
+        ...prev,
+        state: 'offline',
+        backendConnected: false,
+        geminiConnected: false,
+        checkedAt: Date.now(),
+        error: settings.offlineModeForce
+          ? 'Offline Mode is manually enabled in Settings.'
+          : 'No internet connection detected.',
+      }));
+      setInitError(null);
+      setHasInitialHealthSettled(true);
+      return;
+    }
+
+    if (healthRequestInFlightRef.current && !forceRefresh) return;
+    healthRequestInFlightRef.current = true;
+
+    setAiHealth((prev) => ({
+      ...prev,
+      state: 'connecting',
+      error: undefined,
+    }));
+
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 7500);
+
     try {
       const headers: Record<string, string> = {};
       if (settings.customGeminiApiKey) {
         headers['x-gemini-api-key'] = settings.customGeminiApiKey;
       }
-      const res = await fetch('/api/health', { headers });
-      if (res.ok) {
-        const data = await res.json();
-        setAiStatus(data.isLiveAI ? 'connected' : 'disconnected');
-      } else {
-        setAiStatus('disconnected');
+      const url = forceRefresh ? '/api/health?force=1' : '/api/health';
+      const res = await fetch(url, {
+        headers,
+        cache: 'no-store',
+        signal: controller.signal,
+      });
+
+      if (!res.ok) {
+        setAiHealth((prev) => ({
+          ...prev,
+          state: 'offline',
+          backendConnected: false,
+          geminiConnected: false,
+          checkedAt: Date.now(),
+          error: `Backend returned HTTP ${res.status}.`,
+        }));
+        setInitError(`Backend server unavailable (HTTP ${res.status}).`);
+        return;
       }
-    } catch {
-      setAiStatus('disconnected');
+
+      const data = await res.json();
+      const nowMs = Date.now();
+      const geminiOk = Boolean(data.geminiConnected ?? data.isLiveAI);
+      const serverLastConnMs = data.lastConnectedAt ? new Date(data.lastConnectedAt).getTime() : null;
+
+      setAiHealth((prev) => ({
+        state: geminiOk ? 'connected' : 'error',
+        backendConnected: data.backendConnected !== false,
+        geminiConnected: geminiOk,
+        model: data.model || prev.model || 'gemini-4-hydrogen',
+        checkedAt: nowMs,
+        lastConnectedAt: geminiOk
+          ? nowMs
+          : serverLastConnMs && !Number.isNaN(serverLastConnMs)
+          ? serverLastConnMs
+          : prev.lastConnectedAt,
+        latencyMs: typeof data.latencyMs === 'number' ? data.latencyMs : undefined,
+        error: geminiOk ? undefined : data.error || 'Google Gemini API is currently unavailable.',
+      }));
+      setInitError(null);
+    } catch (err: any) {
+      const timedOut = err?.name === 'AbortError';
+      const errMsg = timedOut
+        ? 'Connection verification timed out.'
+        : 'Unable to reach the Aadesh AI backend server.';
+      setAiHealth((prev) => ({
+        ...prev,
+        state: 'offline',
+        backendConnected: false,
+        geminiConnected: false,
+        checkedAt: Date.now(),
+        error: errMsg,
+      }));
+      setInitError(errMsg);
+    } finally {
+      window.clearTimeout(timeoutId);
+      healthRequestInFlightRef.current = false;
+      setHasInitialHealthSettled(true);
     }
   };
 
   useEffect(() => {
-    checkAIHealth();
-  }, [settings.customGeminiApiKey]);
+    void checkAIHealth(false);
+
+    const pollInterval = window.setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+      void checkAIHealth(false);
+    }, 45000);
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void checkAIHealth(false);
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      window.clearInterval(pollInterval);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [isBrowserOnline, settings.offlineModeForce, settings.customGeminiApiKey]);
 
   const handleUpdateSettings = (newSettings: Partial<AppSettings>) => {
     setSettings((prev) => {
@@ -599,7 +702,17 @@ export default function App() {
         if (!reply.trim()) {
           reply = 'Response received.';
         }
-        setAiStatus('connected');
+        setAiHealth((prev) => ({
+          ...prev,
+          state: 'connected',
+          backendConnected: true,
+          geminiConnected: true,
+          model: modelUsed || prev.model,
+          checkedAt: Date.now(),
+          lastConnectedAt: Date.now(),
+          latencyMs,
+          error: undefined,
+        }));
       } else {
         const headers = await getAuthHeaders({
           'Content-Type': 'application/json',
@@ -643,9 +756,26 @@ export default function App() {
         latencyMs = data.latencyMs || Date.now() - startTime;
 
         if (data.isLiveAI) {
-          setAiStatus('connected');
+          setAiHealth((prev) => ({
+            ...prev,
+            state: 'connected',
+            backendConnected: true,
+            geminiConnected: true,
+            model: modelUsed || prev.model,
+            checkedAt: Date.now(),
+            lastConnectedAt: Date.now(),
+            latencyMs,
+            error: undefined,
+          }));
         } else if (!settings.customGeminiApiKey) {
-          setAiStatus('disconnected');
+          setAiHealth((prev) => ({
+            ...prev,
+            state: 'error',
+            backendConnected: true,
+            geminiConnected: false,
+            checkedAt: Date.now(),
+            error: 'Gemini service returned a fallback response.',
+          }));
         }
       }
 
@@ -795,6 +925,18 @@ export default function App() {
       return { reply, translation };
     } catch (err: any) {
       console.error('Chat error:', err);
+      const errMsg = String(err?.message || 'Connection error');
+      const isNetworkFailure =
+        (typeof navigator !== 'undefined' && !navigator.onLine) ||
+        /failed to fetch|networkerror|load failed|network request failed/i.test(errMsg);
+      setAiHealth((prev) => ({
+        ...prev,
+        state: isNetworkFailure ? 'offline' : 'error',
+        backendConnected: !isNetworkFailure,
+        geminiConnected: false,
+        checkedAt: Date.now(),
+        error: errMsg,
+      }));
       const errorMessageText = `⚠️ ${err?.message || 'Connection error'}. Please verify your internet connection or Gemini API key in Settings.`;
       const modelErrorMsg: ChatMessage = {
         id: `mod-err-${Date.now()}`,
@@ -1201,45 +1343,63 @@ export default function App() {
     setIsSettingsModalOpen(false);
   };
 
+  const splashOverlay = !splashDismissed ? (
+    <SplashScreen
+      isAppReady={isAppReady}
+      aiConnectionState={aiHealth.state}
+      initError={initError}
+      theme={settings.theme}
+      onRetryInit={() => void checkAIHealth(true)}
+      onComplete={() => setSplashDismissed(true)}
+    />
+  ) : null;
+
   if (!isAuthInitialized) {
     return (
-      <div className="app-shell-scroll relative flex flex-col justify-center items-center min-h-screen max-w-full overflow-x-hidden">
-        <FuturisticBackground theme={settings.theme} />
-        <SplashScreen isAppReady={false} theme={settings.theme} />
-      </div>
+      <>
+        {splashOverlay}
+        <div className="app-shell-scroll relative flex flex-col justify-center items-center min-h-screen max-w-full overflow-x-hidden">
+          <FuturisticBackground theme={settings.theme} />
+        </div>
+      </>
     );
   }
 
   if (!isAuthenticatedVerified) {
     return (
-      <div className="app-shell-scroll relative flex flex-col min-h-screen max-w-full overflow-x-hidden selection:bg-purple-500/30 selection:text-purple-200">
-        <FuturisticBackground theme={settings.theme} />
-        <SplashScreen isAppReady={isAppReady} theme={settings.theme} />
-        <MandatoryAuthGate
-          firebaseUser={fbAuthUser}
-          onVerifiedComplete={(verifiedUser) => {
-            setFbAuthUser(verifiedUser);
-            void hydrateVerifiedUserSession(verifiedUser);
-          }}
-        />
-      </div>
+      <>
+        {splashOverlay}
+        <div className="app-shell-scroll relative flex flex-col min-h-screen max-w-full overflow-x-hidden selection:bg-purple-500/30 selection:text-purple-200">
+          <FuturisticBackground theme={settings.theme} />
+          <MandatoryAuthGate
+            firebaseUser={fbAuthUser}
+            onVerifiedComplete={(verifiedUser) => {
+              setFbAuthUser(verifiedUser);
+              void hydrateVerifiedUserSession(verifiedUser);
+            }}
+          />
+        </div>
+      </>
     );
   }
 
   return (
-    <div
-      className={`${
-        activeTab === 'chat' ? 'app-shell-chat' : 'app-shell-scroll'
-      } relative flex flex-col justify-between selection:bg-purple-500/30 selection:text-purple-200 max-w-full overflow-x-hidden`}
-    >
-      <SplashScreen isAppReady={isAppReady} theme={settings.theme} />
+    <>
+      {splashOverlay}
+      <div
+        className={`${
+          activeTab === 'chat' ? 'app-shell-chat' : 'app-shell-scroll'
+        } relative flex flex-col justify-between selection:bg-purple-500/30 selection:text-purple-200 max-w-full overflow-x-hidden`}
+      >
+        {/* Futuristic Purple/Violet/Lavender 3D Liquid Waves, Orbs, Bubbles & Particles */}
+        <FuturisticBackground theme={settings.theme} />
 
-      {/* Futuristic Purple/Violet/Lavender 3D Liquid Waves, Orbs, Bubbles & Particles */}
-      <FuturisticBackground theme={settings.theme} />
-
-      {/* CLEAN TOP HEADER (Logo + Name on Left | Clickable User, Flag, UID, Photo, Streak on Right) */}
+      {/* CLEAN TOP HEADER (Logo + Live AI Status on Left | Clickable User, Flag, UID, Photo, Streak on Right) */}
       <Header
         user={user}
+        aiHealth={aiHealth}
+        isNetworkOnline={isOnline}
+        onRetryHealth={() => void checkAIHealth(true)}
         onLogoClick={() => setActiveTab('chat')}
         onProfileClick={() => {
           setSettingsSection('profile');
@@ -1512,6 +1672,7 @@ export default function App() {
         isOpen={isInstallModalOpen}
         onClose={() => setIsInstallModalOpen(false)}
       />
-    </div>
+      </div>
+    </>
   );
 }
