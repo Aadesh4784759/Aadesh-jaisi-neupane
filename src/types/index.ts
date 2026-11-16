@@ -141,6 +141,8 @@ export interface UserProfile {
   phone?: string;
   avatarUrl?: string;
   avatarColor?: string;
+  country?: string;
+  countryFlag?: string;
   provider: 'google' | 'email' | 'phone' | 'facebook' | 'guest';
   linkedProviders: ('google' | 'email' | 'phone' | 'facebook')[];
   isLoggedIn: boolean;
@@ -159,6 +161,19 @@ export interface UserProfile {
   lastActiveDate: string; // YYYY-MM-DD
   streakHistory: DailyStreakDay[];
   badges: AchievementBadge[];
+}
+
+export interface TransferHistoryEntry {
+  id: string;
+  fileName: string;
+  fileSize: number;
+  mimeType: string;
+  direction: 'sent' | 'received' | 'downloaded' | 'shared';
+  method: string;
+  sha256?: string;
+  timestamp: number;
+  status: 'completed' | 'failed';
+  previewDataUrl?: string;
 }
 
 export interface AdminUserRecord {
@@ -221,6 +236,9 @@ export interface AppSettings {
   screenReaderAnnounce: boolean;
   streamingResponses?: boolean;
   aiMemoryEnabled?: boolean;
+  notificationsEnabled?: boolean;
+  soundEffects?: boolean;
+  streakReminders?: boolean;
 }
 
 export type MemoryCategory = 'preference' | 'instruction' | 'fact' | 'goal';

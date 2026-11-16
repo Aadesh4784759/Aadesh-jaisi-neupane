@@ -57,8 +57,15 @@ import {
   Tag,
   BookOpen,
   GripVertical,
+  Wand2,
+  Camera,
+  Radio,
+  Video,
+  ScanText,
+  Code2,
+  ArrowLeftRight,
 } from 'lucide-react';
-import { AppSettings, ChatMessage, ChatSession, LocationData, UserProfile } from '../types';
+import { AppSettings, ChatMessage, ChatSession, GeotaggedMedia, LocationData, UserProfile } from '../types';
 import { SUPPORTED_LANGUAGES, UI_TRANSLATIONS, VOICE_PERSONAS, isRtlLanguage } from '../data/languages';
 import { GeotagPickerModal } from './GeotagPickerModal';
 import { ExportModal, ExportFormat } from './ExportModal';
@@ -69,8 +76,10 @@ import { voiceAssistant, VoicePlaybackState } from '../utils/speech';
 import { generateThemeTokensFromColor } from '../utils/avatarTheme';
 import { DEFAULT_SESSION_CATEGORIES } from '../utils/storage';
 import { DocumentAssistantModal } from './DocumentAssistantModal';
-import { AnimatedWelcomeHero } from './AnimatedWelcomeHero';
 import { AgentModePanel } from './AgentModePanel';
+import { BrandLogo } from './BrandLogo';
+import { CameraScannerModal } from './CameraScannerModal';
+import { ChatToolOverlay, PlusToolModalId } from './ChatToolOverlay';
 import { getAuthHeaders } from '../utils/firebase';
 
 interface ChatViewProps {
@@ -99,6 +108,13 @@ interface ChatViewProps {
   onTogglePinMessage?: (messageId: string) => void;
   onReactMessage?: (messageId: string, emoji: string) => void;
   onRenameSession?: (id: string, newTitle: string) => void;
+  onOpenTransfer?: () => void;
+  onUpdateSettings?: (patch: Partial<AppSettings>) => void;
+  onImageGenerated?: (latencyMs: number) => void;
+  onRecordTranslationMetric?: (langA: string, langB: string, latencyMs: number) => void;
+  mediaItems?: GeotaggedMedia[];
+  onAddMedia?: (media: GeotaggedMedia) => void;
+  onDeleteMedia?: (id: string) => void;
   user?: UserProfile;
   settings: AppSettings;
   isOnline: boolean;
@@ -106,6 +122,12 @@ interface ChatViewProps {
   searchFilter: string;
   onSearchChange?: (q: string) => void;
   isKeyboardOpen?: boolean;
+  externalDraft?: {
+    id: number;
+    text?: string;
+    image?: { base64: string; mimeType: string };
+    file?: { name: string; content: string };
+  } | null;
 }
 
 const QUICK_REACTIONS = ['👍', '❤️', '😂', '😮'] as const;
@@ -172,6 +194,13 @@ export const ChatView: React.FC<ChatViewProps> = ({
   onTogglePinMessage,
   onReactMessage,
   onRenameSession,
+  onOpenTransfer,
+  onUpdateSettings,
+  onImageGenerated,
+  onRecordTranslationMetric,
+  mediaItems = [],
+  onAddMedia,
+  onDeleteMedia,
   user,
   settings,
   isOnline,
@@ -179,12 +208,27 @@ export const ChatView: React.FC<ChatViewProps> = ({
   searchFilter,
   onSearchChange,
   isKeyboardOpen = false,
+  externalDraft = null,
 }) => {
   const prefersReducedMotion = useReducedMotion();
   const [inputText, setInputText] = useState('');
   const [selectedImage, setSelectedImage] = useState<{ base64: string; mimeType: string } | null>(null);
   const [selectedFile, setSelectedFile] = useState<{ name: string; content: string } | null>(null);
+  const [selectedVideo, setSelectedVideo] = useState<{
+    name: string;
+    size: number;
+    previewUrl: string;
+    duration?: number;
+  } | null>(null);
   const [attachedLocation, setAttachedLocation] = useState<LocationData | undefined>(undefined);
+  const [plusMenuOpen, setPlusMenuOpen] = useState(false);
+  const [micPermissionState, setMicPermissionState] = useState<'prompt' | 'granted' | 'denied' | 'unsupported'>(() =>
+    typeof navigator !== 'undefined' && (navigator.mediaDevices?.getUserMedia || voiceAssistant.isSupported())
+      ? 'prompt'
+      : 'unsupported'
+  );
+  const [activePlusTool, setActivePlusTool] = useState<PlusToolModalId>(null);
+  const [cameraModalMode, setCameraModalMode] = useState<'camera' | 'scanner' | null>(null);
   const [showGeotagModal, setShowGeotagModal] = useState(false);
   const [showDocAssistant, setShowDocAssistant] = useState(false);
   const [aiMode, setAiMode] = useState<'chatbot' | 'agent'>('chatbot');
@@ -199,7 +243,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const [translatingMsgId, setTranslatingMsgId] = useState<string | null>(null);
   const [sharePopoverMsgId, setSharePopoverMsgId] = useState<string | null>(null);
   const [reactionPickerMsgId, setReactionPickerMsgId] = useState<string | null>(null);
-  const [sessionsSidebarOpen, setSessionsSidebarOpen] = useState(() => typeof window !== 'undefined' && window.innerWidth >= 1024);
+  const [sessionsSidebarOpen, setSessionsSidebarOpen] = useState(false);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [exportDropdownOpen, setExportDropdownOpen] = useState(false);
   const [exportToast, setExportToast] = useState<string | null>(null);
@@ -246,12 +290,17 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const langSwitcherRef = useRef<HTMLDivElement>(null);
   const langSearchInputRef = useRef<HTMLInputElement>(null);
   const sessionSearchRef = useRef<HTMLDivElement>(null);
+  const composerAreaRef = useRef<HTMLDivElement>(null);
+  const documentOnlyInputRef = useRef<HTMLInputElement>(null);
 
-  // Close Quick Language Switcher, Session Search Dropdown, and Folder Assign popover on outside click / Escape
+  // Close Quick Language Switcher, Session Search Dropdown, PLUS menu, and Folder Assign popover
   useEffect(() => {
-    if (!langSwitcherOpen && !folderAssignSessionId && !sessionSearchDropdownOpen) return;
+    if (!langSwitcherOpen && !folderAssignSessionId && !sessionSearchDropdownOpen && !plusMenuOpen) return;
     const handleOutsideClick = (e: MouseEvent | TouchEvent) => {
       const target = e.target as HTMLElement | null;
+      if (plusMenuOpen && composerAreaRef.current && !composerAreaRef.current.contains(target)) {
+        setPlusMenuOpen(false);
+      }
       if (langSwitcherOpen && langSwitcherRef.current && !langSwitcherRef.current.contains(target)) {
         setLangSwitcherOpen(false);
       }
@@ -268,6 +317,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
     };
     const handleEscape = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        setPlusMenuOpen(false);
         setLangSwitcherOpen(false);
         setSessionSearchDropdownOpen(false);
         setFolderAssignSessionId(null);
@@ -281,7 +331,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
       window.removeEventListener('touchstart', handleOutsideClick);
       window.removeEventListener('keydown', handleEscape);
     };
-  }, [langSwitcherOpen, folderAssignSessionId]);
+  }, [langSwitcherOpen, folderAssignSessionId, sessionSearchDropdownOpen, plusMenuOpen]);
 
   useEffect(() => {
     if (langSwitcherOpen) {
@@ -562,16 +612,28 @@ export const ChatView: React.FC<ChatViewProps> = ({
     return () => window.cancelAnimationFrame(rafId);
   }, [currentSession.messages, isLoading, voiceInterimTranscript, searchFilter]);
 
-  // Handle Photo selection & base64 conversion
-  const handlePhotoSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  // Consume handoff drafts sent from More or Voice pages
+  useEffect(() => {
+    if (!externalDraft) return;
+    setAiMode('chatbot');
+    if (externalDraft.text !== undefined) {
+      setInputText(externalDraft.text);
+    }
+    if (externalDraft.image) {
+      setSelectedImage(externalDraft.image);
+    }
+    if (externalDraft.file) {
+      setSelectedFile(externalDraft.file);
+    }
+    window.setTimeout(() => textareaRef.current?.focus(), 40);
+  }, [externalDraft?.id]);
 
+  // Handle Photo selection & base64 conversion
+  const processPhotoFile = (file: File) => {
     if (!file.type.startsWith('image/')) {
       setVoiceError('Please upload an image file (PNG, JPG, WebP).');
       return;
     }
-
     const reader = new FileReader();
     reader.onload = (event) => {
       const result = event.target?.result as string;
@@ -581,15 +643,76 @@ export const ChatView: React.FC<ChatViewProps> = ({
       });
     };
     reader.readAsDataURL(file);
+  };
+
+  const handlePhotoSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    processPhotoFile(file);
     e.target.value = '';
   };
 
-  // Handle text/code/data file attachment
+  // Handle PDF & Document file upload (extracts DOCX via mammoth, readable PDF text, or plain document text)
+  const handleUploadDocumentsOnly = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const lower = file.name.toLowerCase();
+    try {
+      if (lower.endsWith('.docx')) {
+        const mammoth = await import('mammoth');
+        const arrayBuffer = await file.arrayBuffer();
+        const res = await mammoth.extractRawText({ arrayBuffer });
+        const extracted = res.value?.trim();
+        setSelectedFile({
+          name: file.name,
+          content: extracted ? extracted.slice(0, 24000) : `Uploaded DOCX document: ${file.name}`,
+        });
+      } else if (lower.endsWith('.pdf')) {
+        const buffer = await file.arrayBuffer();
+        const rawStr = new TextDecoder('latin1').decode(buffer);
+        const extracted = Array.from(rawStr.matchAll(/\(([^()]{3,200})\)/g))
+          .map((m) => m[1].replace(/\\[nrt]/g, ' ').trim())
+          .filter((s) => /[a-zA-Z0-9\u0900-\u097F]{2,}/.test(s))
+          .slice(0, 450)
+          .join(' ');
+        setSelectedFile({
+          name: file.name,
+          content:
+            extracted.length > 20
+              ? extracted.slice(0, 24000)
+              : `PDF Document Uploaded: ${file.name} (${Math.round(file.size / 1024)} KB). Ask a question or use Document Translation / Summarizer in More Tools.`,
+        });
+      } else if (file.size <= 300 * 1024) {
+        const text = await file.text();
+        setSelectedFile({ name: file.name, content: text.slice(0, 24000) });
+      } else {
+        setSelectedFile({
+          name: file.name,
+          content: `Document Attached: ${file.name} (${Math.round(file.size / 1024)} KB, ${file.type || 'document'})`,
+        });
+      }
+      setExportToast(`Attached document "${file.name}"`);
+      setTimeout(() => setExportToast(null), 2200);
+    } catch {
+      setVoiceError(`Could not read "${file.name}".`);
+    }
+    e.target.value = '';
+  };
+
+  // Handle general file / code / text attachment
   const handleDocumentSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    if (file.size > 160 * 1024) {
-      setVoiceError('Attached text/code files must be 160 KB or smaller.');
+    if (file.type.startsWith('image/')) {
+      processPhotoFile(file);
+      e.target.value = '';
+      return;
+    }
+    if (file.size > 250 * 1024) {
+      setSelectedFile({
+        name: file.name,
+        content: `File Attached: ${file.name} (${Math.round(file.size / 1024)} KB, ${file.type || 'binary'}).`,
+      });
       e.target.value = '';
       return;
     }
@@ -602,9 +725,57 @@ export const ChatView: React.FC<ChatViewProps> = ({
     e.target.value = '';
   };
 
-  // Voice Speech Recognition Trigger
-  const toggleVoiceRecording = () => {
+  // Request explicit microphone permission cleanly before starting Speech Recognition
+  const ensureMicrophonePermission = async (): Promise<boolean> => {
+    if (typeof window === 'undefined' || typeof navigator === 'undefined') return false;
+
+    try {
+      if (navigator.permissions?.query) {
+        const perm = await navigator.permissions.query({ name: 'microphone' as PermissionName });
+        if (perm.state === 'denied') {
+          setMicPermissionState('denied');
+          setVoiceError(
+            'Microphone access is blocked in your browser settings. Please allow microphone permission and try again.'
+          );
+          return false;
+        }
+        if (perm.state === 'granted') {
+          setMicPermissionState('granted');
+        }
+      }
+    } catch {
+      // Some browsers (e.g., Safari/Firefox) throw on permissions.query('microphone')
+    }
+
+    if (navigator.mediaDevices?.getUserMedia) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream.getTracks().forEach((track) => track.stop());
+        setMicPermissionState('granted');
+        return true;
+      } catch (err: any) {
+        const errName = err?.name || '';
+        if (errName === 'NotAllowedError' || errName === 'PermissionDeniedError') {
+          setMicPermissionState('denied');
+          setVoiceError('Microphone permission denied. Please allow microphone access to use Voice Assistant.');
+        } else if (errName === 'NotFoundError' || errName === 'DevicesNotFoundError') {
+          setMicPermissionState('unsupported');
+          setVoiceError('No working microphone was detected on this device.');
+        } else {
+          setVoiceError('Unable to access microphone right now. Check browser permissions.');
+        }
+        return false;
+      }
+    }
+
+    return voiceAssistant.isSupported();
+  };
+
+  // Voice Speech Recognition Trigger with Permission Handling
+  const toggleVoiceRecording = async () => {
     setVoiceError(null);
+    setPlusMenuOpen(false);
+
     if (isRecording) {
       voiceAssistant.stopListening();
       setIsRecording(false);
@@ -612,6 +783,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
     }
 
     if (isLoading) return;
+
+    const permitted = await ensureMicrophonePermission();
+    if (!permitted) return;
 
     const currentLang = SUPPORTED_LANGUAGES.find((l) => l.code === settings.uiLanguage);
     const speechCode = currentLang?.speechCode || 'en-US';
@@ -651,13 +825,13 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const handleSend = async (customText?: string, isVoice: boolean = false) => {
     if (isLoading) return;
     const textToSend = (customText !== undefined ? customText : inputText).trim();
-    if (!textToSend && !selectedImage && !selectedFile) return;
+    if (!textToSend && !selectedImage && !selectedFile && !selectedVideo) return;
 
     const payload = {
-      text: textToSend,
+      text: textToSend || (selectedVideo ? `Analyze uploaded video "${selectedVideo.name}"` : ''),
       imageData: selectedImage?.base64,
       imageMimeType: selectedImage?.mimeType,
-      attachmentName: selectedFile?.name,
+      attachmentName: selectedFile?.name || selectedVideo?.name,
       attachmentContent: selectedFile?.content,
       location: attachedLocation,
       isVoice: isVoice || isRecording,
@@ -667,7 +841,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
     setInputText('');
     setSelectedImage(null);
     setSelectedFile(null);
+    setSelectedVideo(null);
     setAttachedLocation(undefined);
+    setPlusMenuOpen(false);
     setVoiceInterimTranscript('');
 
     await onSendMessage(payload);
@@ -1328,7 +1504,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   <span className="truncate max-w-[82px]">{sessionCategory}</span>
                 </button>
                 <span>•</span>
-                <span>{new Date(s.updatedAt).toLocaleDateString()}</span>
+                <span>
+                  {new Date(s.updatedAt).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })}{' '}
+                  {new Date(s.updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                </span>
                 <span>•</span>
                 <span>{s.messages.length} msgs</span>
                 {matchCount > 0 && (
@@ -1396,18 +1575,17 @@ export const ChatView: React.FC<ChatViewProps> = ({
           >
             <FileCode className="w-3.5 h-3.5" />
           </button>
-          {allSessions.length > 1 && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                onDeleteSession(s.id);
-              }}
-              className="p-1 hover:text-red-400 text-gray-500 transition-colors cursor-pointer"
-              title="Delete Session"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-            </button>
-          )}
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onDeleteSession(s.id);
+            }}
+            className="p-1 hover:text-red-400 text-gray-500 transition-colors cursor-pointer"
+            title="Delete Conversation"
+            aria-label="Delete conversation"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+          </button>
         </div>
 
         {/* Inline Folder Reassignment Menu */}
@@ -1463,7 +1641,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
           <div className="flex items-center justify-between pb-2 border-b border-white/10">
             <h3 className="text-xs font-bold text-gray-200 uppercase tracking-wider flex items-center gap-1.5">
               <Layers className="w-3.5 h-3.5 text-purple-400" />
-              <span>Conversation Logs</span>
+              <span>Conversation Log</span>
             </h3>
             <div className="flex items-center gap-1">
               {onCreateFolder && (
@@ -1804,11 +1982,19 @@ export const ChatView: React.FC<ChatViewProps> = ({
         <div className="glass-nav px-3 sm:px-4 py-2 border-b border-[#232738] flex items-center justify-between gap-2 z-20">
           <div className="flex items-center gap-2 min-w-0">
             <button
+              type="button"
               onClick={() => setSessionsSidebarOpen(!sessionsSidebarOpen)}
-              className="p-1.5 rounded-lg bg-[#131520] hover:bg-purple-900/40 border border-[#232738] text-gray-300 hover:text-white transition-colors cursor-pointer shrink-0"
-              title={sessionsSidebarOpen ? 'Hide conversation history' : 'Show conversation history'}
+              className={`px-2 py-1.5 rounded-xl border text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer shrink-0 ${
+                sessionsSidebarOpen
+                  ? 'bg-purple-600/35 border-purple-400/60 text-white'
+                  : 'bg-[#131520] hover:bg-purple-900/40 border-[#232738] text-gray-200 hover:text-white'
+              }`}
+              title={sessionsSidebarOpen ? 'Hide Conversation Log' : 'Open Conversation Log'}
+              aria-label="Toggle Conversation Log"
             >
-              <Layers className="w-4 h-4 text-purple-400" />
+              <Layers className="w-3.5 h-3.5 text-purple-400 shrink-0" />
+              <span className="hidden sm:inline">Conversation Log</span>
+              <span className="sm:hidden">Log</span>
             </button>
             <div className="flex items-center gap-2 min-w-0">
               <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
@@ -2475,23 +2661,116 @@ export const ChatView: React.FC<ChatViewProps> = ({
             </div>
           )}
 
-          {/* Hero Welcome banner with Animated Welcome Text and Rotating Smart Suggestions */}
-          {!trimmedSearch && displayedMessages.length <= 1 && (
-            <AnimatedWelcomeHero
-              recentContext={allSessions
-                .flatMap((s) => [
-                  s.title,
-                  ...s.messages.filter((m) => m.role === 'user').slice(-2).map((m) => m.content),
-                ])
-                .filter((t): t is string => Boolean(t && t.trim() && t !== 'New Conversation'))
-                .slice(0, 6)}
-              onSelectSuggestion={(txt) => {
-                setInputText(txt);
-                setTimeout(() => {
-                  textareaRef.current?.focus();
-                }, 20);
-              }}
-            />
+          {/* Centered Main Chat Welcome Screen: Logo + Personalized Greeting + 4 Interactive Cards */}
+          {!trimmedSearch && displayedMessages.length === 0 && (
+            <div className="min-h-[60vh] flex flex-col items-center justify-center text-center py-6 px-2 sm:px-4 space-y-6 max-w-2xl mx-auto">
+              <motion.div
+                initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, scale: 0.9, y: 12 }}
+                animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, scale: 1, y: 0 }}
+                transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
+                className="relative flex items-center justify-center"
+              >
+                <div
+                  className="absolute -inset-6 rounded-full blur-2xl opacity-55 pointer-events-none"
+                  style={{ background: 'radial-gradient(circle, rgba(168,85,247,0.45), transparent 70%)' }}
+                />
+                <BrandLogo size="xl" />
+              </motion.div>
+
+              <motion.div
+                initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 10 }}
+                animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, y: 0 }}
+                transition={{ duration: 0.4, delay: 0.08 }}
+                className="space-y-2"
+              >
+                <div className="text-sm sm:text-base font-bold text-purple-300">
+                  Hello, {user?.name?.trim() || (user?.username ? `@${user.username}` : 'Member')}!
+                </div>
+                <h1 className="text-2xl sm:text-4xl font-black text-white tracking-tight leading-tight">
+                  How can I assist you today?
+                </h1>
+                <p className="text-xs sm:text-sm text-purple-200/80 max-w-md mx-auto">
+                  Your worldwide AI assistant powered by Google Gemini.
+                </p>
+              </motion.div>
+
+              {/* 4 Interactive Feature Cards */}
+              <div className="grid grid-cols-2 gap-3 w-full max-w-xl pt-2 text-left">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setInputText('Help me learn something fascinating step by step: ');
+                    window.setTimeout(() => textareaRef.current?.focus(), 20);
+                  }}
+                  className="glass-card glass-card-hover p-4 rounded-2xl border border-purple-400/30 flex flex-col gap-2 cursor-pointer group min-h-[104px]"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="w-9 h-9 rounded-xl bg-purple-500/25 border border-purple-400/40 flex items-center justify-center text-purple-200">
+                      <Lightbulb className="w-4 h-4" />
+                    </span>
+                    <ArrowUpRight className="w-4 h-4 text-purple-300/70 group-hover:text-white group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-transform" />
+                  </div>
+                  <div>
+                    <div className="text-sm font-bold text-white">Help Me</div>
+                    <div className="text-xs text-purple-200/75">Learn something.</div>
+                  </div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setActivePlusTool('translation')}
+                  className="glass-card glass-card-hover p-4 rounded-2xl border border-purple-400/30 flex flex-col gap-2 cursor-pointer group min-h-[104px]"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="w-9 h-9 rounded-xl bg-violet-500/25 border border-violet-400/40 flex items-center justify-center text-violet-200">
+                      <Languages className="w-4 h-4" />
+                    </span>
+                    <ArrowUpRight className="w-4 h-4 text-purple-300/70 group-hover:text-white group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-transform" />
+                  </div>
+                  <div>
+                    <div className="text-sm font-bold text-white">Translation</div>
+                    <div className="text-xs text-purple-200/75">Translate anything.</div>
+                  </div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setInputText('Write a clean, well-documented program for: ');
+                    window.setTimeout(() => textareaRef.current?.focus(), 20);
+                  }}
+                  className="glass-card glass-card-hover p-4 rounded-2xl border border-purple-400/30 flex flex-col gap-2 cursor-pointer group min-h-[104px]"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="w-9 h-9 rounded-xl bg-fuchsia-500/25 border border-fuchsia-400/40 flex items-center justify-center text-fuchsia-200">
+                      <Code2 className="w-4 h-4" />
+                    </span>
+                    <ArrowUpRight className="w-4 h-4 text-purple-300/70 group-hover:text-white group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-transform" />
+                  </div>
+                  <div>
+                    <div className="text-sm font-bold text-white">Write A Program</div>
+                    <div className="text-xs text-purple-200/75">Code with me.</div>
+                  </div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => onOpenTransfer?.()}
+                  className="glass-card glass-card-hover p-4 rounded-2xl border border-purple-400/30 flex flex-col gap-2 cursor-pointer group min-h-[104px]"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="w-9 h-9 rounded-xl bg-indigo-500/25 border border-indigo-400/40 flex items-center justify-center text-indigo-200">
+                      <ArrowLeftRight className="w-4 h-4" />
+                    </span>
+                    <ArrowUpRight className="w-4 h-4 text-purple-300/70 group-hover:text-white group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-transform" />
+                  </div>
+                  <div>
+                    <div className="text-sm font-bold text-white">Transfer</div>
+                    <div className="text-xs text-purple-200/75">Send files.</div>
+                  </div>
+                </button>
+              </div>
+            </div>
           )}
 
           {/* Render Messages */}
@@ -2845,11 +3124,19 @@ export const ChatView: React.FC<ChatViewProps> = ({
                         <HighlightText text={msg.content} query={trimmedSearch} />
                       </div>
                     ) : (
-                      <MarkdownRenderer
-                        content={msg.content}
-                        rtl={isRtlLanguage(msg.detectedLanguage, msg.content)}
-                        highlightQuery={trimmedSearch}
-                      />
+                      <div className="space-y-2">
+                        <MarkdownRenderer
+                          content={msg.content || (msg.isStreaming ? '...' : '')}
+                          rtl={isRtlLanguage(msg.detectedLanguage, msg.content)}
+                          highlightQuery={trimmedSearch}
+                        />
+                        {msg.isStreaming && (
+                          <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-purple-300 animate-pulse">
+                            <span className="w-1.5 h-1.5 rounded-full bg-purple-400" />
+                            <span>Streaming response...</span>
+                          </span>
+                        )}
+                      </div>
                     )
                   )}
 
@@ -3304,8 +3591,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
             );
           })}
 
-          {/* AI Response Loading Indicator */}
-          {isLoading && (
+          {/* AI Response Loading Indicator (hidden once incremental stream starts) */}
+          {isLoading && !currentSession.messages.some((m) => m.isStreaming) && (
             <div className="flex items-start gap-2.5 sm:gap-3 max-w-3xl mx-auto w-full">
               <div
                 className="w-8 h-8 sm:w-9 sm:h-9 rounded-full purple-glow-btn border border-purple-400/50 flex items-center justify-center shrink-0 shadow-lg mt-0.5"
@@ -3455,17 +3742,195 @@ export const ChatView: React.FC<ChatViewProps> = ({
           </div>
         )}
 
-        {/* CLEAN BOTTOM-ANCHORED CHATGPT-STYLE FLOATING COMPOSER */}
+        {/* SMART BOTTOM-ANCHORED GLASS MESSAGE BOX: ONLY [+] [Message Input] [Voice Mic] [Send] */}
         <div
-          className={`shrink-0 z-20 w-full px-2.5 sm:px-6 pt-2 bg-gradient-to-t from-[#090a0f]/95 via-[#090a0f]/75 to-transparent transition-[padding] duration-150 ${
+          className={`shrink-0 z-20 w-full px-2.5 sm:px-6 pt-2 bg-gradient-to-t from-[#070510]/95 via-[#070510]/70 to-transparent transition-[padding] duration-150 ${
             isKeyboardOpen
               ? 'pb-[max(0.5rem,env(safe-area-inset-bottom))]'
-              : 'pb-[calc(4.5rem+env(safe-area-inset-bottom))] lg:pb-4'
+              : 'pb-[calc(5.2rem+env(safe-area-inset-bottom))]'
           }`}
         >
-          <div className="max-w-3xl mx-auto w-full space-y-2">
-            {/* Attached context chip (photo, file, or geotag) */}
-            {(selectedImage || selectedFile || attachedLocation) && (
+          <div className="max-w-3xl mx-auto w-full space-y-2 relative" ref={composerAreaRef}>
+            {/* Hidden Inputs triggered cleanly via PLUS (+) */}
+            <input
+              type="file"
+              ref={documentOnlyInputRef}
+              onChange={handleUploadDocumentsOnly}
+              accept=".pdf,.doc,.docx,.txt,.md,.csv,.json,.rtf"
+              className="hidden"
+            />
+            <input
+              type="file"
+              ref={docFileInputRef}
+              onChange={handleDocumentSelect}
+              className="hidden"
+            />
+            <input
+              type="file"
+              ref={fileInputRef}
+              onChange={handlePhotoSelect}
+              accept="image/*"
+              className="hidden"
+            />
+
+            {/* COMPACT GLASSMORPHISM PLUS (+) MENU: ONLY 4 PRIMARY CHAT TOOLS */}
+            <AnimatePresence>
+              {plusMenuOpen && (
+                <motion.div
+                  initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 12, scale: 0.97 }}
+                  animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, y: 0, scale: 1 }}
+                  exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 10, scale: 0.97 }}
+                  transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+                  role="menu"
+                  aria-label="Primary Chat Tools"
+                  className="glass-card rounded-3xl p-3 sm:p-4 border border-purple-400/45 shadow-[0_18px_48px_rgba(8,4,24,0.85)]"
+                >
+                  <div className="flex items-center justify-between px-1 pb-2.5 mb-2.5 border-b border-white/10">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-purple-200 flex items-center gap-1.5">
+                      <Plus className="w-3.5 h-3.5 text-purple-400" />
+                      <span>Primary Chat Tools</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setPlusMenuOpen(false)}
+                      aria-label="Close primary tools menu"
+                      className="p-1 rounded-lg text-purple-300 hover:text-white cursor-pointer"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2.5">
+                    {[
+                      {
+                        id: 'camera',
+                        label: 'Camera',
+                        description: 'Capture a photo',
+                        icon: Camera,
+                        color: 'text-purple-300 bg-purple-500/20 border-purple-400/35',
+                        action: () => setCameraModalMode('camera'),
+                      },
+                      {
+                        id: 'upload-documents',
+                        label: 'Upload Documents',
+                        description: 'Select PDF & document files',
+                        icon: FileText,
+                        color: 'text-indigo-300 bg-indigo-500/20 border-indigo-400/35',
+                        action: () => documentOnlyInputRef.current?.click(),
+                      },
+                      {
+                        id: 'upload-files',
+                        label: 'Upload Files',
+                        description: 'Select files from device',
+                        icon: Paperclip,
+                        color: 'text-sky-300 bg-sky-500/20 border-sky-400/35',
+                        action: () => docFileInputRef.current?.click(),
+                      },
+                      {
+                        id: 'location-sharing',
+                        label: 'Location Sharing',
+                        description: 'Share location & map',
+                        icon: MapPin,
+                        color: 'text-emerald-300 bg-emerald-500/20 border-emerald-400/35',
+                        action: () => setShowGeotagModal(true),
+                      },
+                    ].map((tool) => {
+                      const ToolIcon = tool.icon;
+                      return (
+                        <button
+                          key={tool.id}
+                          type="button"
+                          role="menuitem"
+                          onClick={() => {
+                            setPlusMenuOpen(false);
+                            tool.action();
+                          }}
+                          className="min-h-[68px] p-3 rounded-2xl bg-[#0e0a1e]/85 hover:bg-purple-900/45 border border-white/10 hover:border-purple-400/50 flex items-center gap-3 text-left transition-all cursor-pointer group"
+                        >
+                          <span
+                            className={`w-10 h-10 rounded-xl border flex items-center justify-center shrink-0 transition-transform group-hover:scale-105 ${tool.color}`}
+                          >
+                            <ToolIcon className="w-4 h-4" />
+                          </span>
+                          <div className="min-w-0">
+                            <div className="text-xs font-bold text-white leading-tight truncate">
+                              {tool.label}
+                            </div>
+                            <div className="text-[10px] text-purple-200/75 leading-snug mt-0.5 line-clamp-1">
+                              {tool.description}
+                            </div>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            {/* COMPACT VOICE READER ON/OFF MINI CONTROL (Separate from Microphone Button) */}
+            <div className="flex items-center justify-between gap-2 px-1">
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const nextOn = !settings.autoSpeakAIResponses;
+                    if (nextOn && !voiceAssistant.isSpeechSynthesisSupported()) {
+                      setVoiceError('Text-to-Speech is not supported in this browser. AI replies will stay as text.');
+                      onUpdateSettings?.({ autoSpeakAIResponses: false });
+                      return;
+                    }
+                    if (!nextOn && playbackState.isSpeaking) {
+                      voiceAssistant.stopSpeaking();
+                    }
+                    onUpdateSettings?.({ autoSpeakAIResponses: nextOn });
+                  }}
+                  aria-pressed={Boolean(settings.autoSpeakAIResponses)}
+                  aria-label={settings.autoSpeakAIResponses ? 'Turn Voice Reader OFF' : 'Turn Voice Reader ON'}
+                  title={
+                    settings.autoSpeakAIResponses
+                      ? 'Voice Reader is ON: automatically reads AI replies aloud'
+                      : 'Voice Reader is OFF: displays text silently'
+                  }
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl border text-[11px] font-semibold transition-all cursor-pointer ${
+                    settings.autoSpeakAIResponses
+                      ? 'bg-emerald-500/20 border-emerald-400/45 text-emerald-200 hover:bg-emerald-500/30'
+                      : 'bg-[#120d26]/85 border-purple-400/25 text-purple-200/80 hover:text-white hover:border-purple-400/45'
+                  }`}
+                >
+                  {settings.autoSpeakAIResponses ? (
+                    <Volume2 className="w-3.5 h-3.5 text-emerald-300 shrink-0" />
+                  ) : (
+                    <VolumeX className="w-3.5 h-3.5 text-purple-300/75 shrink-0" />
+                  )}
+                  <span>Voice Reader: {settings.autoSpeakAIResponses ? 'ON' : 'OFF'}</span>
+                </button>
+
+                {playbackState.isSpeaking && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      voiceAssistant.stopSpeaking();
+                      setSpeakingId(null);
+                    }}
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded-xl bg-rose-600/85 hover:bg-rose-500 border border-rose-400/50 text-white text-[10px] font-bold cursor-pointer transition-colors"
+                    title="Stop voice playback now"
+                  >
+                    <Square className="w-2.5 h-2.5 fill-white" />
+                    <span>Stop Audio</span>
+                  </button>
+                )}
+              </div>
+
+              {micPermissionState === 'denied' && (
+                <span className="text-[10px] text-amber-300 font-medium truncate">
+                  Mic blocked in browser
+                </span>
+              )}
+            </div>
+
+            {/* Attached context chip (photo, file, video, or geotag) */}
+            {(selectedImage || selectedFile || selectedVideo || attachedLocation) && (
               <div className="glass-card rounded-2xl p-2 px-3 flex flex-wrap items-center justify-between gap-2 border border-purple-500/40 text-xs shadow-md">
                 <div className="flex flex-wrap items-center gap-2.5 min-w-0">
                   {selectedImage && (
@@ -3482,7 +3947,22 @@ export const ChatView: React.FC<ChatViewProps> = ({
                     </div>
                   )}
 
-                  {selectedFile && (
+                  {selectedVideo && (
+                    <div className="flex items-center gap-1.5 bg-rose-950/60 border border-rose-400/40 px-2.5 py-1 rounded-lg text-rose-100 font-medium">
+                      <Video className="w-3.5 h-3.5 text-rose-300 shrink-0" />
+                      <span className="max-w-[130px] truncate">{selectedVideo.name}</span>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedVideo(null)}
+                        className="text-gray-300 hover:text-white text-xs ml-1 cursor-pointer"
+                        aria-label="Remove attached video"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  )}
+
+                  {selectedFile && !selectedVideo && (
                     <div className="flex items-center gap-1.5 bg-purple-950/60 border border-purple-500/40 px-2.5 py-1 rounded-lg text-purple-200 font-medium max-w-full">
                       <Paperclip className="w-3.5 h-3.5 text-purple-400 shrink-0" />
                       <span className="max-w-[150px] truncate font-mono">{selectedFile.name}</span>
@@ -3513,22 +3993,28 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   )}
                 </div>
 
-                <span className="text-[10px] text-gray-400 shrink-0">Attached</span>
+                <button
+                  type="button"
+                  onClick={() => setActivePlusTool('attachments')}
+                  className="text-[11px] text-purple-300 hover:text-white underline shrink-0 cursor-pointer"
+                >
+                  Manage
+                </button>
               </div>
             )}
 
-            {/* Main ChatGPT-Style Floating Rounded Composer */}
+            {/* CLEAN 4-CONTROL GLASS CHATBOX: [+] [Message Input] [Voice Assistant Mic] [Send] */}
             <div className="glow-input-container">
-              <div className="glow-input-inner px-3 sm:px-4 pt-2.5 pb-2 flex flex-col gap-1.5">
+              <div className="glow-input-inner px-2 sm:px-3 py-2 flex items-end gap-1.5 sm:gap-2">
                 {isRecording ? (
                   /* VISUAL AUDIO-WAVE ANIMATION & STOP BUTTON OVERLAY */
-                  <div className="flex items-center justify-between gap-2 sm:gap-3 py-1 animate-in fade-in zoom-in-95 duration-150">
+                  <div className="flex-1 flex items-center justify-between gap-2 sm:gap-3 py-1 animate-in fade-in zoom-in-95 duration-150">
                     <div className="flex items-center gap-2 shrink-0">
                       <span className="w-3 h-3 rounded-full bg-red-500 recording-pulse shrink-0" />
                       <div className="flex flex-col">
                         <span className="text-xs font-bold text-red-300 flex items-center gap-1.5 leading-tight">
                           <span>Listening...</span>
-                          <span className="text-[10px] text-gray-400 font-mono">
+                          <span className="text-[10px] text-gray-400 font-mono tabular-nums">
                             00:{recordingDuration < 10 ? `0${recordingDuration}` : recordingDuration}
                           </span>
                         </span>
@@ -3560,8 +4046,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
                           setIsRecording(false);
                           setVoiceInterimTranscript('');
                         }}
-                        className="p-2 min-w-[38px] min-h-[38px] rounded-xl bg-gray-800/80 hover:bg-gray-700 text-gray-400 hover:text-white text-xs cursor-pointer transition-colors"
-                        title="Cancel recording"
+                        className="p-2 min-w-[40px] min-h-[40px] rounded-xl bg-gray-800/80 hover:bg-gray-700 text-gray-300 hover:text-white text-xs cursor-pointer transition-colors"
+                        title="Cancel listening"
                       >
                         ✕
                       </button>
@@ -3576,8 +4062,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
                             handleSend(finalSpeech, true);
                           }
                         }}
-                        className="bg-gradient-to-r from-red-600 via-rose-600 to-red-500 hover:from-red-500 hover:to-rose-400 text-white font-bold py-2 px-3.5 min-h-[38px] rounded-xl text-xs flex items-center gap-1.5 shadow-lg shadow-red-600/40 cursor-pointer transition-transform hover:scale-105 active:scale-95"
-                        title="Stop recording and send message"
+                        className="bg-gradient-to-r from-red-600 via-rose-600 to-red-500 hover:from-red-500 hover:to-rose-400 text-white font-bold py-2 px-3.5 min-h-[40px] rounded-xl text-xs flex items-center gap-1.5 shadow-lg shadow-red-600/40 cursor-pointer"
+                        title="Stop listening and send"
                       >
                         <Square className="w-3.5 h-3.5 fill-white text-white" />
                         <span>Stop</span>
@@ -3586,7 +4072,27 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   </div>
                 ) : (
                   <>
-                    {/* Full-Width Multiline Auto-Expanding Textarea */}
+                    {/* 1. PLUS (+) Button (4 Primary Chat Tools) */}
+                    <button
+                      type="button"
+                      onClick={() => setPlusMenuOpen((prev) => !prev)}
+                      aria-expanded={plusMenuOpen}
+                      aria-label="Open primary chat tools (Camera, Documents, Files, Location)"
+                      title="Primary Tools: Camera, Upload Documents, Upload Files, Location Sharing"
+                      className={`min-w-[42px] min-h-[42px] rounded-2xl flex items-center justify-center transition-all cursor-pointer shrink-0 border ${
+                        plusMenuOpen
+                          ? 'purple-glow-btn text-white border-purple-300/60'
+                          : 'bg-purple-950/60 hover:bg-purple-900/70 text-purple-200 border-purple-400/35'
+                      }`}
+                    >
+                      <Plus
+                        className={`w-5 h-5 transition-transform duration-200 ${
+                          plusMenuOpen ? 'rotate-45' : ''
+                        }`}
+                      />
+                    </button>
+
+                    {/* 2. Message Input Field */}
                     <textarea
                       ref={textareaRef}
                       rows={1}
@@ -3599,113 +4105,46 @@ export const ChatView: React.FC<ChatViewProps> = ({
                           handleSend();
                         }
                       }}
-                      placeholder={t.inputPlaceholder || 'Message Aadesh AI...'}
+                      placeholder={t.inputPlaceholder || 'Ask Aadesh AI anything...'}
                       aria-label="Message Aadesh AI"
-                      className="w-full bg-transparent text-gray-100 placeholder-gray-400 text-sm sm:text-[15px] py-1 px-0.5 outline-none font-medium resize-none min-h-[36px] max-h-40 overflow-y-auto leading-relaxed"
+                      className="flex-1 min-w-0 bg-transparent text-gray-100 placeholder-purple-300/50 text-sm sm:text-[15px] py-2 px-1 outline-none font-medium resize-none min-h-[40px] max-h-36 overflow-y-auto leading-relaxed"
                     />
 
-                    {/* Bottom Action Toolbar inside Composer */}
-                    <div className="flex items-center justify-between gap-2 pt-0.5">
-                      {/* Left: Document Assistant, File Attachment, Image Upload, Geotag */}
-                      <div className="flex items-center gap-1.5">
-                        <button
-                          type="button"
-                          onClick={() => setShowDocAssistant(true)}
-                          className="min-w-[38px] min-h-[38px] px-2.5 py-2 rounded-xl transition-all border cursor-pointer flex items-center gap-1.5 bg-[#181a29]/80 text-purple-300 border-purple-500/30 hover:border-purple-400 hover:bg-purple-900/30"
-                          title="AI Document Assistant & Uploader"
-                          aria-label="Open Document Assistant"
-                        >
-                          <BookOpen className="w-4 h-4 text-purple-400" />
-                          <span className="text-xs font-semibold hidden sm:inline">Upload</span>
-                        </button>
+                    {/* 3. Voice Assistant Microphone Button */}
+                    <button
+                      type="button"
+                      onClick={() => void toggleVoiceRecording()}
+                      className={`min-w-[42px] min-h-[42px] rounded-2xl transition-all cursor-pointer border flex items-center justify-center shrink-0 ${
+                        isRecording
+                          ? 'bg-rose-600 text-white border-rose-400/70 shadow-lg shadow-rose-500/30'
+                          : 'bg-purple-950/60 hover:bg-purple-900/70 text-purple-200 border-purple-400/35'
+                      }`}
+                      title="Voice Input: Tap to speak with Aadesh AI"
+                      aria-label="Voice Assistant Microphone"
+                    >
+                      <Mic className="w-4 h-4" />
+                    </button>
 
-                        <input
-                          type="file"
-                          ref={docFileInputRef}
-                          onChange={handleDocumentSelect}
-                          accept=".txt,.md,.json,.csv,.js,.ts,.tsx,.py,.html,.css,.xml,.yaml,.yml,.log"
-                          className="hidden"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => docFileInputRef.current?.click()}
-                          className={`min-w-[38px] min-h-[38px] p-2 rounded-xl transition-all border cursor-pointer flex items-center justify-center ${
-                            selectedFile
-                              ? 'bg-purple-900/70 text-purple-200 border-purple-400 shadow-sm'
-                              : 'bg-[#181a29]/80 text-gray-300 border-white/10 hover:text-purple-300 hover:border-purple-500/40'
-                          }`}
-                          title="Attach document or code file"
-                          aria-label="Attach file"
-                        >
-                          <Paperclip className="w-4 h-4" />
-                        </button>
-
-                        <input
-                          type="file"
-                          ref={fileInputRef}
-                          onChange={handlePhotoSelect}
-                          accept="image/*"
-                          className="hidden"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => fileInputRef.current?.click()}
-                          className={`min-w-[38px] min-h-[38px] p-2 rounded-xl transition-all border cursor-pointer flex items-center justify-center ${
-                            selectedImage
-                              ? 'bg-purple-900/70 text-purple-200 border-purple-400 shadow-sm'
-                              : 'bg-[#181a29]/80 text-gray-300 border-white/10 hover:text-purple-300 hover:border-purple-500/40'
-                          }`}
-                          title="Upload image"
-                          aria-label="Upload image"
-                        >
-                          <ImageIcon className="w-4 h-4" />
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() => setShowGeotagModal(true)}
-                          className={`min-w-[38px] min-h-[38px] p-2 rounded-xl transition-all border cursor-pointer flex items-center justify-center ${
-                            attachedLocation
-                              ? 'bg-purple-900/70 text-purple-200 border-purple-400 shadow-sm'
-                              : 'bg-[#181a29]/80 text-gray-300 border-white/10 hover:text-purple-300 hover:border-purple-500/40'
-                          }`}
-                          title="Attach Geotag Location"
-                          aria-label="Attach location"
-                        >
-                          <MapPin className="w-4 h-4" />
-                        </button>
-                      </div>
-
-                      {/* Right: Microphone & Send */}
-                      <div className="flex items-center gap-1.5">
-                        <button
-                          type="button"
-                          onClick={toggleVoiceRecording}
-                          className="min-w-[38px] min-h-[38px] p-2 rounded-xl transition-all cursor-pointer bg-[#181a29]/80 text-purple-300 border border-purple-500/30 hover:border-purple-400 hover:bg-purple-900/30 flex items-center justify-center"
-                          title="Voice Input (Tap to speak)"
-                          aria-label="Voice input"
-                        >
-                          <Mic className="w-4 h-4" />
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() => handleSend()}
-                          disabled={isLoading || (!inputText.trim() && !selectedImage && !selectedFile)}
-                          aria-label="Send message"
-                          className="purple-glow-btn text-white font-semibold min-w-[40px] min-h-[40px] px-3 sm:px-4 rounded-full sm:rounded-2xl flex items-center justify-center gap-1.5 text-xs sm:text-sm disabled:opacity-40 disabled:cursor-not-allowed transition-all cursor-pointer shrink-0"
-                        >
-                          {isLoading ? (
-                            <RefreshCw className="w-4 h-4 animate-spin" />
-                          ) : (
-                            <>
-                              <span className="hidden sm:inline">Send</span>
-                              <Send className="w-4 h-4" />
-                            </>
-                          )}
-                        </button>
-                      </div>
-                    </div>
+                    {/* 4. Send Button */}
+                    <button
+                      type="button"
+                      onClick={() => handleSend()}
+                      disabled={
+                        isLoading ||
+                        (!inputText.trim() && !selectedImage && !selectedFile && !selectedVideo)
+                      }
+                      aria-label="Send message"
+                      className="purple-glow-btn text-white font-semibold min-w-[44px] min-h-[42px] px-3 sm:px-4 rounded-2xl flex items-center justify-center gap-1.5 text-xs sm:text-sm disabled:opacity-40 disabled:cursor-not-allowed transition-all cursor-pointer shrink-0"
+                    >
+                      {isLoading ? (
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <>
+                          <span className="hidden sm:inline">Send</span>
+                          <Send className="w-4 h-4" />
+                        </>
+                      )}
+                    </button>
                   </>
                 )}
               </div>
@@ -3717,12 +4156,66 @@ export const ChatView: React.FC<ChatViewProps> = ({
         </AnimatePresence>
       </div>
 
-      {/* Geotag Picker Modal */}
+      {/* Geotag / Location Sharing Modal */}
       <GeotagPickerModal
         isOpen={showGeotagModal}
         onClose={() => setShowGeotagModal(false)}
         onSelectLocation={(loc) => setAttachedLocation(loc)}
         currentSelected={attachedLocation}
+      />
+
+      {/* Camera & Document Scanner Modal */}
+      <CameraScannerModal
+        isOpen={cameraModalMode !== null}
+        mode={cameraModalMode || 'camera'}
+        onClose={() => setCameraModalMode(null)}
+        onCapture={(dataUrl, mimeType, isScanner) => {
+          setSelectedImage({ base64: dataUrl, mimeType });
+          if (isScanner && !inputText.trim()) {
+            setInputText('Scan, extract all text cleanly (OCR), and summarize this document.');
+          }
+          window.setTimeout(() => textareaRef.current?.focus(), 40);
+        }}
+      />
+
+      {/* Inline Tool Overlays for MORE & Attachments (Image Gen, Gallery, World Time, Voice Studio, Translation, Writing/Email/Grammar/Summarizer/Extra AI Tools) */}
+      <ChatToolOverlay
+        activeTool={activePlusTool}
+        onClose={() => setActivePlusTool(null)}
+        user={user}
+        settings={settings}
+        isOnline={isOnline}
+        onUpdateSettings={(patch) => onUpdateSettings?.(patch)}
+        onSendVoiceMessage={async ({ text, isVoice, targetLanguage }) => {
+          await onSendMessage({ text, isVoice, targetLanguage });
+          return {};
+        }}
+        onSendToolResultToChat={(text) => {
+          setInputText(text);
+          window.setTimeout(() => textareaRef.current?.focus(), 30);
+        }}
+        onOpenScanner={() => setCameraModalMode('scanner')}
+        onAskAboutCountry={(countryName, city, formattedTime) => {
+          void onSendMessage({
+            text: `Tell me about ${countryName} (${city}), where the current live local time is ${formattedTime}.`,
+            targetLanguage: currentSession.targetLanguage || settings.defaultTargetLanguage,
+          });
+        }}
+        onImageGenerated={onImageGenerated}
+        onRecordTranslationMetric={onRecordTranslationMetric}
+        mediaItems={mediaItems}
+        onAddMedia={(m) => onAddMedia?.(m)}
+        onDeleteMedia={(id) => onDeleteMedia?.(id)}
+        onPickDevicePhoto={(file) => processPhotoFile(file)}
+        selectedImage={selectedImage}
+        selectedFile={selectedFile}
+        selectedVideo={selectedVideo}
+        attachedLocation={attachedLocation}
+        onClearImage={() => setSelectedImage(null)}
+        onClearFile={() => setSelectedFile(null)}
+        onClearVideo={() => setSelectedVideo(null)}
+        onClearLocation={() => setAttachedLocation(undefined)}
+        onOpenTransfer={onOpenTransfer}
       />
 
       {/* AI Document Assistant Modal */}

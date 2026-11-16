@@ -1,9 +1,8 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import {
   BarChart3,
   Globe,
   Mic,
-  Image as ImageIcon,
   Clock,
   Flame,
   Languages,
@@ -12,182 +11,366 @@ import {
   Smile,
   Compass,
   Zap,
+  MessageSquare,
+  ThumbsUp,
+  Cpu,
 } from 'lucide-react';
-import { EngagementMetrics } from '../types';
+import { ChatSession, EngagementMetrics, UserProfile } from '../types';
 import { SUPPORTED_LANGUAGES } from '../data/languages';
 
 interface AnalyticsDashboardProps {
   metrics: EngagementMetrics;
+  sessions?: ChatSession[];
+  user?: UserProfile;
 }
 
-export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ metrics }) => {
-  // Compute Modality percentages
+export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
+  metrics,
+  sessions = [],
+  user,
+}) => {
+  // Compute real conversation, token, feedback, and latency stats from sessions
+  const conversationInsights = useMemo(() => {
+    let totalMessages = 0;
+    let userMessages = 0;
+    let aiMessages = 0;
+    let totalChars = 0;
+    let totalWords = 0;
+    let thumbsUp = 0;
+    let thumbsDown = 0;
+    let latencySum = 0;
+    let latencyCount = 0;
+    const categoryCounts: Record<string, number> = {};
+
+    for (const s of sessions) {
+      const cat = s.category || 'General';
+      categoryCounts[cat] = (categoryCounts[cat] || 0) + 1;
+      for (const m of s.messages) {
+        totalMessages += 1;
+        if (m.role === 'user') userMessages += 1;
+        else if (m.role === 'model') aiMessages += 1;
+        const text = `${m.content || ''} ${m.translation || ''}`.trim();
+        totalChars += text.length;
+        if (text) {
+          totalWords += text.split(/\s+/).filter(Boolean).length;
+        }
+        if (m.feedback === 'up') thumbsUp += 1;
+        if (m.feedback === 'down') thumbsDown += 1;
+        if (typeof m.latencyMs === 'number' && m.latencyMs > 0) {
+          latencySum += m.latencyMs;
+          latencyCount += 1;
+        }
+      }
+    }
+
+    const estimatedTokens = Math.ceil(totalChars / 4);
+    const avgSessionLength = sessions.length > 0 ? (totalMessages / sessions.length).toFixed(1) : '0';
+    const avgModelLatency =
+      latencyCount > 0 ? Math.round(latencySum / latencyCount) : metrics.avgLatencyMs;
+    const topCategories = Object.entries(categoryCounts)
+      .sort(([, a], [, b]) => b - a)
+      .slice(0, 5);
+
+    return {
+      totalConversations: sessions.length,
+      totalMessages,
+      userMessages,
+      aiMessages,
+      totalWords,
+      estimatedTokens,
+      thumbsUp,
+      thumbsDown,
+      avgSessionLength,
+      avgModelLatency,
+      topCategories,
+    };
+  }, [sessions, metrics.avgLatencyMs]);
+
   const textQueries = Math.max(
     0,
     metrics.totalQueries - (metrics.totalVoiceQueries + metrics.totalImageQueries)
   );
   const totalModality = Math.max(1, metrics.totalQueries);
-
   const voicePercent = Math.round((metrics.totalVoiceQueries / totalModality) * 100);
   const imagePercent = Math.round((metrics.totalImageQueries / totalModality) * 100);
   const textPercent = Math.max(0, 100 - (voicePercent + imagePercent));
 
-  // Language Breakdown sorted
   const totalLangUsage = Object.values(metrics.languageCounts).reduce((a, b) => a + b, 0) || 1;
   const sortedLanguages = Object.entries(metrics.languageCounts)
     .sort(([, a], [, b]) => b - a)
-    .slice(0, 8);
-
-  // Regional activity sorted
-  const sortedRegions = Object.entries(metrics.regionalActivity)
-    .sort(([, a], [, b]) => b - a)
     .slice(0, 6);
 
-  // Peak hourly max
-  const maxHourly = Math.max(...metrics.hourlyActivity, 1);
+  const sortedRegions = Object.entries(metrics.regionalActivity)
+    .sort(([, a], [, b]) => b - a)
+    .slice(0, 5);
 
-  // Sentiment total
+  const maxHourly = Math.max(...metrics.hourlyActivity, 1);
   const totalSentiment =
     Object.values(metrics.sentimentCounts).reduce((a, b) => a + b, 0) || 1;
 
-  // Export Analytics CSV
   const handleExportCSV = () => {
     let csv = 'Metric,Value\n';
+    csv += `Total Conversations,${conversationInsights.totalConversations}\n`;
+    csv += `Total Messages,${conversationInsights.totalMessages}\n`;
+    csv += `Estimated Tokens,${conversationInsights.estimatedTokens}\n`;
+    csv += `Total Words,${conversationInsights.totalWords}\n`;
     csv += `Total Queries,${metrics.totalQueries}\n`;
     csv += `Voice Queries,${metrics.totalVoiceQueries}\n`;
     csv += `Image Queries,${metrics.totalImageQueries}\n`;
     csv += `Translations Executed,${metrics.totalTranslations}\n`;
-    csv += `Average Latency (ms),${metrics.avgLatencyMs}\n\n`;
-
-    csv += 'Language Code,Queries\n';
-    Object.entries(metrics.languageCounts).forEach(([code, count]) => {
-      csv += `${code},${count}\n`;
-    });
+    csv += `Average Latency (ms),${conversationInsights.avgModelLatency}\n`;
+    csv += `Daily Streak,${user?.streakDays || 1}\n`;
 
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `aadesh-ai-analytics-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = `aadesh-ai-analysis-${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };
 
   return (
-    <div className="max-w-7xl mx-auto px-3 sm:px-6 py-4 space-y-6 pb-28">
+    <div className="max-w-6xl mx-auto w-full px-3 sm:px-6 py-5 pb-32 space-y-5">
       {/* Top Banner */}
-      <div className="glass-card rounded-2xl p-4 sm:p-6 border border-purple-500/30 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-xl">
-        <div>
-          <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-purple-950/70 border border-purple-500/30 text-purple-300 text-xs font-semibold mb-1">
-            <BarChart3 className="w-3.5 h-3.5 text-purple-400" />
-            <span>Telemetry & Regional Intelligence</span>
+      <div className="glass-card rounded-3xl p-5 sm:p-6 border border-purple-400/30 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div className="space-y-1">
+          <div className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-purple-300">
+            <BarChart3 className="w-4 h-4 text-purple-400" />
+            <span>AI &amp; Usage Intelligence</span>
           </div>
-          <h2 className="text-xl sm:text-2xl font-black text-white">User Engagement Dashboard</h2>
-          <p className="text-xs text-gray-400">
-            Real-time analytics for multilingual query volume, speech adoption, vision queries, and global response latency.
+          <h1 className="text-xl sm:text-2xl font-black text-white">Analysis Dashboard</h1>
+          <p className="text-xs text-purple-200/75">
+            AI response analysis, conversation insights, usage statistics, daily activity, and token estimates.
           </p>
         </div>
 
         <button
+          type="button"
           onClick={handleExportCSV}
-          className="bg-[#131520] hover:bg-purple-900/40 border border-[#232738] hover:border-purple-500/40 text-purple-200 text-xs font-semibold px-4 py-2.5 rounded-xl flex items-center justify-center gap-2 transition-all"
+          className="min-h-[42px] px-4 py-2 rounded-2xl bg-purple-600/25 hover:bg-purple-600/45 border border-purple-400/40 text-purple-100 text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer whitespace-nowrap shrink-0"
         >
           <Download className="w-4 h-4" />
-          <span>Export Analytics CSV</span>
+          <span>Export CSV Report</span>
         </button>
       </div>
 
-      {/* TOP KPI CARDS */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-5">
-        {/* Card 1: Total Queries */}
-        <div className="glass-card rounded-2xl p-4 sm:p-5 border border-purple-500/30 space-y-2 relative overflow-hidden">
+      {/* Primary KPI Grid */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+        <div className="glass-card rounded-2xl p-4 border border-purple-400/30 space-y-1.5">
           <div className="flex items-center justify-between">
-            <span className="text-xs text-gray-400 font-medium">Total Queries</span>
-            <div className="w-8 h-8 rounded-xl bg-purple-900/40 border border-purple-500/30 flex items-center justify-center text-purple-400">
-              <Zap className="w-4 h-4" />
-            </div>
+            <span className="text-xs text-purple-200/75 font-medium">Conversations</span>
+            <MessageSquare className="w-4 h-4 text-purple-400" />
           </div>
-          <div className="text-2xl sm:text-3xl font-black text-white">{metrics.totalQueries}</div>
-          <div className="text-[11px] text-purple-300 flex items-center gap-1">
-            <Sparkles className="w-3 h-3 text-purple-400" />
-            <span>Across all multimodal channels</span>
+          <div className="text-2xl sm:text-3xl font-black text-white tabular-nums">
+            {conversationInsights.totalConversations}
+          </div>
+          <div className="text-[11px] text-purple-300/80 tabular-nums">
+            {conversationInsights.totalMessages} msgs · avg {conversationInsights.avgSessionLength}/chat
           </div>
         </div>
 
-        {/* Card 2: Voice Adoption */}
-        <div className="glass-card rounded-2xl p-4 sm:p-5 border border-indigo-500/30 space-y-2 relative overflow-hidden">
+        <div className="glass-card rounded-2xl p-4 border border-violet-400/30 space-y-1.5">
           <div className="flex items-center justify-between">
-            <span className="text-xs text-gray-400 font-medium">Voice Interaction</span>
-            <div className="w-8 h-8 rounded-xl bg-indigo-900/40 border border-indigo-500/30 flex items-center justify-center text-indigo-400">
-              <Mic className="w-4 h-4" />
-            </div>
+            <span className="text-xs text-purple-200/75 font-medium">Token Usage (Est.)</span>
+            <Cpu className="w-4 h-4 text-violet-400" />
           </div>
-          <div className="text-2xl sm:text-3xl font-black text-white">{voicePercent}%</div>
-          <div className="text-[11px] text-indigo-300">
-            {metrics.totalVoiceQueries} hands-free speech queries
+          <div className="text-2xl sm:text-3xl font-black text-white tabular-nums">
+            {conversationInsights.estimatedTokens.toLocaleString()}
+          </div>
+          <div className="text-[11px] text-violet-300/80 tabular-nums">
+            {conversationInsights.totalWords.toLocaleString()} total words processed
           </div>
         </div>
 
-        {/* Card 3: Translations */}
-        <div className="glass-card rounded-2xl p-4 sm:p-5 border border-purple-500/30 space-y-2 relative overflow-hidden">
+        <div className="glass-card rounded-2xl p-4 border border-fuchsia-400/30 space-y-1.5">
           <div className="flex items-center justify-between">
-            <span className="text-xs text-gray-400 font-medium">Translations</span>
-            <div className="w-8 h-8 rounded-xl bg-purple-900/40 border border-purple-500/30 flex items-center justify-center text-purple-400">
-              <Languages className="w-4 h-4" />
-            </div>
+            <span className="text-xs text-purple-200/75 font-medium">Response Latency</span>
+            <Clock className="w-4 h-4 text-fuchsia-400" />
           </div>
-          <div className="text-2xl sm:text-3xl font-black text-white">{metrics.totalTranslations}</div>
-          <div className="text-[11px] text-purple-300 flex items-center gap-1">
-            <Flame className="w-3 h-3 text-amber-400" />
-            <span>Bilateral & chat translations</span>
+          <div className="text-2xl sm:text-3xl font-black text-white tabular-nums">
+            {conversationInsights.avgModelLatency} ms
+          </div>
+          <div className="text-[11px] text-fuchsia-300/80 tabular-nums">
+            {metrics.totalQueries} total Gemini queries
           </div>
         </div>
 
-        {/* Card 4: Avg Response Latency */}
-        <div className="glass-card rounded-2xl p-4 sm:p-5 border border-emerald-500/30 space-y-2 relative overflow-hidden">
+        <div className="glass-card rounded-2xl p-4 border border-amber-400/30 space-y-1.5">
           <div className="flex items-center justify-between">
-            <span className="text-xs text-gray-400 font-medium">Average Latency</span>
-            <div className="w-8 h-8 rounded-xl bg-emerald-900/40 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
-              <Clock className="w-4 h-4" />
-            </div>
+            <span className="text-xs text-purple-200/75 font-medium">Daily Streak</span>
+            <Flame className="w-4 h-4 text-amber-400" />
           </div>
-          <div className="text-2xl sm:text-3xl font-black text-white">{metrics.avgLatencyMs} ms</div>
-          <div className="text-[11px] text-emerald-300">
-            Real-time inference & translation speed
+          <div className="text-2xl sm:text-3xl font-black text-white tabular-nums">
+            🔥 {user?.streakDays || 1}d
+          </div>
+          <div className="text-[11px] text-amber-300/85 tabular-nums">
+            {(user?.xp || 0).toLocaleString()} XP · Best {user?.longestStreak || 1}d
           </div>
         </div>
       </div>
 
-      {/* TWO COLUMN ANALYTICS: Language Distribution + Modality Ratio */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Language Breakdown */}
-        <div className="glass-card rounded-2xl p-5 border border-purple-500/30 space-y-4">
+      {/* AI Response Analysis & Daily Streak Calendar */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+        {/* AI Response & Conversation Breakdown */}
+        <div className="glass-card rounded-3xl p-5 border border-purple-400/25 space-y-4">
+          <div className="flex items-center justify-between border-b border-white/10 pb-3">
+            <div className="flex items-center gap-2">
+              <Sparkles className="w-4 h-4 text-purple-400" />
+              <h2 className="text-sm font-bold text-white">AI Response &amp; Conversation Analysis</h2>
+            </div>
+            <span className="text-xs text-purple-300/75 tabular-nums">
+              {conversationInsights.aiMessages} AI replies
+            </span>
+          </div>
+
+          <div className="grid grid-cols-3 gap-2.5">
+            <div className="p-3 rounded-2xl bg-[#0b0818]/80 border border-white/10 text-center">
+              <div className="text-[10px] font-bold uppercase text-purple-300">User Prompts</div>
+              <div className="text-lg font-black text-white mt-1 tabular-nums">
+                {conversationInsights.userMessages}
+              </div>
+            </div>
+            <div className="p-3 rounded-2xl bg-[#0b0818]/80 border border-white/10 text-center">
+              <div className="text-[10px] font-bold uppercase text-emerald-300 flex items-center justify-center gap-1">
+                <ThumbsUp className="w-3 h-3" />
+                <span>Helpful</span>
+              </div>
+              <div className="text-lg font-black text-white mt-1 tabular-nums">
+                {conversationInsights.thumbsUp}
+              </div>
+            </div>
+            <div className="p-3 rounded-2xl bg-[#0b0818]/80 border border-white/10 text-center">
+              <div className="text-[10px] font-bold uppercase text-violet-300 flex items-center justify-center gap-1">
+                <Languages className="w-3 h-3" />
+                <span>Translated</span>
+              </div>
+              <div className="text-lg font-black text-white mt-1 tabular-nums">
+                {metrics.totalTranslations}
+              </div>
+            </div>
+          </div>
+
+          {/* Modality Bar */}
+          <div className="space-y-2 pt-1">
+            <div className="flex items-center justify-between text-xs text-purple-200/80">
+              <span>Input Modality Split</span>
+              <span className="tabular-nums">
+                Text {textPercent}% · Voice {voicePercent}% · Vision {imagePercent}%
+              </span>
+            </div>
+            <div className="h-3 w-full bg-[#090614] rounded-full overflow-hidden flex border border-white/10">
+              <div style={{ width: `${textPercent}%` }} className="bg-purple-500 h-full" />
+              <div style={{ width: `${voicePercent}%` }} className="bg-violet-400 h-full" />
+              <div style={{ width: `${imagePercent}%` }} className="bg-fuchsia-400 h-full" />
+            </div>
+          </div>
+
+          {/* Sentiment */}
+          <div className="pt-2 border-t border-white/10 flex items-center justify-between text-xs">
+            <span className="text-purple-200 flex items-center gap-1.5">
+              <Smile className="w-3.5 h-3.5 text-amber-400" />
+              <span>Positive Sentiment Rate</span>
+            </span>
+            <span className="font-bold text-emerald-300 tabular-nums">
+              {Math.round((metrics.sentimentCounts.positive / totalSentiment) * 100)}%
+            </span>
+          </div>
+        </div>
+
+        {/* Daily Activity & Streak History */}
+        <div className="glass-card rounded-3xl p-5 border border-purple-400/25 space-y-4">
+          <div className="flex items-center justify-between border-b border-white/10 pb-3">
+            <div className="flex items-center gap-2">
+              <Zap className="w-4 h-4 text-purple-400" />
+              <h2 className="text-sm font-bold text-white">Daily Activity &amp; Peak Hours</h2>
+            </div>
+            <span className="text-xs text-purple-300/75">24h usage</span>
+          </div>
+
+          {user?.streakHistory && user.streakHistory.length > 0 && (
+            <div className="grid grid-cols-7 gap-1.5">
+              {user.streakHistory.slice(-7).map((day) => (
+                <div
+                  key={day.date}
+                  className={`p-2 rounded-xl border text-center ${
+                    day.completed
+                      ? 'bg-purple-600/35 border-purple-400/50 text-white'
+                      : 'bg-[#0b0818]/75 border-white/10 text-purple-300/60'
+                  }`}
+                >
+                  <div className="text-[10px] font-bold">{day.dayLabel}</div>
+                  <div className="text-xs font-black mt-0.5 tabular-nums">
+                    {day.completed ? '🔥' : '·'} {day.activityCount}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* 24-Hour Peak Chart */}
+          <div className="h-28 flex items-end justify-between gap-1 pt-2">
+            {metrics.hourlyActivity.map((count, hour) => {
+              const heightPercent = Math.max(8, Math.round((count / maxHourly) * 100));
+              const isCurrentHour = new Date().getHours() === hour;
+              return (
+                <div
+                  key={hour}
+                  title={`${hour}:00 — ${count} queries`}
+                  className="flex-1 h-full flex items-end"
+                >
+                  <div
+                    style={{ height: `${heightPercent}%` }}
+                    className={`w-full rounded-t-sm transition-all ${
+                      isCurrentHour
+                        ? 'bg-gradient-to-t from-purple-500 to-fuchsia-400 shadow-[0_0_12px_rgba(168,85,247,0.6)]'
+                        : 'bg-purple-800/50 hover:bg-purple-500'
+                    }`}
+                  />
+                </div>
+              );
+            })}
+          </div>
+          <div className="flex justify-between text-[10px] text-purple-300/65 border-t border-white/5 pt-2 tabular-nums">
+            <span>00:00</span>
+            <span>06:00</span>
+            <span>12:00</span>
+            <span>18:00</span>
+            <span>23:00</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Language Breakdown & Conversation Categories / Regions */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+        <div className="glass-card rounded-3xl p-5 border border-purple-400/25 space-y-3">
           <div className="flex items-center justify-between border-b border-white/10 pb-3">
             <div className="flex items-center gap-2">
               <Globe className="w-4 h-4 text-purple-400" />
-              <h3 className="text-sm font-bold text-white">Language Engagement Distribution</h3>
+              <h2 className="text-sm font-bold text-white">Language Usage</h2>
             </div>
-            <span className="text-xs text-gray-400">Top 8 Languages</span>
+            <span className="text-xs text-purple-300/75">Top Languages</span>
           </div>
 
-          <div className="space-y-3">
+          <div className="space-y-2.5">
             {sortedLanguages.map(([code, count]) => {
               const langObj = SUPPORTED_LANGUAGES.find((l) => l.code === code);
-              const percentage = Math.round((count / totalLangUsage) * 100);
+              const pct = Math.round((count / totalLangUsage) * 100);
               return (
                 <div key={code} className="space-y-1">
                   <div className="flex items-center justify-between text-xs">
-                    <span className="text-gray-200 font-medium flex items-center gap-2">
+                    <span className="text-purple-100 font-medium flex items-center gap-2">
                       <span>{langObj?.flag || '🌐'}</span>
                       <span>{langObj?.name || code.toUpperCase()}</span>
-                      <span className="text-[10px] text-gray-400 font-normal">({langObj?.region})</span>
                     </span>
-                    <span className="text-purple-300 font-semibold">{percentage}% ({count})</span>
+                    <span className="text-purple-300 font-semibold tabular-nums">
+                      {pct}% ({count})
+                    </span>
                   </div>
-                  <div className="w-full bg-[#090a0f] rounded-full h-2 overflow-hidden border border-white/5">
+                  <div className="h-1.5 w-full bg-[#090614] rounded-full overflow-hidden">
                     <div
-                      style={{ width: `${percentage}%` }}
-                      className="bg-gradient-to-r from-purple-500 to-indigo-500 h-full rounded-full transition-all duration-500"
+                      style={{ width: `${pct}%` }}
+                      className="h-full rounded-full bg-gradient-to-r from-purple-500 to-fuchsia-400"
                     />
                   </div>
                 </div>
@@ -196,163 +379,31 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ metrics 
           </div>
         </div>
 
-        {/* Modality Ratio & Visual Doughnut Breakdown */}
-        <div className="glass-card rounded-2xl p-5 border border-indigo-500/30 space-y-4 flex flex-col justify-between">
-          <div className="flex items-center justify-between border-b border-white/10 pb-3">
-            <div className="flex items-center gap-2">
-              <Sparkles className="w-4 h-4 text-indigo-400" />
-              <h3 className="text-sm font-bold text-white">Interaction Modality Split</h3>
-            </div>
-            <span className="text-xs text-gray-400">Input Channels</span>
-          </div>
-
-          {/* Graphical Multi-segmented Progress Bar */}
-          <div className="space-y-3">
-            <div className="h-6 w-full bg-[#090a0f] rounded-xl overflow-hidden flex border border-white/10 p-0.5">
-              <div
-                style={{ width: `${textPercent}%` }}
-                className="bg-purple-600 h-full rounded-l-lg transition-all"
-                title={`Text: ${textPercent}%`}
-              />
-              <div
-                style={{ width: `${voicePercent}%` }}
-                className="bg-indigo-500 h-full transition-all"
-                title={`Voice: ${voicePercent}%`}
-              />
-              <div
-                style={{ width: `${imagePercent}%` }}
-                className="bg-pink-500 h-full rounded-r-lg transition-all"
-                title={`Vision: ${imagePercent}%`}
-              />
-            </div>
-
-            {/* Legend */}
-            <div className="grid grid-cols-3 gap-2 pt-2">
-              <div className="bg-[#090a0f] p-3 rounded-xl border border-purple-500/30 space-y-1 text-center">
-                <span className="text-[10px] uppercase font-bold text-purple-400 block">Text Queries</span>
-                <span className="text-lg font-black text-white">{textPercent}%</span>
-                <span className="text-[10px] text-gray-400 block">{textQueries} msgs</span>
-              </div>
-              <div className="bg-[#090a0f] p-3 rounded-xl border border-indigo-500/30 space-y-1 text-center">
-                <span className="text-[10px] uppercase font-bold text-indigo-400 block">Hands-Free Voice</span>
-                <span className="text-lg font-black text-white">{voicePercent}%</span>
-                <span className="text-[10px] text-gray-400 block">{metrics.totalVoiceQueries} audios</span>
-              </div>
-              <div className="bg-[#090a0f] p-3 rounded-xl border border-pink-500/30 space-y-1 text-center">
-                <span className="text-[10px] uppercase font-bold text-pink-400 block">Vision / Photos</span>
-                <span className="text-lg font-black text-white">{imagePercent}%</span>
-                <span className="text-[10px] text-gray-400 block">{metrics.totalImageQueries} uploads</span>
-              </div>
-            </div>
-          </div>
-
-          {/* Sentiment Gauge */}
-          <div className="pt-3 border-t border-white/10 space-y-2">
-            <div className="flex items-center justify-between text-xs">
-              <span className="text-gray-300 font-semibold flex items-center gap-1.5">
-                <Smile className="w-3.5 h-3.5 text-amber-400" />
-                <span>User Sentiment & Satisfaction</span>
-              </span>
-              <span className="text-emerald-400 font-bold">
-                {Math.round((metrics.sentimentCounts.positive / totalSentiment) * 100)}% Positive
-              </span>
-            </div>
-            <div className="flex gap-1 h-2 rounded-full overflow-hidden bg-[#090a0f]">
-              <div
-                style={{ width: `${(metrics.sentimentCounts.positive / totalSentiment) * 100}%` }}
-                className="bg-emerald-500"
-              />
-              <div
-                style={{ width: `${(metrics.sentimentCounts.curious / totalSentiment) * 100}%` }}
-                className="bg-purple-500"
-              />
-              <div
-                style={{ width: `${(metrics.sentimentCounts.inquiry / totalSentiment) * 100}%` }}
-                className="bg-indigo-500"
-              />
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* REGIONAL GEOTAG ACTIVITY & 24-HOUR PEAK TIME */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Regional Activity Leaderboard */}
-        <div className="glass-card rounded-2xl p-5 border border-purple-500/30 space-y-3">
+        <div className="glass-card rounded-3xl p-5 border border-purple-400/25 space-y-3">
           <div className="flex items-center justify-between border-b border-white/10 pb-3">
             <div className="flex items-center gap-2">
               <Compass className="w-4 h-4 text-purple-400" />
-              <h3 className="text-sm font-bold text-white">Geographic Regional Hotspots</h3>
+              <h2 className="text-sm font-bold text-white">Topics &amp; Regional Insights</h2>
             </div>
-            <span className="text-xs text-gray-400">Activity by City</span>
+            <span className="text-xs text-purple-300/75">
+              <Mic className="w-3.5 h-3.5 inline mr-1" />
+              {metrics.totalVoiceQueries} voice
+            </span>
           </div>
 
-          <div className="space-y-2.5">
-            {sortedRegions.map(([name, count], idx) => (
+          <div className="space-y-2">
+            {sortedRegions.map(([region, count], idx) => (
               <div
-                key={name}
-                className="flex items-center justify-between p-2.5 rounded-xl bg-[#090a0f] border border-[#232738]"
+                key={region}
+                className="flex items-center justify-between px-3 py-2 rounded-xl bg-[#0b0818]/75 border border-white/10 text-xs"
               >
-                <div className="flex items-center gap-3">
-                  <span className="w-6 h-6 rounded-lg bg-purple-900/40 border border-purple-500/30 text-purple-300 text-xs font-bold flex items-center justify-center">
-                    0{idx + 1}
-                  </span>
-                  <div>
-                    <h5 className="text-xs font-bold text-white">{name}</h5>
-                    <p className="text-[10px] text-gray-400">Active Geotagged Queries</p>
-                  </div>
-                </div>
-                <span className="text-xs font-extrabold text-purple-300">{count} events</span>
+                <span className="text-white font-semibold flex items-center gap-2">
+                  <span className="text-purple-400 font-mono tabular-nums">0{idx + 1}</span>
+                  <span>{region}</span>
+                </span>
+                <span className="text-purple-300 font-semibold tabular-nums">{count} events</span>
               </div>
             ))}
-          </div>
-        </div>
-
-        {/* 24-Hour Activity Peak Bar Chart */}
-        <div className="glass-card rounded-2xl p-5 border border-purple-500/30 space-y-4 flex flex-col justify-between">
-          <div className="flex items-center justify-between border-b border-white/10 pb-3">
-            <div className="flex items-center gap-2">
-              <Clock className="w-4 h-4 text-purple-400" />
-              <h3 className="text-sm font-bold text-white">24-Hour Peak Activity Distribution</h3>
-            </div>
-            <span className="text-xs text-gray-400">Hourly Queries</span>
-          </div>
-
-          {/* Bar Chart Bars */}
-          <div className="h-40 flex items-end justify-between gap-1 pt-6 px-1">
-            {metrics.hourlyActivity.map((count, hour) => {
-              const heightPercent = Math.max(8, Math.round((count / maxHourly) * 100));
-              const isCurrentHour = new Date().getHours() === hour;
-
-              return (
-                <div
-                  key={hour}
-                  className="flex-1 flex flex-col items-center group relative h-full justify-end"
-                >
-                  {/* Tooltip on hover */}
-                  <div className="hidden group-hover:block absolute -top-7 whitespace-nowrap bg-[#131520] border border-purple-500/40 text-[9px] text-white px-1.5 py-0.5 rounded shadow z-10">
-                    {hour}:00 - {count} queries
-                  </div>
-
-                  <div
-                    style={{ height: `${heightPercent}%` }}
-                    className={`w-full rounded-t-sm transition-all duration-300 ${
-                      isCurrentHour
-                        ? 'bg-gradient-to-t from-purple-500 to-indigo-400 shadow-md shadow-purple-500/50'
-                        : 'bg-purple-900/40 group-hover:bg-purple-600'
-                    }`}
-                  />
-                </div>
-              );
-            })}
-          </div>
-
-          <div className="flex justify-between text-[10px] text-gray-500 border-t border-white/5 pt-2">
-            <span>00:00</span>
-            <span>06:00</span>
-            <span>12:00 (Noon)</span>
-            <span>18:00</span>
-            <span>23:00</span>
           </div>
         </div>
       </div>

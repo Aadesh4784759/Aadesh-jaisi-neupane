@@ -2323,6 +2323,181 @@ Provide structured Markdown output in "content", plus an optional "emailSubject"
   }
 });
 
+// 11B. VOICE AUDIO TRANSCRIPTION ENDPOINT (Gemini Speech-to-Text for recorded audio)
+app.post('/api/voice/transcribe', requireAuthenticatedUser, async (req: Request, res: Response): Promise<void> => {
+  const startTime = Date.now();
+  try {
+    const {
+      audioData = '',
+      mimeType = 'audio/webm',
+      languageHint = 'auto',
+    } = req.body;
+
+    if (!audioData || typeof audioData !== 'string') {
+      res.status(400).json({ error: 'Recorded audio data is required for transcription.' });
+      return;
+    }
+
+    const customKey = (req.headers['x-gemini-api-key'] as string) || req.body?.customApiKey;
+    const ai = getGeminiClient(customKey);
+    if (!ai) {
+      res.status(400).json({ error: 'Gemini API key is not configured.' });
+      return;
+    }
+
+    const mimeMatch = audioData.match(/^data:(audio\/[a-zA-Z0-9.+-]+(?:;\s*codecs=[^;]+)?);base64,/);
+    const detectedMime = (mimeMatch ? mimeMatch[1].split(';')[0] : mimeType).trim() || 'audio/webm';
+    const cleanBase64 = audioData.replace(/^data:audio\/[^;]+(?:;[^,]+)*;base64,/, '');
+
+    const audioPart = {
+      inlineData: {
+        mimeType: detectedMime,
+        data: cleanBase64,
+      },
+    };
+    const langHintName = LANGUAGE_NAMES[languageHint] || languageHint;
+    const promptPart = {
+      text: `Transcribe the spoken audio accurately verbatim.${languageHint && languageHint !== 'auto' ? ` Expected language: ${langHintName} (${languageHint}).` : ''} Return ONLY the exact spoken transcript with proper punctuation, no extra commentary.`,
+    };
+
+    const modelsToTry = ['gemini-3.5-transcribe', ...getCandidateModels()];
+    let transcriptText = '';
+    let usedModel = modelsToTry[0];
+    let lastErr: unknown = null;
+
+    for (const model of modelsToTry) {
+      try {
+        const response = await withTimeout(
+          ai.models.generateContent({
+            model,
+            contents: { parts: [audioPart, promptPart] },
+          }),
+          18000
+        );
+        transcriptText = (response.text || '').trim();
+        usedModel = model;
+        if (transcriptText) break;
+      } catch (err) {
+        lastErr = err;
+        if (isAuthFailure(err)) throw err;
+      }
+    }
+
+    if (!transcriptText && lastErr) {
+      throw lastErr;
+    }
+
+    res.json({
+      transcript: transcriptText,
+      modelUsed: usedModel,
+      latencyMs: Date.now() - startTime,
+    });
+  } catch (err: any) {
+    res.status(isAuthFailure(err) ? 401 : 502).json({
+      error: sanitizeErrorMessage(err),
+      latencyMs: Date.now() - startTime,
+    });
+  }
+});
+
+// 11C. GEMINI NEURAL TEXT-TO-SPEECH & AI VOICE GENERATOR ENDPOINT
+const ALLOWED_GEMINI_VOICES = new Set(['Kore', 'Puck', 'Charon', 'Fenrir', 'Zephyr']);
+
+app.post('/api/voice/tts', requireAuthenticatedUser, async (req: Request, res: Response): Promise<void> => {
+  const startTime = Date.now();
+  try {
+    const {
+      text = '',
+      voiceName = 'Kore',
+      style = '',
+      model = 'gemini-3.8-flash-lite-tts',
+      languageName = '',
+    } = req.body;
+
+    const cleanText = String(text || '').trim();
+    if (!cleanText) {
+      res.status(400).json({ error: 'Please enter text to generate AI voice audio.' });
+      return;
+    }
+
+    const customKey = (req.headers['x-gemini-api-key'] as string) || req.body?.customApiKey;
+    const ai = getGeminiClient(customKey);
+    if (!ai) {
+      res.status(400).json({
+        error: 'Gemini API key is not configured for AI Voice Generation.',
+        fallbackAvailable: true,
+      });
+      return;
+    }
+
+    const selectedVoice = ALLOWED_GEMINI_VOICES.has(voiceName) ? voiceName : 'Kore';
+    const ttsModel =
+      model === 'gemini-3.8-flash-tts' ? 'gemini-3.8-flash-tts' : 'gemini-3.8-flash-lite-tts';
+    const cleanStyle = String(style || '').trim().slice(0, 180);
+    const effectiveStyle = [
+      cleanStyle,
+      languageName ? `Natural pronunciation in ${String(languageName).slice(0, 40)}` : '',
+    ]
+      .filter(Boolean)
+      .join('. ');
+
+    const partPayload: Record<string, any> = {
+      text: cleanText.slice(0, 3500),
+    };
+    if (effectiveStyle) {
+      partPayload.speechMetadata = { style: effectiveStyle };
+    }
+
+    const response = await withTimeout(
+      ai.models.generateContent({
+        model: ttsModel,
+        contents: [
+          {
+            role: 'user',
+            parts: [partPayload],
+          },
+        ],
+        config: {
+          responseModalities: ['AUDIO'],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName: selectedVoice },
+            },
+          },
+        },
+      }),
+      22000
+    );
+
+    const inlineAudio = response.candidates?.[0]?.content?.parts?.find(
+      (p: any) => p?.inlineData?.data
+    )?.inlineData;
+
+    if (!inlineAudio?.data) {
+      res.status(502).json({
+        error: 'Gemini TTS did not return audio data for this request. Browser Text-to-Speech fallback is available.',
+        fallbackAvailable: true,
+        latencyMs: Date.now() - startTime,
+      });
+      return;
+    }
+
+    res.json({
+      audioBase64: inlineAudio.data,
+      mimeType: inlineAudio.mimeType || 'audio/wav',
+      voiceName: selectedVoice,
+      modelUsed: ttsModel,
+      latencyMs: Date.now() - startTime,
+    });
+  } catch (err: any) {
+    res.status(isAuthFailure(err) ? 401 : 502).json({
+      error: sanitizeErrorMessage(err),
+      fallbackAvailable: true,
+      latencyMs: Date.now() - startTime,
+    });
+  }
+});
+
 // 12. AI AGENT HUB ENDPOINT (Multi-step Planning + Priority + Estimated Time + Explicit Approval Actions)
 app.post('/api/agent', requireAuthenticatedUser, async (req: Request, res: Response): Promise<void> => {
   const startTime = Date.now();

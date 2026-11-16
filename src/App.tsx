@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { User as FirebaseUser } from 'firebase/auth';
 import confetti from 'canvas-confetti';
+import { ArrowLeft } from 'lucide-react';
 import {
   AIConnectionState,
   AppSettings,
@@ -10,7 +11,6 @@ import {
   GeotaggedMedia,
   LocationData,
   UserProfile,
-  VoiceHistoryEntry,
 } from './types';
 import {
   DEFAULT_SETTINGS,
@@ -22,9 +22,9 @@ import {
   getStoredFolders,
   getStoredSettings,
   getStoredUser,
-  getStoredVoiceHistory,
+  getUserLocalExtras,
+  saveUserLocalExtras,
   saveStoredMedia,
-  saveStoredMetrics,
   saveStoredSessions,
   saveStoredFolders,
   saveStoredSettings,
@@ -34,19 +34,17 @@ import {
   recordMetricEvent,
 } from './utils/storage';
 import { SUPPORTED_LANGUAGES, VOICE_PERSONAS } from './data/languages';
+import { detectUserCountry } from './utils/country';
 import { Header } from './components/Header';
-import { NavigationDock } from './components/NavigationDock';
+import { NavigationDock, BottomNavTab } from './components/NavigationDock';
+import { FuturisticBackground } from './components/FuturisticBackground';
 import { ChatView } from './components/ChatView';
-import { ActiveVoiceView } from './components/ActiveVoiceView';
-import { InterpreterView } from './components/InterpreterView';
-import { GeotagGalleryView } from './components/GeotagGalleryView';
 import { AnalyticsDashboard } from './components/AnalyticsDashboard';
-import { VoiceHistoryView } from './components/VoiceHistoryView';
-import { ImageStudioView } from './components/ImageStudioView';
-import { ProfileView } from './components/ProfileView';
+import { TransferView } from './components/TransferView';
+import { VoicePage } from './components/VoicePage';
+import { MoreView } from './components/MoreView';
+import { SettingsView } from './components/SettingsView';
 import { AdminDashboardView } from './components/AdminDashboardView';
-import { WorldClockView } from './components/WorldClockView';
-import { AutomationHubView } from './components/AutomationHubView';
 import { MandatoryAuthGate } from './components/MandatoryAuthGate';
 import { SettingsModal } from './components/SettingsModal';
 import { AuthModal } from './components/AuthModal';
@@ -70,6 +68,41 @@ import {
   logOut,
 } from './utils/firebase';
 
+type AppTab = BottomNavTab | 'admin';
+
+function playSoftNotificationChime() {
+  try {
+    const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctx = new AudioCtx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(587.33, ctx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.14);
+    gain.gain.setValueAtTime(0.05, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.22);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.23);
+    window.setTimeout(() => {
+      ctx.close().catch(() => {});
+    }, 350);
+  } catch {}
+}
+
+function sanitizeUserForFirestore(profile: UserProfile): UserProfile {
+  const safeAvatar =
+    profile.avatarUrl && !profile.avatarUrl.startsWith('data:') && profile.avatarUrl.length <= 950
+      ? profile.avatarUrl
+      : '';
+  return {
+    ...profile,
+    avatarUrl: safeAvatar,
+  };
+}
+
 export default function App() {
   const [settings, setSettings] = useState<AppSettings>(getStoredSettings());
   const [user, setUser] = useState<UserProfile>(getStoredUser());
@@ -86,13 +119,17 @@ export default function App() {
     const stored = getStoredSessions(getStoredUser().id);
     return stored[0]?.id || 'session-default-welcome';
   });
-  const [voiceHistory, setVoiceHistory] = useState<VoiceHistoryEntry[]>(() =>
-    getStoredVoiceHistory(getStoredUser().id)
-  );
   const [mediaItems, setMediaItems] = useState<GeotaggedMedia[]>(getStoredMedia());
   const [metrics, setMetrics] = useState<EngagementMetrics>(getStoredMetrics());
-  const [activeTab, setActiveTab] = useState<string>('chat');
+  const [activeTab, setActiveTab] = useState<AppTab>('chat');
+  const [settingsSection, setSettingsSection] = useState<'profile' | 'settings'>('settings');
   const [searchQuery, setSearchQuery] = useState<string>('');
+  const [chatDraft, setChatDraft] = useState<{
+    id: number;
+    text?: string;
+    image?: { base64: string; mimeType: string };
+    file?: { name: string; content: string };
+  } | null>(null);
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [platformNotice, setPlatformNotice] = useState<{
@@ -134,6 +171,9 @@ export default function App() {
     const fsProfile = await loadUserProfileFromFirestore(fbUser.uid).catch(() => null);
     if (activeFbUidRef.current !== fbUser.uid) return;
 
+    const extras = getUserLocalExtras(fbUser.uid);
+    const detectedCountry = detectUserCountry();
+
     setUser((prev) => {
       const baseUser = prev.id === fbUser.uid ? prev : { ...DEFAULT_USER };
       const updated: UserProfile = {
@@ -142,7 +182,11 @@ export default function App() {
         name: fsProfile?.name || cleanName,
         username: fsProfile?.username || cleanHandle,
         email: fbUser.email || baseUser.email || '',
-        avatarUrl: fbUser.photoURL || fsProfile?.avatarUrl || baseUser.avatarUrl || '',
+        avatarUrl:
+          extras.customAvatarDataUrl || fbUser.photoURL || fsProfile?.avatarUrl || baseUser.avatarUrl || '',
+        avatarColor: extras.avatarColor || baseUser.avatarColor || '#8b5cf6',
+        country: extras.country || baseUser.country || detectedCountry.country,
+        countryFlag: extras.countryFlag || baseUser.countryFlag || detectedCountry.flag,
         provider: providerName,
         isLoggedIn: true,
         role: isVerifiedOwner ? 'admin' : fsProfile?.role || 'user',
@@ -155,7 +199,7 @@ export default function App() {
         ),
       };
       saveStoredUser(updated);
-      syncUserProfileToFirestore(updated).catch(() => {});
+      syncUserProfileToFirestore(sanitizeUserForFirestore(updated)).catch(() => {});
       return updated;
     });
 
@@ -208,6 +252,16 @@ export default function App() {
     applyAvatarDynamicTheme(presetHex || user.avatarColor, settings.dynamicAvatarTheme !== false || Boolean(presetHex));
   }, [settings.colorTheme, user.avatarColor, settings.dynamicAvatarTheme]);
 
+  // Sync light/dark theme, font size, and high-contrast classes reactively
+  useEffect(() => {
+    const isLight = settings.theme === 'light';
+    document.body.classList.toggle('light-theme', isLight);
+    document.documentElement.classList.toggle('dark', !isLight);
+    document.body.classList.toggle('font-size-large', settings.fontSize === 'large');
+    document.body.classList.toggle('font-size-xlarge', settings.fontSize === 'xlarge');
+    document.body.classList.toggle('high-contrast', Boolean(settings.highContrast));
+  }, [settings.theme, settings.fontSize, settings.highContrast]);
+
   // Detect Android/iOS virtual keyboard open state via visualViewport
   useEffect(() => {
     if (typeof window === 'undefined' || !window.visualViewport) return;
@@ -249,11 +303,6 @@ export default function App() {
     window.addEventListener('offline', handleOffline);
 
     saveStoredSettings(settings);
-    if (settings.theme === 'light') {
-      document.body.classList.add('light-theme');
-    } else {
-      document.body.classList.remove('light-theme');
-    }
 
     const unsubNotice = subscribeToPlatformAnnouncement((data) => {
       setPlatformNotice(data);
@@ -266,12 +315,15 @@ export default function App() {
         await hydrateVerifiedUserSession(fbUser);
       } else {
         activeFbUidRef.current = null;
+        const detected = detectUserCountry();
         setUser({
           ...DEFAULT_USER,
           id: fbUser?.uid || 'unauthenticated',
           name: fbUser?.displayName || 'User',
           username: 'user',
           email: fbUser?.email || '',
+          country: detected.country,
+          countryFlag: detected.flag,
           isLoggedIn: false,
           provider: fbUser?.providerData[0]?.providerId?.includes('google') ? 'google' : 'email',
         });
@@ -289,13 +341,12 @@ export default function App() {
     };
   }, []);
 
-  // Sync session, folders, and voice history when user account switches
+  // Sync session & folders when user account switches
   useEffect(() => {
     const userSessions = getStoredSessions(user.id);
     setSessions(userSessions);
     setSessionFolders(getStoredFolders(user.id));
     setCurrentSessionId(userSessions[0]?.id || `session-${Date.now()}`);
-    setVoiceHistory(getStoredVoiceHistory(user.id));
   }, [user.id]);
 
   // Check AI Service connectivity health
@@ -338,14 +389,14 @@ export default function App() {
     sessions.find((s) => s.id === currentSessionId) ||
     sessions[0] || {
       id: 'session-default-welcome',
-      title: 'Aadesh AI Global Conversation',
+      title: 'Aadesh AI Conversation',
       createdAt: Date.now(),
       updatedAt: Date.now(),
       targetLanguage: settings.defaultTargetLanguage,
       messages: [],
     };
 
-  // Send message in Chat or Voice view (supports photos & text/code attachments)
+  // Send message in Chat or Voice view (uses SSE streaming when online for text/attachments; /api/chat for multimodal/offline)
   const handleSendMessage = async (params: {
     text: string;
     imageData?: string;
@@ -362,6 +413,7 @@ export default function App() {
     if (isSendingRef.current) return;
     isSendingRef.current = true;
 
+    const targetSessionId = currentSession.id;
     const userMsgId = `usr-${Date.now()}`;
     const fallbackContent = params.imageData
       ? 'Shared a photograph for visual analysis'
@@ -398,12 +450,12 @@ export default function App() {
       messages: updatedMessages,
     };
 
-    const updatedSessions = sessions.map((s) => (s.id === currentSession.id ? updatedSession : s));
+    const updatedSessions = sessions.map((s) => (s.id === targetSessionId ? updatedSession : s));
     setSessions(updatedSessions);
     saveStoredSessions(updatedSessions, user.id);
 
     if (params.isVoice && params.text) {
-      const newEntry = addVoiceHistoryEntry(
+      addVoiceHistoryEntry(
         {
           transcript: params.text,
           language: settings.uiLanguage,
@@ -411,11 +463,11 @@ export default function App() {
         },
         user.id
       );
-      setVoiceHistory((prev) => [newEntry, ...prev]);
     }
 
     setIsLoading(true);
     const startTime = Date.now();
+    const modelMsgId = `mod-${Date.now()}`;
 
     try {
       let reply = '';
@@ -424,7 +476,14 @@ export default function App() {
       let sentiment: 'positive' | 'curious' | 'inquiry' | 'urgent' | 'neutral' = 'positive';
       let suggestedQuestions: string[] = [];
       let geotagInsights: string | undefined = undefined;
+      let modelUsed: string | undefined = undefined;
       let latencyMs = 280;
+
+      const shouldStream =
+        isOnline &&
+        settings.streamingResponses !== false &&
+        !params.imageData &&
+        !params.location;
 
       if (!isOnline) {
         latencyMs = 120;
@@ -441,11 +500,106 @@ export default function App() {
           translation = `[${targetLangObj.name} Translation] Offline mode active.`;
         }
         sentiment = 'neutral';
-        suggestedQuestions = [
-          'Explain in more detail',
-          'Give example',
-          'Summarize',
-        ];
+        suggestedQuestions = ['Explain in more detail', 'Give example', 'Summarize'];
+      } else if (shouldStream) {
+        // Insert live streaming placeholder bubble
+        const streamingPlaceholder: ChatMessage = {
+          id: modelMsgId,
+          role: 'model',
+          senderName: 'Aadesh AI',
+          content: '',
+          timestamp: Date.now(),
+          isStreaming: true,
+        };
+        setSessions((prev) =>
+          prev.map((s) =>
+            s.id === targetSessionId
+              ? { ...s, title: sessionTitle, updatedAt: Date.now(), messages: [...updatedMessages, streamingPlaceholder] }
+              : s
+          )
+        );
+
+        const headers = await getAuthHeaders({
+          'Content-Type': 'application/json',
+          ...(settings.customGeminiApiKey ? { 'x-gemini-api-key': settings.customGeminiApiKey } : {}),
+        });
+
+        const streamRes = await fetch('/api/chat/stream', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            messages: updatedMessages
+              .filter((m) => !m.isError)
+              .map((m) => ({ role: m.role, content: m.content })),
+            currentMessage: params.text,
+            attachmentName: params.attachmentName,
+            attachmentContent: params.attachmentContent,
+            targetLanguage: params.targetLanguage,
+            userLanguage: settings.uiLanguage,
+            voicePersona: settings.voicePersona || 'friendly',
+            customApiKey: settings.customGeminiApiKey,
+          }),
+        });
+
+        if (!streamRes.ok || !streamRes.body) {
+          const errData = await streamRes.json().catch(() => ({}));
+          throw new Error(errData.error || `Streaming error (${streamRes.status})`);
+        }
+
+        const reader = streamRes.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        let sseBuffer = '';
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          sseBuffer += decoder.decode(value, { stream: true });
+
+          const events = sseBuffer.split('\n\n');
+          sseBuffer = events.pop() || '';
+
+          for (const rawEvent of events) {
+            const lines = rawEvent.split('\n');
+            for (const line of lines) {
+              if (!line.startsWith('data: ')) continue;
+              const jsonStr = line.slice(6).trim();
+              if (!jsonStr || jsonStr === '[DONE]') continue;
+              try {
+                const payload = JSON.parse(jsonStr);
+                if (payload.error) {
+                  throw new Error(payload.error);
+                }
+                if (typeof payload.chunk === 'string' && payload.chunk.length > 0) {
+                  reply += payload.chunk;
+                  setSessions((prev) =>
+                    prev.map((s) =>
+                      s.id === targetSessionId
+                        ? {
+                            ...s,
+                            messages: s.messages.map((m) =>
+                              m.id === modelMsgId ? { ...m, content: reply, isStreaming: true } : m
+                            ),
+                          }
+                        : s
+                    )
+                  );
+                }
+                if (payload.modelUsed) {
+                  modelUsed = payload.modelUsed;
+                }
+              } catch (parseErr: any) {
+                if (parseErr instanceof SyntaxError) continue;
+                throw parseErr;
+              }
+            }
+          }
+        }
+
+        latencyMs = Date.now() - startTime;
+        if (!reply.trim()) {
+          reply = 'Response received.';
+        }
+        setAiStatus('connected');
       } else {
         const headers = await getAuthHeaders({
           'Content-Type': 'application/json',
@@ -485,6 +639,7 @@ export default function App() {
         sentiment = data.sentiment || 'positive';
         suggestedQuestions = Array.isArray(data.suggestedQuestions) ? data.suggestedQuestions : [];
         geotagInsights = data.geotagInsights;
+        modelUsed = data.modelUsed;
         latencyMs = data.latencyMs || Date.now() - startTime;
 
         if (data.isLiveAI) {
@@ -494,7 +649,6 @@ export default function App() {
         }
       }
 
-      const modelMsgId = `mod-${Date.now()}`;
       const modelMessage: ChatMessage = {
         id: modelMsgId,
         role: 'model',
@@ -506,19 +660,28 @@ export default function App() {
         sentiment,
         suggestedQuestions,
         geotagInsights,
+        modelUsed,
         timestamp: Date.now(),
         isOffline: !isOnline,
+        isStreaming: false,
         latencyMs,
       };
 
       const finalSession: ChatSession = {
         ...updatedSession,
+        updatedAt: Date.now(),
         messages: [...updatedMessages, modelMessage],
       };
 
-      const finalSessions = sessions.map((s) => (s.id === currentSession.id ? finalSession : s));
-      setSessions(finalSessions);
-      saveStoredSessions(finalSessions, user.id);
+      setSessions((prev) => {
+        const nextSessions = prev.map((s) => (s.id === targetSessionId ? finalSession : s));
+        saveStoredSessions(nextSessions, user.id);
+        return nextSessions;
+      });
+
+      if (settings.soundEffects !== false) {
+        playSoftNotificationChime();
+      }
 
       // Dedicated backend call for context-aware suggested reply buttons after every AI response
       if (isOnline) {
@@ -526,7 +689,6 @@ export default function App() {
           'Content-Type': 'application/json',
           ...(settings.customGeminiApiKey ? { 'x-gemini-api-key': settings.customGeminiApiKey } : {}),
         });
-        const targetSessionId = currentSession.id;
         void fetch('/api/chat/suggested-replies', {
           method: 'POST',
           headers: suggestHeaders,
@@ -618,7 +780,7 @@ export default function App() {
       });
       setMetrics(getStoredMetrics());
 
-      if ((settings.autoSpeakAIResponses || settings.handsFreeMode) && activeTab === 'chat') {
+      if (settings.autoSpeakAIResponses && activeTab === 'chat') {
         const targetLangObj =
           SUPPORTED_LANGUAGES.find((l) => l.code === params.targetLanguage) || SUPPORTED_LANGUAGES[0];
         const activePersonaObj =
@@ -641,14 +803,17 @@ export default function App() {
         timestamp: Date.now(),
         sentiment: 'urgent',
         isError: true,
+        isStreaming: false,
       };
       const finalSession: ChatSession = {
         ...updatedSession,
         messages: [...updatedMessages, modelErrorMsg],
       };
-      const finalSessions = sessions.map((s) => (s.id === currentSession.id ? finalSession : s));
-      setSessions(finalSessions);
-      saveStoredSessions(finalSessions, user.id);
+      setSessions((prev) => {
+        const nextSessions = prev.map((s) => (s.id === targetSessionId ? finalSession : s));
+        saveStoredSessions(nextSessions, user.id);
+        return nextSessions;
+      });
       throw err;
     } finally {
       isSendingRef.current = false;
@@ -659,8 +824,18 @@ export default function App() {
   const handleUpdateUser = (updatedUser: UserProfile) => {
     setUser(updatedUser);
     saveStoredUser(updatedUser);
+    if (updatedUser.id) {
+      saveUserLocalExtras(updatedUser.id, {
+        country: updatedUser.country,
+        countryFlag: updatedUser.countryFlag,
+        avatarColor: updatedUser.avatarColor,
+        ...(updatedUser.avatarUrl?.startsWith('data:')
+          ? { customAvatarDataUrl: updatedUser.avatarUrl }
+          : {}),
+      });
+    }
     if (updatedUser.isLoggedIn) {
-      syncUserProfileToFirestore(updatedUser).catch(() => {});
+      syncUserProfileToFirestore(sanitizeUserForFirestore(updatedUser)).catch(() => {});
     }
   };
 
@@ -670,6 +845,7 @@ export default function App() {
       await logOut();
     } catch {}
     setFbAuthUser(null);
+    const detected = detectUserCountry();
     const signedOutUser: UserProfile = {
       ...DEFAULT_USER,
       id: 'unauthenticated',
@@ -678,6 +854,8 @@ export default function App() {
       email: '',
       phone: '',
       avatarUrl: '',
+      country: detected.country,
+      countryFlag: detected.flag,
       provider: 'email',
       role: 'user',
       isLoggedIn: false,
@@ -956,38 +1134,6 @@ export default function App() {
     return translatedText;
   };
 
-  const handleDeleteVoiceEntry = (id: string) => {
-    const updated = voiceHistory.filter((v) => v.id !== id);
-    setVoiceHistory(updated);
-    saveStoredVoiceHistory(updated, user.id);
-  };
-
-  const handleClearAllVoiceHistory = () => {
-    setVoiceHistory([]);
-    saveStoredVoiceHistory([], user.id);
-  };
-
-  const handleSendVoiceToChat = (transcript: string) => {
-    setActiveTab('chat');
-    handleSendMessage({
-      text: transcript,
-      targetLanguage: currentSession.targetLanguage || settings.defaultTargetLanguage,
-      isVoice: true,
-    });
-  };
-
-  const handleAddNewVoiceFromVault = (text: string, language: string) => {
-    const entry = addVoiceHistoryEntry(
-      {
-        transcript: text,
-        language,
-        durationSeconds: Math.max(2, Math.round(text.split(' ').length / 2.5)),
-      },
-      user.id
-    );
-    setVoiceHistory((prev) => [entry, ...prev]);
-  };
-
   const handleAddMedia = (media: GeotaggedMedia) => {
     const updated = [media, ...mediaItems];
     setMediaItems(updated);
@@ -1011,6 +1157,23 @@ export default function App() {
     saveStoredMedia(updated);
   };
 
+  const handleImageGenerated = (latencyMs: number) => {
+    const { updatedUser, newBadgeUnlocked } = recordGamificationActivity(user, 'image');
+    setUser(updatedUser);
+    saveStoredUser(updatedUser);
+    if (newBadgeUnlocked) {
+      try {
+        confetti({ particleCount: 70, spread: 65, origin: { y: 0.6 } });
+      } catch {}
+    }
+    recordMetricEvent({
+      isImage: true,
+      latencyMs,
+      sentiment: 'positive',
+    });
+    setMetrics(getStoredMetrics());
+  };
+
   const handleRecordTranslationMetric = (_langA: string, langB: string, latencyMs: number) => {
     recordMetricEvent({
       isTranslation: true,
@@ -1032,17 +1195,16 @@ export default function App() {
     setSessions(resetSessions);
     setSessionFolders(getStoredFolders(user.id));
     setCurrentSessionId(resetSessions[0]?.id || `session-${Date.now()}`);
-    setVoiceHistory([]);
+    saveStoredVoiceHistory([], user.id);
     setMediaItems(getStoredMedia());
     setMetrics(getStoredMetrics());
     setIsSettingsModalOpen(false);
   };
 
-  const totalMessageCount = sessions.reduce((acc, s) => acc + s.messages.length, 0);
-
   if (!isAuthInitialized) {
     return (
       <div className="app-shell-scroll relative flex flex-col justify-center items-center min-h-screen max-w-full overflow-x-hidden">
+        <FuturisticBackground theme={settings.theme} />
         <SplashScreen isAppReady={false} theme={settings.theme} />
       </div>
     );
@@ -1051,6 +1213,7 @@ export default function App() {
   if (!isAuthenticatedVerified) {
     return (
       <div className="app-shell-scroll relative flex flex-col min-h-screen max-w-full overflow-x-hidden selection:bg-purple-500/30 selection:text-purple-200">
+        <FuturisticBackground theme={settings.theme} />
         <SplashScreen isAppReady={isAppReady} theme={settings.theme} />
         <MandatoryAuthGate
           firebaseUser={fbAuthUser}
@@ -1071,62 +1234,18 @@ export default function App() {
     >
       <SplashScreen isAppReady={isAppReady} theme={settings.theme} />
 
-      {/* Ambient Glowing Background Orbs & 3D Spheres */}
-      <div
-        className="orb w-[380px] h-[380px] top-[-40px] left-[-90px] animate-pulse-glow transition-colors duration-500"
-        style={{ backgroundColor: 'rgba(var(--theme-accent-rgb), 0.24)' }}
-      />
-      <div
-        className="orb w-[500px] h-[500px] top-[25%] right-[-140px] animate-float-slow transition-colors duration-500"
-        style={{ backgroundColor: 'rgba(var(--theme-accent-sec-rgb), 0.20)' }}
-      />
-      <div
-        className="orb w-[340px] h-[340px] bottom-[15%] left-[25%] animate-float-delayed transition-colors duration-500"
-        style={{ backgroundColor: 'rgba(var(--theme-accent-light-rgb), 0.18)' }}
-      />
-      <div className="sphere-3d w-28 h-28 absolute top-20 right-12 opacity-35 animate-float-slow hidden lg:block" />
-      <div className="sphere-3d w-16 h-16 absolute top-1/2 left-8 opacity-25 animate-float-delayed hidden md:block" />
-      <div className="sphere-3d w-20 h-20 absolute bottom-28 right-1/4 opacity-30 animate-pulse-glow hidden sm:block" />
+      {/* Futuristic Purple/Violet/Lavender 3D Liquid Waves, Orbs, Bubbles & Particles */}
+      <FuturisticBackground theme={settings.theme} />
 
-      {/* TOP HEADER */}
+      {/* CLEAN TOP HEADER (Logo + Name on Left | Clickable User, Flag, UID, Photo, Streak on Right) */}
       <Header
-        settings={settings}
-        onUpdateSettings={handleUpdateSettings}
-        aiStatus={aiStatus}
-        onRefreshAIStatus={checkAIHealth}
-        isOnline={isOnline}
-        onToggleForceOffline={handleToggleForceOffline}
-        activeTab={activeTab}
-        onSelectTab={setActiveTab}
-        searchQuery={searchQuery}
-        onSearchChange={setSearchQuery}
-        onOpenSettings={() => setIsSettingsModalOpen(true)}
-        totalTranslations={metrics.totalTranslations}
         user={user}
-        isOwnerAdmin={isOwnerAdmin}
-        onOpenAuth={(mode = 'signin') => {
-          setAuthModalMode(mode);
-          setIsAuthModalOpen(true);
+        onLogoClick={() => setActiveTab('chat')}
+        onProfileClick={() => {
+          setSettingsSection('profile');
+          setActiveTab('settings');
         }}
-        onSignOut={handleSignOut}
-        onOpenGamification={() => setIsGamificationModalOpen(true)}
-        onOpenInstall={() => setIsInstallModalOpen(true)}
-      />
-
-      {/* NAVIGATION BAR (Desktop Top Bar + Mobile Floating Bottom Dock) */}
-      <NavigationDock
-        activeTab={activeTab}
-        onSelectTab={(tab) => {
-          if (tab === 'settings') {
-            setIsSettingsModalOpen(true);
-          } else {
-            setActiveTab(tab);
-          }
-        }}
-        uiLanguage={settings.uiLanguage}
-        isOwnerAdmin={isOwnerAdmin}
-        isKeyboardOpen={isKeyboardOpen}
-        onOpenInstall={() => setIsInstallModalOpen(true)}
+        onStreakClick={() => setIsGamificationModalOpen(true)}
       />
 
       {/* Owner Announcement Banner if active */}
@@ -1175,6 +1294,13 @@ export default function App() {
             onFeedbackMessage={handleFeedbackMessage}
             onTogglePinMessage={handleTogglePinMessage}
             onReactMessage={handleReactToMessage}
+            onOpenTransfer={() => setActiveTab('transfer')}
+            onUpdateSettings={handleUpdateSettings}
+            onImageGenerated={handleImageGenerated}
+            onRecordTranslationMetric={handleRecordTranslationMetric}
+            mediaItems={mediaItems}
+            onAddMedia={handleAddMedia}
+            onDeleteMedia={handleDeleteMedia}
             user={user}
             settings={settings}
             isOnline={isOnline}
@@ -1182,148 +1308,172 @@ export default function App() {
             searchFilter={searchQuery}
             onSearchChange={setSearchQuery}
             isKeyboardOpen={isKeyboardOpen}
+            externalDraft={chatDraft}
           />
         )}
 
-        {activeTab === 'automation' && (
-          <AutomationHubView
+        {activeTab === 'analysis' && (
+          <AnalyticsDashboard
+            metrics={metrics}
+            sessions={sessions}
             user={user}
-            settings={settings}
-            isOnline={isOnline}
-            onSendToChat={(content) => {
+          />
+        )}
+
+        {activeTab === 'transfer' && (
+          <TransferView
+            userId={user.id}
+            userName={user.name}
+            onAttachFileToChat={(file) => {
               setActiveTab('chat');
               void handleSendMessage({
-                text: content,
+                text: file.dataUrl
+                  ? `Please inspect and describe this transferred image: ${file.name}`
+                  : `Please analyze this transferred file (${file.name}):`,
+                imageData: file.dataUrl,
+                imageMimeType: file.mimeType,
+                attachmentName: file.dataUrl ? undefined : file.name,
+                attachmentContent: file.textContent,
                 targetLanguage: currentSession.targetLanguage || settings.defaultTargetLanguage,
               });
-            }}
-          />
-        )}
-
-        {activeTab === 'images' && (
-          <ImageStudioView
-            settings={settings}
-            user={user}
-            isOnline={isOnline}
-            onOpenSettings={() => setIsSettingsModalOpen(true)}
-            onImageGenerated={(latencyMs) => {
-              const { updatedUser, newBadgeUnlocked } = recordGamificationActivity(user, 'image');
-              setUser(updatedUser);
-              saveStoredUser(updatedUser);
-              if (newBadgeUnlocked) {
-                try {
-                  confetti({ particleCount: 70, spread: 65, origin: { y: 0.6 } });
-                } catch {}
-              }
-              recordMetricEvent({
-                isImage: true,
-                latencyMs,
-                sentiment: 'positive',
-              });
-              setMetrics(getStoredMetrics());
             }}
           />
         )}
 
         {activeTab === 'voice' && (
-          <ActiveVoiceView
+          <VoicePage
             settings={settings}
             onUpdateSettings={handleUpdateSettings}
             isOnline={isOnline}
-            onReturnToChat={() => setActiveTab('chat')}
-            onSendVoiceMessage={async ({ text, isVoice, targetLanguage }) =>
-              handleSendMessage({ text, isVoice, targetLanguage })
-            }
+            onSendVoiceMessage={async ({ text, isVoice, targetLanguage }) => {
+              return handleSendMessage({
+                text,
+                isVoice,
+                targetLanguage,
+              });
+            }}
+            onOpenInChat={(text) => {
+              setChatDraft({ id: Date.now(), text });
+              setActiveTab('chat');
+            }}
           />
         )}
 
-        {activeTab === 'voiceHistory' && (
-          <VoiceHistoryView
-            entries={voiceHistory}
-            onDeleteEntry={handleDeleteVoiceEntry}
-            onClearAll={handleClearAllVoiceHistory}
-            onSendToChat={handleSendVoiceToChat}
-            settings={settings}
+        {activeTab === 'more' && (
+          <MoreView
             user={user}
-            onAddNewVoiceInput={handleAddNewVoiceFromVault}
-          />
-        )}
-
-        {activeTab === 'interpret' && (
-          <InterpreterView
             settings={settings}
             isOnline={isOnline}
-            onRecordTranslationMetric={handleRecordTranslationMetric}
-          />
-        )}
-
-        {activeTab === 'gallery' && (
-          <GeotagGalleryView
             mediaItems={mediaItems}
             onAddMedia={handleAddMedia}
             onDeleteMedia={handleDeleteMedia}
-            isOnline={isOnline}
-            customGeminiApiKey={settings.customGeminiApiKey}
-          />
-        )}
-
-        {activeTab === 'worldTime' && (
-          <WorldClockView
-            onAskAboutCountry={(country, formattedTime) => {
+            onImageGenerated={handleImageGenerated}
+            onRecordTranslationMetric={handleRecordTranslationMetric}
+            onSendToChat={(text) => {
+              setChatDraft({ id: Date.now(), text });
               setActiveTab('chat');
-              handleSendMessage({
-                text: `Tell me about ${country.country} (${country.city}), where the current live local time is ${formattedTime}.`,
+            }}
+            onAttachPhotoToChat={(file) => {
+              const reader = new FileReader();
+              reader.onload = (ev) => {
+                const base64 = String(ev.target?.result || '');
+                if (!base64) return;
+                setChatDraft({
+                  id: Date.now(),
+                  image: { base64, mimeType: file.type || 'image/jpeg' },
+                });
+                setActiveTab('chat');
+              };
+              reader.readAsDataURL(file);
+            }}
+            onAttachVideoToChat={({ name, content, frameBase64 }) => {
+              setChatDraft({
+                id: Date.now(),
+                text: `Analyze uploaded video "${name}"`,
+                file: { name, content },
+                ...(frameBase64 ? { image: { base64: frameBase64, mimeType: 'image/jpeg' } } : {}),
+              });
+              setActiveTab('chat');
+            }}
+            onAskAboutCountry={(countryName, city, formattedTime) => {
+              setActiveTab('chat');
+              void handleSendMessage({
+                text: `Tell me about ${countryName} (${city}), where the current live local time is ${formattedTime}.`,
                 targetLanguage: currentSession.targetLanguage || settings.defaultTargetLanguage,
               });
             }}
+            onOpenScannerToChat={(dataUrl, mimeType) => {
+              setChatDraft({
+                id: Date.now(),
+                text: 'Scan, extract all text cleanly (OCR), and summarize this document.',
+                image: { base64: dataUrl, mimeType },
+              });
+              setActiveTab('chat');
+            }}
+            onOpenSettings={() => {
+              setSettingsSection('settings');
+              setActiveTab('settings');
+            }}
           />
         )}
 
-        {activeTab === 'analytics' && <AnalyticsDashboard metrics={metrics} />}
-
-        {activeTab === 'profile' && (
-          <ProfileView
+        {activeTab === 'settings' && (
+          <SettingsView
+            initialSection={settingsSection}
             user={user}
             settings={settings}
-            metrics={metrics}
-            sessionCount={sessions.length}
-            totalMessages={totalMessageCount}
-            onUpdateSettings={handleUpdateSettings}
-            onUpdateUser={handleUpdateUser}
-            onOpenAuth={(mode = 'signin') => {
-              setAuthModalMode(mode);
-              setIsAuthModalOpen(true);
-            }}
-            onSignOut={handleSignOut}
-            onOpenSettings={() => setIsSettingsModalOpen(true)}
-            onOpenAdmin={() => setActiveTab('admin')}
+            sessions={sessions}
+            mediaItems={mediaItems}
+            isOnline={isOnline}
             isOwnerAdmin={isOwnerAdmin}
+            onUpdateUser={handleUpdateUser}
+            onUpdateSettings={handleUpdateSettings}
+            onToggleForceOffline={handleToggleForceOffline}
+            onClearAllData={handleClearAllData}
+            onSignOut={handleSignOut}
+            onOpenInstall={() => setIsInstallModalOpen(true)}
+            onOpenAdmin={() => setActiveTab('admin')}
+            onOpenFullBackup={() => setIsSettingsModalOpen(true)}
           />
         )}
 
         {activeTab === 'admin' && (
-          <AdminDashboardView
-            currentUser={user}
-            onOpenAuth={() => {
-              setAuthModalMode('signin');
-              setIsAuthModalOpen(true);
-            }}
-          />
+          <div className="max-w-6xl mx-auto w-full px-3 sm:px-6 pt-4 pb-28 space-y-3">
+            <button
+              type="button"
+              onClick={() => {
+                setSettingsSection('settings');
+                setActiveTab('settings');
+              }}
+              className="inline-flex items-center gap-2 px-3.5 py-2 rounded-2xl glass-card text-xs font-bold text-purple-200 hover:text-white border border-purple-400/30 cursor-pointer"
+            >
+              <ArrowLeft className="w-3.5 h-3.5" />
+              <span>Back to Settings</span>
+            </button>
+            <AdminDashboardView
+              currentUser={user}
+              onOpenAuth={() => {
+                setAuthModalMode('signin');
+                setIsAuthModalOpen(true);
+              }}
+            />
+          </div>
         )}
       </main>
 
-      {/* Single Clean Creator Attribution Footer (Rendered ONLY outside active chat view) */}
-      {activeTab !== 'chat' && (
-        <footer className="relative z-10 border-t border-white/10 bg-[#090a0f]/80 py-4 px-4 pb-24 lg:pb-5 text-center text-xs text-gray-400">
-          <span>Aadesh AI Global Multilingual Hub</span>
-          <span className="mx-2 text-purple-400">•</span>
-          <span>
-            Built by <strong className="text-purple-300">Aadesh Jaisi</strong>
-          </span>
-        </footer>
-      )}
+      {/* EXACT SIX BOTTOM NAVIGATION BUTTONS: Chat, Analysis, Transfer, Voice, More, Settings */}
+      <NavigationDock
+        activeTab={activeTab === 'admin' ? 'settings' : activeTab}
+        onSelectTab={(tab) => {
+          if (tab === 'settings') {
+            setSettingsSection('settings');
+          }
+          setActiveTab(tab);
+        }}
+        isKeyboardOpen={isKeyboardOpen}
+      />
 
-      {/* FULL SETTINGS MODAL */}
+      {/* FULL ADVANCED SETTINGS & EXPORT BACKUP MODAL */}
       <SettingsModal
         isOpen={isSettingsModalOpen}
         onClose={() => setIsSettingsModalOpen(false)}
@@ -1357,7 +1507,7 @@ export default function App() {
         user={user}
       />
 
-      {/* ANDROID, IOS & DESKTOP STORE INSTALL MODAL */}
+      {/* ANDROID, IOS & DESKTOP INSTALL MODAL */}
       <InstallAppModal
         isOpen={isInstallModalOpen}
         onClose={() => setIsInstallModalOpen(false)}

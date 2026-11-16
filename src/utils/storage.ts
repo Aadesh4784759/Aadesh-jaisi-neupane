@@ -9,9 +9,11 @@ import {
   GeotaggedMedia,
   PersonalTask,
   StudyProgressItem,
+  TransferHistoryEntry,
   UserProfile,
 } from '../types';
 import { INITIAL_BADGES, generateStreakHistory } from './gamification';
+import { detectUserCountry } from './country';
 
 const STORAGE_KEYS = {
   SESSIONS: 'aadesh_ai_sessions_v1',
@@ -20,7 +22,9 @@ const STORAGE_KEYS = {
   SETTINGS: 'aadesh_ai_settings_v1',
   METRICS: 'aadesh_ai_metrics_v1',
   USER: 'aadesh_ai_user_v1',
+  USER_EXTRAS: 'aadesh_ai_user_extras_v1',
   VOICE_HISTORY: 'aadesh_ai_voice_history_v1',
+  TRANSFER_HISTORY: 'aadesh_ai_transfer_history_v1',
   FOLDERS: 'aadesh_ai_folders_v1',
   MEMORIES: 'aadesh_ai_memories_v1',
   TASKS: 'aadesh_ai_tasks_v1',
@@ -48,6 +52,8 @@ export const DEFAULT_USER: UserProfile = {
   email: '',
   avatarUrl: '',
   avatarColor: '#8b5cf6',
+  country: detectUserCountry().country,
+  countryFlag: detectUserCountry().flag,
   provider: 'guest',
   linkedProviders: [],
   isLoggedIn: false,
@@ -86,6 +92,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   screenReaderAnnounce: false,
   streamingResponses: true,
   aiMemoryEnabled: true,
+  notificationsEnabled: true,
+  soundEffects: true,
+  streakReminders: true,
 };
 
 export const INITIAL_METRICS: EngagementMetrics = {
@@ -202,30 +211,12 @@ export const getStoredSessions = (userId?: string): ChatSession[] => {
     if (!raw) {
       const initialSession: ChatSession = {
         id: `session-welcome-${Date.now()}`,
-        title: 'Welcome to Aadesh AI Global Hub',
+        title: 'New Conversation',
         createdAt: Date.now(),
         updatedAt: Date.now(),
         targetLanguage: 'ne',
         category: 'General',
-        messages: [
-          {
-            id: 'm-1',
-            role: 'model',
-            content:
-              'Hello! I am **Aadesh AI Global Hub** (created by **Aadesh Jaisi**), your worldwide multilingual AI assistant powered by Google Gemini.\n\nI can help with:\n- Step-by-step explanations & study guidance\n- Clean programming help with formatted code blocks\n- Multilingual translation across **English, नेपाली, हिन्दी, اردو, العربية** & 15+ languages\n- Photo, file & hands-free voice understanding\n\nHow can I assist you today?',
-            translation:
-              'नमस्ते! म **आदेश एआई ग्लोबल हब** हुँ (निर्माता: **आदेश जैसी**)। म तपाईंलाई अध्ययन, प्रोग्रामिङ, तस्बिर विश्लेषण, र नेपाली/अङ्ग्रेजी लगायत विभिन्न भाषामा सहयोग गर्न तयार छु। आज म के सहयोग गर्न सक्छु?',
-            translationLanguage: 'ne',
-            detectedLanguage: 'en',
-            timestamp: Date.now(),
-            sentiment: 'positive',
-            suggestedQuestions: [
-              'नेपालीमा अनुवाद गर्नुहोस् (Translate to Nepali)',
-              'Explain how neural networks work step by step',
-              'Help me write a clean TypeScript or Python function',
-            ],
-          },
-        ],
+        messages: [],
       };
       saveStoredSessions([initialSession], userId);
       return [initialSession];
@@ -599,6 +590,58 @@ export const saveStoredAutomationLogs = (
     localStorage.setItem(key, JSON.stringify(logs.slice(0, 60)));
   } catch (err) {
     console.error('Failed to save automation logs:', err);
+  }
+};
+
+export interface UserLocalExtras {
+  country?: string;
+  countryFlag?: string;
+  customAvatarDataUrl?: string;
+  avatarColor?: string;
+}
+
+export const getUserLocalExtras = (userId?: string): UserLocalExtras => {
+  try {
+    if (!userId) return {};
+    const raw = localStorage.getItem(`${STORAGE_KEYS.USER_EXTRAS}_${userId}`);
+    if (!raw) return {};
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
+};
+
+export const saveUserLocalExtras = (userId: string, patch: UserLocalExtras): void => {
+  try {
+    if (!userId) return;
+    const prev = getUserLocalExtras(userId);
+    localStorage.setItem(`${STORAGE_KEYS.USER_EXTRAS}_${userId}`, JSON.stringify({ ...prev, ...patch }));
+  } catch (err) {
+    console.error('Failed to save local profile extras:', err);
+  }
+};
+
+export const getStoredTransferHistory = (userId?: string): TransferHistoryEntry[] => {
+  try {
+    const key = userId ? `${STORAGE_KEYS.TRANSFER_HISTORY}_${userId}` : STORAGE_KEYS.TRANSFER_HISTORY;
+    const raw = localStorage.getItem(key);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+};
+
+export const saveStoredTransferHistory = (
+  entries: TransferHistoryEntry[],
+  userId?: string
+): void => {
+  try {
+    const key = userId ? `${STORAGE_KEYS.TRANSFER_HISTORY}_${userId}` : STORAGE_KEYS.TRANSFER_HISTORY;
+    localStorage.setItem(key, JSON.stringify(entries.slice(0, 60)));
+  } catch (err) {
+    console.error('Failed to save transfer history:', err);
   }
 };
 
