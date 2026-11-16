@@ -27,7 +27,7 @@ service cloud.firestore {
     // Verified Platform Owner / Admin check
     function isAdmin() {
       return isSignedIn() && (
-        (request.auth.token.email == 'aadeshjaisi6@gmail.com'
+        (request.auth.token.email == 'aadeshjaisi@gmail.com'
           && request.auth.token.email_verified == true)
         || exists(/databases/$(database)/documents/admins/$(request.auth.uid))
       );

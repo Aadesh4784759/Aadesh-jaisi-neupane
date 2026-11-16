@@ -12,7 +12,7 @@ const safeDirname =
   typeof import.meta !== 'undefined' && import.meta.url
     ? path.dirname(fileURLToPath(import.meta.url))
     : process.cwd();
-const OWNER_ADMIN_EMAIL = (process.env.ADMIN_EMAIL || 'aadeshjaisi6@gmail.com').trim().toLowerCase();
+const OWNER_ADMIN_EMAIL = (process.env.ADMIN_EMAIL || 'aadeshjaisi@gmail.com').trim().toLowerCase();
 
 interface AuthenticatedFirebaseUser {
   uid: string;
