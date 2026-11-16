@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { User as FirebaseUser } from 'firebase/auth';
 import confetti from 'canvas-confetti';
 import {
   AIConnectionState,
@@ -45,6 +46,8 @@ import { ImageStudioView } from './components/ImageStudioView';
 import { ProfileView } from './components/ProfileView';
 import { AdminDashboardView } from './components/AdminDashboardView';
 import { WorldClockView } from './components/WorldClockView';
+import { AutomationHubView } from './components/AutomationHubView';
+import { MandatoryAuthGate } from './components/MandatoryAuthGate';
 import { SettingsModal } from './components/SettingsModal';
 import { AuthModal } from './components/AuthModal';
 import { GamificationModal } from './components/GamificationModal';
@@ -57,11 +60,13 @@ import {
   subscribeToAuth,
   syncUserProfileToFirestore,
   loadUserProfileFromFirestore,
+  loadConversationsFromFirestore,
   saveConversationAndMessagesToFirestore,
   saveSingleMessageToFirestore,
   deleteConversationFromFirestore,
   recordUsageAnalyticsToFirestore,
   subscribeToPlatformAnnouncement,
+  getAuthHeaders,
   logOut,
 } from './utils/firebase';
 
@@ -95,20 +100,105 @@ export default function App() {
     maintenanceMode?: boolean;
   } | null>(null);
   const isSendingRef = useRef<boolean>(false);
+  const activeFbUidRef = useRef<string | null>(null);
+  const [fbAuthUser, setFbAuthUser] = useState<FirebaseUser | null>(null);
   const [isBrowserOnline, setIsBrowserOnline] = useState<boolean>(
     typeof navigator !== 'undefined' ? navigator.onLine : true
   );
   const [isKeyboardOpen, setIsKeyboardOpen] = useState<boolean>(false);
   const [isAuthInitialized, setIsAuthInitialized] = useState<boolean>(false);
 
-  const isAppReady = isAuthInitialized && aiStatus !== 'connecting';
+  const isAuthenticatedVerified = Boolean(fbAuthUser && fbAuthUser.emailVerified);
+  const isAppReady = isAuthInitialized && (isAuthenticatedVerified ? aiStatus !== 'connecting' : true);
 
   const isOnline = isBrowserOnline && !settings.offlineModeForce;
   const isOwnerAdmin = Boolean(
-    user.isLoggedIn &&
+    isAuthenticatedVerified &&
+      user.isLoggedIn &&
       user.email?.toLowerCase() === OWNER_ADMIN_EMAIL &&
       user.role === 'admin'
   );
+
+  const hydrateVerifiedUserSession = async (fbUser: FirebaseUser) => {
+    activeFbUidRef.current = fbUser.uid;
+    const emailLower = (fbUser.email || '').toLowerCase();
+    const isVerifiedOwner = emailLower === OWNER_ADMIN_EMAIL && fbUser.emailVerified;
+    const cleanName =
+      fbUser.displayName || (fbUser.email ? fbUser.email.split('@')[0] : 'Member');
+    const cleanHandle = cleanName.toLowerCase().replace(/[^a-z0-9_]/g, '') || 'member';
+    const createdAtMs = fbUser.metadata.creationTime
+      ? new Date(fbUser.metadata.creationTime).getTime()
+      : Date.now();
+    const providerName = fbUser.providerData[0]?.providerId?.includes('google') ? 'google' : 'email';
+
+    const fsProfile = await loadUserProfileFromFirestore(fbUser.uid).catch(() => null);
+    if (activeFbUidRef.current !== fbUser.uid) return;
+
+    setUser((prev) => {
+      const baseUser = prev.id === fbUser.uid ? prev : { ...DEFAULT_USER };
+      const updated: UserProfile = {
+        ...baseUser,
+        id: fbUser.uid,
+        name: fsProfile?.name || cleanName,
+        username: fsProfile?.username || cleanHandle,
+        email: fbUser.email || baseUser.email || '',
+        avatarUrl: fbUser.photoURL || fsProfile?.avatarUrl || baseUser.avatarUrl || '',
+        provider: providerName,
+        isLoggedIn: true,
+        role: isVerifiedOwner ? 'admin' : fsProfile?.role || 'user',
+        status: fsProfile?.status || 'active',
+        createdAt: fsProfile?.createdAt || createdAtMs,
+        lastActiveAt: Date.now(),
+        preferredLanguage: fsProfile?.preferredLanguage || getStoredSettings().uiLanguage || 'en',
+        linkedProviders: Array.from(
+          new Set([...(baseUser.linkedProviders || []), providerName])
+        ),
+      };
+      saveStoredUser(updated);
+      syncUserProfileToFirestore(updated).catch(() => {});
+      return updated;
+    });
+
+    if (fsProfile?.preferredLanguage) {
+      handleUpdateSettings({ uiLanguage: fsProfile.preferredLanguage });
+    }
+
+    try {
+      const sessionHeaders = await getAuthHeaders();
+      fetch('/api/auth/session', { headers: sessionHeaders }).catch(() => {});
+    } catch {}
+
+    try {
+      const cloudSessions = await loadConversationsFromFirestore(fbUser.uid);
+      if (activeFbUidRef.current !== fbUser.uid) return;
+      if (cloudSessions.length > 0) {
+        const localSessions = getStoredSessions(fbUser.uid);
+        const sessionMap = new Map<string, ChatSession>();
+        for (const s of localSessions) {
+          sessionMap.set(s.id, s);
+        }
+        for (const cs of cloudSessions) {
+          const existing = sessionMap.get(cs.id);
+          if (!existing) {
+            sessionMap.set(cs.id, cs);
+          } else if (
+            cs.messages.length > existing.messages.length ||
+            (cs.messages.length === existing.messages.length && cs.updatedAt > existing.updatedAt)
+          ) {
+            sessionMap.set(cs.id, cs);
+          }
+        }
+        const merged = Array.from(sessionMap.values()).sort((a, b) => b.updatedAt - a.updatedAt);
+        setSessions(merged);
+        saveStoredSessions(merged, fbUser.uid);
+        if (merged[0]?.id) {
+          setCurrentSessionId((prevId) =>
+            merged.some((s) => s.id === prevId) ? prevId : merged[0].id
+          );
+        }
+      }
+    } catch {}
+  };
 
   // Apply dynamic UI color theme derived from selected color theme or user's avatar color
   useEffect(() => {
@@ -170,49 +260,21 @@ export default function App() {
     });
 
     const unsubscribeAuth = subscribeToAuth(async (fbUser) => {
+      setFbAuthUser(fbUser);
       setIsAuthInitialized(true);
-      if (fbUser) {
-        const emailLower = (fbUser.email || '').toLowerCase();
-        const isVerifiedOwner = emailLower === OWNER_ADMIN_EMAIL && fbUser.emailVerified;
-        const cleanName =
-          fbUser.displayName || (fbUser.email ? fbUser.email.split('@')[0] : 'Member');
-        const cleanHandle = cleanName.toLowerCase().replace(/[^a-z0-9_]/g, '') || 'member';
-        const createdAtMs = fbUser.metadata.creationTime
-          ? new Date(fbUser.metadata.creationTime).getTime()
-          : Date.now();
-
-        const fsProfile = await loadUserProfileFromFirestore(fbUser.uid).catch(() => null);
-
-        setUser((prev) => {
-          const updated: UserProfile = {
-            ...prev,
-            id: fbUser.uid,
-            name: fsProfile?.name || cleanName,
-            username: fsProfile?.username || cleanHandle,
-            email: fbUser.email || prev.email || '',
-            avatarUrl: fbUser.photoURL || fsProfile?.avatarUrl || '',
-            provider: fbUser.providerData[0]?.providerId?.includes('google') ? 'google' : 'email',
-            isLoggedIn: true,
-            role: isVerifiedOwner ? 'admin' : fsProfile?.role || 'user',
-            status: fsProfile?.status || 'active',
-            createdAt: fsProfile?.createdAt || createdAtMs,
-            lastActiveAt: Date.now(),
-            preferredLanguage: fsProfile?.preferredLanguage || settings.uiLanguage || 'en',
-            linkedProviders: Array.from(
-              new Set([
-                ...prev.linkedProviders,
-                fbUser.providerData[0]?.providerId?.includes('google') ? 'google' : 'email',
-              ])
-            ),
-          };
-          saveStoredUser(updated);
-          syncUserProfileToFirestore(updated).catch(() => {});
-          return updated;
+      if (fbUser && fbUser.emailVerified) {
+        await hydrateVerifiedUserSession(fbUser);
+      } else {
+        activeFbUidRef.current = null;
+        setUser({
+          ...DEFAULT_USER,
+          id: fbUser?.uid || 'unauthenticated',
+          name: fbUser?.displayName || 'User',
+          username: 'user',
+          email: fbUser?.email || '',
+          isLoggedIn: false,
+          provider: fbUser?.providerData[0]?.providerId?.includes('google') ? 'google' : 'email',
         });
-
-        if (fsProfile?.preferredLanguage && fsProfile.preferredLanguage !== settings.uiLanguage) {
-          handleUpdateSettings({ uiLanguage: fsProfile.preferredLanguage });
-        }
       }
     });
     if (!unsubscribeAuth) {
@@ -294,6 +356,9 @@ export default function App() {
     isVoice?: boolean;
     targetLanguage: string;
   }): Promise<{ reply: string; translation?: string } | void> => {
+    if (!fbAuthUser || !fbAuthUser.emailVerified) {
+      throw new Error('Authentication and email verification required.');
+    }
     if (isSendingRef.current) return;
     isSendingRef.current = true;
 
@@ -382,10 +447,10 @@ export default function App() {
           'Summarize',
         ];
       } else {
-        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-        if (settings.customGeminiApiKey) {
-          headers['x-gemini-api-key'] = settings.customGeminiApiKey;
-        }
+        const headers = await getAuthHeaders({
+          'Content-Type': 'application/json',
+          ...(settings.customGeminiApiKey ? { 'x-gemini-api-key': settings.customGeminiApiKey } : {}),
+        });
 
         const res = await fetch('/api/chat', {
           method: 'POST',
@@ -457,10 +522,10 @@ export default function App() {
 
       // Dedicated backend call for context-aware suggested reply buttons after every AI response
       if (isOnline) {
-        const suggestHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
-        if (settings.customGeminiApiKey) {
-          suggestHeaders['x-gemini-api-key'] = settings.customGeminiApiKey;
-        }
+        const suggestHeaders = await getAuthHeaders({
+          'Content-Type': 'application/json',
+          ...(settings.customGeminiApiKey ? { 'x-gemini-api-key': settings.customGeminiApiKey } : {}),
+        });
         const targetSessionId = currentSession.id;
         void fetch('/api/chat/suggested-replies', {
           method: 'POST',
@@ -600,28 +665,29 @@ export default function App() {
   };
 
   const handleSignOut = async () => {
+    activeFbUidRef.current = null;
     try {
       await logOut();
     } catch {}
-    const guestUser: UserProfile = {
+    setFbAuthUser(null);
+    const signedOutUser: UserProfile = {
       ...DEFAULT_USER,
-      id: `guest-${Date.now()}`,
-      name: 'Guest Explorer',
-      username: 'guest',
+      id: 'unauthenticated',
+      name: 'User',
+      username: 'user',
       email: '',
       phone: '',
       avatarUrl: '',
-      provider: 'guest',
+      provider: 'email',
       role: 'user',
       isLoggedIn: false,
       linkedProviders: [],
       createdAt: Date.now(),
     };
-    setUser(guestUser);
-    saveStoredUser(guestUser);
-    if (activeTab === 'admin') {
-      setActiveTab('chat');
-    }
+    setUser(signedOutUser);
+    saveStoredUser(signedOutUser);
+    setIsAuthModalOpen(false);
+    setActiveTab('chat');
   };
 
   const handleNewSession = (initialCategory?: string) => {
@@ -815,6 +881,9 @@ export default function App() {
   };
 
   const handleTranslateMessage = async (messageId: string, targetLangCode: string): Promise<string> => {
+    if (!fbAuthUser || !fbAuthUser.emailVerified) {
+      throw new Error('Authentication and email verification required.');
+    }
     const targetMsg = currentSession.messages.find((m) => m.id === messageId);
     if (!targetMsg) throw new Error('Message not found');
 
@@ -827,10 +896,10 @@ export default function App() {
     if (!isOnline) {
       translatedText = `[Offline Translated (${targetLangObj.name})] ${targetMsg.content}`;
     } else {
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (settings.customGeminiApiKey) {
-        headers['x-gemini-api-key'] = settings.customGeminiApiKey;
-      }
+      const headers = await getAuthHeaders({
+        'Content-Type': 'application/json',
+        ...(settings.customGeminiApiKey ? { 'x-gemini-api-key': settings.customGeminiApiKey } : {}),
+      });
 
       const res = await fetch('/api/translate', {
         method: 'POST',
@@ -954,8 +1023,15 @@ export default function App() {
 
   const handleClearAllData = () => {
     localStorage.clear();
+    saveStoredSettings(DEFAULT_SETTINGS);
+    if (user.isLoggedIn) {
+      saveStoredUser(user);
+    }
     setSettings(DEFAULT_SETTINGS);
-    setSessions(getStoredSessions());
+    const resetSessions = getStoredSessions(user.id);
+    setSessions(resetSessions);
+    setSessionFolders(getStoredFolders(user.id));
+    setCurrentSessionId(resetSessions[0]?.id || `session-${Date.now()}`);
     setVoiceHistory([]);
     setMediaItems(getStoredMedia());
     setMetrics(getStoredMetrics());
@@ -963,6 +1039,29 @@ export default function App() {
   };
 
   const totalMessageCount = sessions.reduce((acc, s) => acc + s.messages.length, 0);
+
+  if (!isAuthInitialized) {
+    return (
+      <div className="app-shell-scroll relative flex flex-col justify-center items-center min-h-screen max-w-full overflow-x-hidden">
+        <SplashScreen isAppReady={false} theme={settings.theme} />
+      </div>
+    );
+  }
+
+  if (!isAuthenticatedVerified) {
+    return (
+      <div className="app-shell-scroll relative flex flex-col min-h-screen max-w-full overflow-x-hidden selection:bg-purple-500/30 selection:text-purple-200">
+        <SplashScreen isAppReady={isAppReady} theme={settings.theme} />
+        <MandatoryAuthGate
+          firebaseUser={fbAuthUser}
+          onVerifiedComplete={(verifiedUser) => {
+            setFbAuthUser(verifiedUser);
+            void hydrateVerifiedUserSession(verifiedUser);
+          }}
+        />
+      </div>
+    );
+  }
 
   return (
     <div
@@ -1009,6 +1108,7 @@ export default function App() {
           setAuthModalMode(mode);
           setIsAuthModalOpen(true);
         }}
+        onSignOut={handleSignOut}
         onOpenGamification={() => setIsGamificationModalOpen(true)}
         onOpenInstall={() => setIsInstallModalOpen(true)}
       />
@@ -1082,6 +1182,21 @@ export default function App() {
             searchFilter={searchQuery}
             onSearchChange={setSearchQuery}
             isKeyboardOpen={isKeyboardOpen}
+          />
+        )}
+
+        {activeTab === 'automation' && (
+          <AutomationHubView
+            user={user}
+            settings={settings}
+            isOnline={isOnline}
+            onSendToChat={(content) => {
+              setActiveTab('chat');
+              void handleSendMessage({
+                text: content,
+                targetLanguage: currentSession.targetLanguage || settings.defaultTargetLanguage,
+              });
+            }}
           />
         )}
 

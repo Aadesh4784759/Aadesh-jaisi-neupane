@@ -1,6 +1,9 @@
 import {
   AIMemoryItem,
   AppSettings,
+  AutomationConversationTurn,
+  AutomationRunLogItem,
+  AutomationScheduleItem,
   ChatSession,
   EngagementMetrics,
   GeotaggedMedia,
@@ -22,6 +25,9 @@ const STORAGE_KEYS = {
   MEMORIES: 'aadesh_ai_memories_v1',
   TASKS: 'aadesh_ai_tasks_v1',
   STUDY_PROGRESS: 'aadesh_ai_study_progress_v1',
+  AUTOMATION_HISTORY: 'aadesh_ai_automation_history_v1',
+  AUTOMATION_SCHEDULES: 'aadesh_ai_automation_schedules_v1',
+  AUTOMATION_LOGS: 'aadesh_ai_automation_logs_v1',
 };
 
 export const DEFAULT_SESSION_CATEGORIES = [
@@ -517,3 +523,82 @@ export const saveStoredStudyProgress = (items: StudyProgressItem[], userId?: str
     console.error('Failed to save study progress:', err);
   }
 };
+
+export const getStoredAutomationHistory = (userId?: string): AutomationConversationTurn[] => {
+  try {
+    if (!userId) return [];
+    const key = `${STORAGE_KEYS.AUTOMATION_HISTORY}_${userId}`;
+    const raw = localStorage.getItem(key);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+};
+
+export const saveStoredAutomationHistory = (
+  turns: AutomationConversationTurn[],
+  userId?: string
+): void => {
+  try {
+    if (!userId) return;
+    const key = `${STORAGE_KEYS.AUTOMATION_HISTORY}_${userId}`;
+    localStorage.setItem(key, JSON.stringify(turns.slice(-30)));
+  } catch (err) {
+    console.error('Failed to save automation history:', err);
+  }
+};
+
+export const getStoredAutomationSchedules = (userId?: string): AutomationScheduleItem[] => {
+  try {
+    if (!userId) return [];
+    const key = `${STORAGE_KEYS.AUTOMATION_SCHEDULES}_${userId}`;
+    const raw = localStorage.getItem(key);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+};
+
+export const saveStoredAutomationSchedules = (
+  schedules: AutomationScheduleItem[],
+  userId?: string
+): void => {
+  try {
+    if (!userId) return;
+    const key = `${STORAGE_KEYS.AUTOMATION_SCHEDULES}_${userId}`;
+    localStorage.setItem(key, JSON.stringify(schedules.slice(0, 40)));
+  } catch (err) {
+    console.error('Failed to save automation schedules:', err);
+  }
+};
+
+export const getStoredAutomationLogs = (userId?: string): AutomationRunLogItem[] => {
+  try {
+    if (!userId) return [];
+    const key = `${STORAGE_KEYS.AUTOMATION_LOGS}_${userId}`;
+    const raw = localStorage.getItem(key);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+};
+
+export const saveStoredAutomationLogs = (
+  logs: AutomationRunLogItem[],
+  userId?: string
+): void => {
+  try {
+    if (!userId) return;
+    const key = `${STORAGE_KEYS.AUTOMATION_LOGS}_${userId}`;
+    localStorage.setItem(key, JSON.stringify(logs.slice(0, 60)));
+  } catch (err) {
+    console.error('Failed to save automation logs:', err);
+  }
+};
+

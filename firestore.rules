@@ -197,6 +197,63 @@ service cloud.firestore {
         && data.timestamp is string && data.timestamp.size() <= 50;
     }
 
+    function isValidAutomationScheduleDoc(data, userId, scheduleId) {
+      return data.keys().hasAll([
+          'id', 'userId', 'title', 'category', 'frequency', 'timeOfDay',
+          'prompt', 'tone', 'enabled', 'nextRunAt', 'lastStatus', 'runCount',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'userId', 'title', 'category', 'frequency', 'timeOfDay',
+          'dayOfWeek', 'prompt', 'tone', 'targetLanguage', 'enabled',
+          'nextRunAt', 'lastRunAt', 'lastStatus', 'runCount', 'createdAt', 'updatedAt'
+        ])
+        && data.id == scheduleId
+        && data.userId == userId
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 200
+        && data.category in ['emails', 'lead_generation', 'content_creation', 'customer_support', 'business_reports']
+        && data.frequency in ['daily', 'weekly', 'monthly']
+        && data.timeOfDay is string && data.timeOfDay.size() >= 3 && data.timeOfDay.size() <= 10
+        && (!('dayOfWeek' in data) || (data.dayOfWeek is string && data.dayOfWeek.size() <= 16))
+        && data.prompt is string && data.prompt.size() >= 1 && data.prompt.size() <= 2000
+        && data.tone in ['professional', 'friendly', 'creative', 'concise']
+        && (!('targetLanguage' in data) || (data.targetLanguage is string && data.targetLanguage.size() <= 20))
+        && data.enabled is bool
+        && data.nextRunAt is string && data.nextRunAt.size() <= 50
+        && (!('lastRunAt' in data) || (data.lastRunAt is string && data.lastRunAt.size() <= 50))
+        && data.lastStatus in ['idle', 'running', 'success', 'failed']
+        && data.runCount is number && data.runCount >= 0
+        && data.createdAt is string && data.createdAt.size() <= 50
+        && data.updatedAt is string && data.updatedAt.size() <= 50;
+    }
+
+    function isValidAutomationLogDoc(data, userId, logId) {
+      return data.keys().hasAll([
+          'id', 'userId', 'taskTitle', 'category', 'tone',
+          'triggerType', 'status', 'statusMessage', 'outputSummary', 'startedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'userId', 'scheduleId', 'taskTitle', 'category', 'tone',
+          'triggerType', 'status', 'statusMessage', 'outputSummary',
+          'errorMessage', 'modelUsed', 'latencyMs', 'startedAt', 'completedAt'
+        ])
+        && data.id == logId
+        && data.userId == userId
+        && (!('scheduleId' in data) || (data.scheduleId is string && data.scheduleId.size() <= 128))
+        && data.taskTitle is string && data.taskTitle.size() >= 1 && data.taskTitle.size() <= 200
+        && data.category in ['emails', 'lead_generation', 'content_creation', 'customer_support', 'business_reports']
+        && data.tone in ['professional', 'friendly', 'creative', 'concise']
+        && data.triggerType in ['manual', 'scheduled', 'strategy_action']
+        && data.status in ['running', 'success', 'failed']
+        && data.statusMessage is string && data.statusMessage.size() <= 500
+        && data.outputSummary is string && data.outputSummary.size() <= 4000
+        && (!('errorMessage' in data) || (data.errorMessage is string && data.errorMessage.size() <= 1000))
+        && (!('modelUsed' in data) || (data.modelUsed is string && data.modelUsed.size() <= 80))
+        && (!('latencyMs' in data) || (data.latencyMs is number && data.latencyMs >= 0))
+        && data.startedAt is string && data.startedAt.size() <= 50
+        && (!('completedAt' in data) || (data.completedAt is string && data.completedAt.size() <= 50));
+    }
+
     function isValidAnalyticsDoc(data, eventId) {
       return data.keys().hasAll(['id', 'userId', 'eventType', 'dateKey', 'timestamp'])
         && data.keys().hasOnly(['id', 'userId', 'eventType', 'language', 'latencyMs', 'dateKey', 'timestamp'])
@@ -344,6 +401,47 @@ service cloud.firestore {
           && isOwner(userId)
           && isValidGeneratedImageDoc(incoming(), userId, imageId);
         allow delete: if isValidId(userId) && isValidId(imageId) && (isOwner(userId) || isAdmin());
+      }
+
+      // Recurring Automation Schedules Subcollection
+      match /automationSchedules/{scheduleId} {
+        allow get: if isValidId(userId) && isValidId(scheduleId) && (isOwner(userId) || isAdmin());
+        allow list: if isOwner(userId) || isAdmin();
+        allow create: if isValidId(userId) && isValidId(scheduleId)
+          && isOwner(userId)
+          && request.auth.token.email_verified == true
+          && isValidAutomationScheduleDoc(incoming(), userId, scheduleId);
+        allow update: if isValidId(userId) && isValidId(scheduleId)
+          && isOwner(userId)
+          && request.auth.token.email_verified == true
+          && isValidAutomationScheduleDoc(incoming(), userId, scheduleId)
+          && incoming().createdAt == existing().createdAt
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'title', 'category', 'frequency', 'timeOfDay', 'dayOfWeek',
+            'prompt', 'tone', 'targetLanguage', 'enabled',
+            'nextRunAt', 'lastRunAt', 'lastStatus', 'runCount', 'updatedAt'
+          ]);
+        allow delete: if isValidId(userId) && isValidId(scheduleId) && (isOwner(userId) || isAdmin());
+      }
+
+      // Automation Activity Log Subcollection
+      match /automationLogs/{logId} {
+        allow get: if isValidId(userId) && isValidId(logId) && (isOwner(userId) || isAdmin());
+        allow list: if isOwner(userId) || isAdmin();
+        allow create: if isValidId(userId) && isValidId(logId)
+          && isOwner(userId)
+          && request.auth.token.email_verified == true
+          && isValidAutomationLogDoc(incoming(), userId, logId);
+        allow update: if isValidId(userId) && isValidId(logId)
+          && isOwner(userId)
+          && request.auth.token.email_verified == true
+          && isValidAutomationLogDoc(incoming(), userId, logId)
+          && incoming().startedAt == existing().startedAt
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'status', 'statusMessage', 'outputSummary', 'errorMessage',
+            'modelUsed', 'latencyMs', 'completedAt'
+          ]);
+        allow delete: if isValidId(userId) && isValidId(logId) && (isOwner(userId) || isAdmin());
       }
     }
 

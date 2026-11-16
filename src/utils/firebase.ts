@@ -7,6 +7,8 @@ import {
   createUserWithEmailAndPassword,
   signOut,
   sendPasswordResetEmail,
+  sendEmailVerification,
+  reload,
   updateProfile,
   onAuthStateChanged,
   User as FirebaseUser,
@@ -35,6 +37,8 @@ import {
   AIMemoryItem,
   AdminConversationSummary,
   AdminUserRecord,
+  AutomationRunLogItem,
+  AutomationScheduleItem,
   ChatMessage,
   ChatSession,
   GeneratedImageItem,
@@ -174,22 +178,43 @@ export async function signInWithGoogle() {
 
 export async function registerWithEmail(email: string, pass: string, displayName: string) {
   if (!auth) throw new Error('Firebase Auth is not initialized');
-  const credential = await createUserWithEmailAndPassword(auth, email, pass);
+  const credential = await createUserWithEmailAndPassword(auth, email.trim(), pass);
   if (credential.user && displayName.trim()) {
     await updateProfile(credential.user, { displayName: displayName.trim() });
+  }
+  if (credential.user) {
+    try {
+      await sendEmailVerification(credential.user);
+    } catch (err) {
+      console.warn('Initial verification email dispatch notice:', err);
+    }
   }
   return credential.user;
 }
 
 export async function loginWithEmail(email: string, pass: string) {
   if (!auth) throw new Error('Firebase Auth is not initialized');
-  const credential = await signInWithEmailAndPassword(auth, email, pass);
+  const credential = await signInWithEmailAndPassword(auth, email.trim(), pass);
   return credential.user;
+}
+
+export async function resendVerificationEmail() {
+  if (!auth?.currentUser) throw new Error('No user currently signed in');
+  await sendEmailVerification(auth.currentUser);
+}
+
+export async function refreshCurrentUserVerification(): Promise<FirebaseUser | null> {
+  if (!auth?.currentUser) return null;
+  await reload(auth.currentUser);
+  if (auth.currentUser.emailVerified) {
+    await auth.currentUser.getIdToken(true);
+  }
+  return auth.currentUser;
 }
 
 export async function resetPassword(email: string) {
   if (!auth) throw new Error('Firebase Auth is not initialized');
-  return await sendPasswordResetEmail(auth, email);
+  return await sendPasswordResetEmail(auth, email.trim());
 }
 
 export async function updateUserProfile(data: { displayName?: string; photoURL?: string }) {
@@ -203,13 +228,24 @@ export async function logOut() {
   return await signOut(auth);
 }
 
-export async function getCurrentIdToken(): Promise<string | null> {
+export async function getCurrentIdToken(forceRefresh: boolean = false): Promise<string | null> {
   if (!auth?.currentUser) return null;
   try {
-    return await auth.currentUser.getIdToken();
+    return await auth.currentUser.getIdToken(forceRefresh);
   } catch {
     return null;
   }
+}
+
+export async function getAuthHeaders(
+  extraHeaders: Record<string, string> = {}
+): Promise<Record<string, string>> {
+  const token = await getCurrentIdToken();
+  const headers: Record<string, string> = { ...extraHeaders };
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  return headers;
 }
 
 export function subscribeToAuth(callback: (user: FirebaseUser | null) => void) {
@@ -309,6 +345,81 @@ export async function loadUserProfileFromFirestore(uid: string): Promise<Partial
       handleFirestoreError(err, OperationType.GET, path);
     }
     return null;
+  }
+}
+
+export async function loadConversationsFromFirestore(userId: string): Promise<ChatSession[]> {
+  if (!db || !auth?.currentUser || auth.currentUser.uid !== userId) return [];
+  const firestore = db;
+  const uid = safeDocId(userId);
+  const convPath = `users/${uid}/conversations`;
+
+  try {
+    const convSnap = await getDocs(
+      query(collection(firestore, 'users', uid, 'conversations'), orderBy('updatedAt', 'desc'), limit(25))
+    );
+
+    const loaded = await Promise.all(
+      convSnap.docs.map(async (convDoc) => {
+        const data = convDoc.data();
+        const convId = data.id || convDoc.id;
+        let messages: ChatMessage[] = [];
+        const msgPath = `users/${uid}/conversations/${convId}/messages`;
+        try {
+          const msgSnap = await getDocs(
+            query(
+              collection(firestore, 'users', uid, 'conversations', convId, 'messages'),
+              orderBy('timestamp', 'asc'),
+              limit(80)
+            )
+          );
+          messages = msgSnap.docs.map((mDoc) => {
+            const m = mDoc.data();
+            return {
+              id: m.id || mDoc.id,
+              role: m.role === 'user' ? 'user' : m.role === 'participant' ? 'participant' : 'model',
+              senderName: m.senderName,
+              senderAvatarUrl: m.senderAvatarUrl,
+              content: m.content || '',
+              translation: m.translation,
+              translationLanguage: m.translationLanguage,
+              feedback: m.feedback,
+              reactions: m.reactions,
+              userReactions: Array.isArray(m.userReactions) ? m.userReactions : undefined,
+              isPinned: Boolean(m.isPinned),
+              pinnedAt: m.pinnedAt ? new Date(m.pinnedAt).getTime() : undefined,
+              attachmentName: m.attachmentName,
+              imageUrl: m.imageUrl,
+              isVoiceInput: Boolean(m.isVoice),
+              editedAt: m.editedAt ? new Date(m.editedAt).getTime() : undefined,
+              timestamp: m.timestamp ? new Date(m.timestamp).getTime() : Date.now(),
+            };
+          });
+        } catch (err) {
+          if (err instanceof Error && err.message.toLowerCase().includes('permission')) {
+            handleFirestoreError(err, OperationType.LIST, msgPath);
+          }
+        }
+
+        const session: ChatSession = {
+          id: convId,
+          title: data.title || 'Conversation',
+          createdAt: data.createdAt ? new Date(data.createdAt).getTime() : Date.now(),
+          updatedAt: data.updatedAt ? new Date(data.updatedAt).getTime() : Date.now(),
+          targetLanguage: data.language || 'ne',
+          category: data.category || 'General',
+          messages,
+        };
+        return session;
+      })
+    );
+
+    return loaded;
+  } catch (err) {
+    if (err instanceof Error && err.message.toLowerCase().includes('permission')) {
+      handleFirestoreError(err, OperationType.LIST, convPath);
+    }
+    return [];
   }
 }
 
@@ -990,6 +1101,194 @@ export async function deleteGeneratedImageMetaFromFirestore(
   const path = `users/${uid}/generatedImages/${safeId}`;
   try {
     await deleteDoc(doc(db, 'users', uid, 'generatedImages', safeId));
+  } catch (err) {
+    if (err instanceof Error && err.message.toLowerCase().includes('permission')) {
+      handleFirestoreError(err, OperationType.DELETE, path);
+    }
+  }
+}
+
+// ---------------- AUTOMATION SCHEDULES & ACTIVITY LOGS ----------------
+
+export async function saveAutomationScheduleToFirestore(
+  userId: string,
+  item: AutomationScheduleItem
+): Promise<void> {
+  if (!db || !auth?.currentUser || auth.currentUser.uid !== userId) return;
+  const uid = safeDocId(userId);
+  const scheduleId = safeDocId(item.id);
+  const path = `users/${uid}/automationSchedules/${scheduleId}`;
+  try {
+    const payload: Record<string, any> = {
+      id: scheduleId,
+      userId: uid,
+      title: (item.title || 'Recurring Automation').slice(0, 200),
+      category: item.category,
+      frequency: item.frequency,
+      timeOfDay: (item.timeOfDay || '09:00').slice(0, 10),
+      prompt: (item.prompt || 'Run scheduled automation workflow').slice(0, 2000),
+      tone: item.tone,
+      targetLanguage: (item.targetLanguage || 'en').slice(0, 20),
+      enabled: Boolean(item.enabled),
+      nextRunAt: new Date(item.nextRunAt || Date.now()).toISOString(),
+      lastStatus: item.lastStatus || 'idle',
+      runCount: Math.max(0, Number(item.runCount) || 0),
+      createdAt: new Date(item.createdAt || Date.now()).toISOString(),
+      updatedAt: new Date(item.updatedAt || Date.now()).toISOString(),
+    };
+    if (item.dayOfWeek) payload.dayOfWeek = String(item.dayOfWeek).slice(0, 16);
+    if (item.lastRunAt) payload.lastRunAt = new Date(item.lastRunAt).toISOString();
+
+    await setDoc(doc(db, 'users', uid, 'automationSchedules', scheduleId), payload);
+  } catch (err) {
+    if (err instanceof Error && err.message.toLowerCase().includes('permission')) {
+      handleFirestoreError(err, OperationType.WRITE, path);
+    }
+  }
+}
+
+export async function loadAutomationSchedulesFromFirestore(
+  userId: string
+): Promise<AutomationScheduleItem[]> {
+  if (!db || !auth?.currentUser || auth.currentUser.uid !== userId) return [];
+  const uid = safeDocId(userId);
+  const path = `users/${uid}/automationSchedules`;
+  try {
+    const snap = await getDocs(
+      query(collection(db, 'users', uid, 'automationSchedules'), orderBy('updatedAt', 'desc'), limit(40))
+    );
+    return snap.docs.map((d) => {
+      const data = d.data();
+      return {
+        id: data.id || d.id,
+        userId: uid,
+        title: data.title || 'Recurring Task',
+        category: data.category || 'emails',
+        frequency: data.frequency || 'daily',
+        timeOfDay: data.timeOfDay || '09:00',
+        dayOfWeek: data.dayOfWeek,
+        prompt: data.prompt || '',
+        tone: data.tone || 'professional',
+        targetLanguage: data.targetLanguage || 'en',
+        enabled: Boolean(data.enabled),
+        nextRunAt: data.nextRunAt ? new Date(data.nextRunAt).getTime() : Date.now(),
+        lastRunAt: data.lastRunAt ? new Date(data.lastRunAt).getTime() : undefined,
+        lastStatus: data.lastStatus || 'idle',
+        runCount: typeof data.runCount === 'number' ? data.runCount : 0,
+        createdAt: data.createdAt ? new Date(data.createdAt).getTime() : Date.now(),
+        updatedAt: data.updatedAt ? new Date(data.updatedAt).getTime() : Date.now(),
+      };
+    });
+  } catch (err) {
+    if (err instanceof Error && err.message.toLowerCase().includes('permission')) {
+      handleFirestoreError(err, OperationType.LIST, path);
+    }
+    return [];
+  }
+}
+
+export async function deleteAutomationScheduleFromFirestore(
+  userId: string,
+  scheduleId: string
+): Promise<void> {
+  if (!db || !auth?.currentUser || auth.currentUser.uid !== userId) return;
+  const uid = safeDocId(userId);
+  const safeId = safeDocId(scheduleId);
+  const path = `users/${uid}/automationSchedules/${safeId}`;
+  try {
+    await deleteDoc(doc(db, 'users', uid, 'automationSchedules', safeId));
+  } catch (err) {
+    if (err instanceof Error && err.message.toLowerCase().includes('permission')) {
+      handleFirestoreError(err, OperationType.DELETE, path);
+    }
+  }
+}
+
+export async function saveAutomationLogToFirestore(
+  userId: string,
+  logItem: AutomationRunLogItem
+): Promise<void> {
+  if (!db || !auth?.currentUser || auth.currentUser.uid !== userId) return;
+  const uid = safeDocId(userId);
+  const logId = safeDocId(logItem.id);
+  const path = `users/${uid}/automationLogs/${logId}`;
+  try {
+    const payload: Record<string, any> = {
+      id: logId,
+      userId: uid,
+      taskTitle: (logItem.taskTitle || 'Automation Run').slice(0, 200),
+      category: logItem.category,
+      tone: logItem.tone,
+      triggerType: logItem.triggerType || 'manual',
+      status: logItem.status || 'running',
+      statusMessage: (logItem.statusMessage || '').slice(0, 500),
+      outputSummary: (logItem.outputSummary || '').slice(0, 4000),
+      startedAt: new Date(logItem.startedAt || Date.now()).toISOString(),
+    };
+    if (logItem.scheduleId) payload.scheduleId = safeDocId(logItem.scheduleId);
+    if (logItem.errorMessage) payload.errorMessage = String(logItem.errorMessage).slice(0, 1000);
+    if (logItem.modelUsed) payload.modelUsed = String(logItem.modelUsed).slice(0, 80);
+    if (typeof logItem.latencyMs === 'number' && logItem.latencyMs >= 0) {
+      payload.latencyMs = logItem.latencyMs;
+    }
+    if (logItem.completedAt) payload.completedAt = new Date(logItem.completedAt).toISOString();
+
+    await setDoc(doc(db, 'users', uid, 'automationLogs', logId), payload);
+  } catch (err) {
+    if (err instanceof Error && err.message.toLowerCase().includes('permission')) {
+      handleFirestoreError(err, OperationType.WRITE, path);
+    }
+  }
+}
+
+export async function loadAutomationLogsFromFirestore(
+  userId: string
+): Promise<AutomationRunLogItem[]> {
+  if (!db || !auth?.currentUser || auth.currentUser.uid !== userId) return [];
+  const uid = safeDocId(userId);
+  const path = `users/${uid}/automationLogs`;
+  try {
+    const snap = await getDocs(
+      query(collection(db, 'users', uid, 'automationLogs'), orderBy('startedAt', 'desc'), limit(60))
+    );
+    return snap.docs.map((d) => {
+      const data = d.data();
+      return {
+        id: data.id || d.id,
+        userId: uid,
+        scheduleId: data.scheduleId,
+        taskTitle: data.taskTitle || 'Automation Run',
+        category: data.category || 'emails',
+        tone: data.tone || 'professional',
+        triggerType: data.triggerType || 'manual',
+        status: data.status || 'success',
+        statusMessage: data.statusMessage || '',
+        outputSummary: data.outputSummary || '',
+        errorMessage: data.errorMessage,
+        modelUsed: data.modelUsed,
+        latencyMs: typeof data.latencyMs === 'number' ? data.latencyMs : undefined,
+        startedAt: data.startedAt ? new Date(data.startedAt).getTime() : Date.now(),
+        completedAt: data.completedAt ? new Date(data.completedAt).getTime() : undefined,
+      };
+    });
+  } catch (err) {
+    if (err instanceof Error && err.message.toLowerCase().includes('permission')) {
+      handleFirestoreError(err, OperationType.LIST, path);
+    }
+    return [];
+  }
+}
+
+export async function deleteAutomationLogFromFirestore(
+  userId: string,
+  logId: string
+): Promise<void> {
+  if (!db || !auth?.currentUser || auth.currentUser.uid !== userId) return;
+  const uid = safeDocId(userId);
+  const safeId = safeDocId(logId);
+  const path = `users/${uid}/automationLogs/${safeId}`;
+  try {
+    await deleteDoc(doc(db, 'users', uid, 'automationLogs', safeId));
   } catch (err) {
     if (err instanceof Error && err.message.toLowerCase().includes('permission')) {
       handleFirestoreError(err, OperationType.DELETE, path);

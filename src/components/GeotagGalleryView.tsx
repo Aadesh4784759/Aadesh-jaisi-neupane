@@ -21,6 +21,7 @@ import {
 import { GeotaggedMedia, LocationData } from '../types';
 import { PRESET_LOCATIONS, SUPPORTED_LANGUAGES } from '../data/languages';
 import { GeotagPickerModal } from './GeotagPickerModal';
+import { getAuthHeaders } from '../utils/firebase';
 
 const NEAR_ME_RADIUS_KM = 5;
 
@@ -209,10 +210,10 @@ export const GeotagGalleryView: React.FC<GeotagGalleryViewProps> = ({
         return;
       }
 
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (customGeminiApiKey) {
-        headers['x-gemini-api-key'] = customGeminiApiKey;
-      }
+      const headers = await getAuthHeaders({
+        'Content-Type': 'application/json',
+        ...(customGeminiApiKey ? { 'x-gemini-api-key': customGeminiApiKey } : {}),
+      });
       const res = await fetch('/api/analyze-geotag', {
         method: 'POST',
         headers,

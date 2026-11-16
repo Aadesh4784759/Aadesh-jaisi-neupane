@@ -15,6 +15,7 @@ import {
   Info,
 } from 'lucide-react';
 import { AppSettings } from '../types';
+import { getAuthHeaders } from '../utils/firebase';
 
 interface UploadedDocument {
   id: string;
@@ -137,10 +138,10 @@ export const DocumentAssistantModal: React.FC<DocumentAssistantModalProps> = ({
         return;
       }
 
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (settings.customGeminiApiKey) {
-        headers['x-gemini-api-key'] = settings.customGeminiApiKey;
-      }
+      const headers = await getAuthHeaders({
+        'Content-Type': 'application/json',
+        ...(settings.customGeminiApiKey ? { 'x-gemini-api-key': settings.customGeminiApiKey } : {}),
+      });
 
       const res = await fetch('/api/summarize', {
         method: 'POST',

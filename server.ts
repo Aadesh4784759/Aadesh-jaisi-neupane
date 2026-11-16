@@ -1,4 +1,4 @@
-import express, { Request, Response } from 'express';
+import express, { NextFunction, Request, Response } from 'express';
 import dotenv from 'dotenv';
 import fs from 'fs';
 import path from 'path';
@@ -14,9 +14,19 @@ const safeDirname =
     : process.cwd();
 const OWNER_ADMIN_EMAIL = (process.env.ADMIN_EMAIL || 'aadeshjaisi6@gmail.com').trim().toLowerCase();
 
+interface AuthenticatedFirebaseUser {
+  uid: string;
+  email: string;
+  displayName?: string;
+  emailVerified: boolean;
+  createdAt?: string;
+  isOwnerAdmin: boolean;
+}
+
 function getFirebaseWebApiKey(): string {
   const candidates = [
     path.resolve(safeDirname, 'firebase-applet-config.json'),
+    path.resolve(safeDirname, '..', 'firebase-applet-config.json'),
     path.resolve(process.cwd(), 'firebase-applet-config.json'),
   ];
   for (const configPath of candidates) {
@@ -31,21 +41,32 @@ function getFirebaseWebApiKey(): string {
   return String(process.env.FIREBASE_API_KEY || process.env.VITE_FIREBASE_API_KEY || '').trim();
 }
 
-async function verifyOwnerFromRequest(req: Request): Promise<{
+async function verifyFirebaseUserFromRequest(req: Request): Promise<{
   ok: boolean;
   status: number;
+  code?: string;
   error?: string;
-  user?: { uid: string; email: string; displayName?: string; createdAt?: string };
+  user?: AuthenticatedFirebaseUser;
 }> {
   const authHeader = String(req.headers.authorization || '');
   const idToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
   if (!idToken) {
-    return { ok: false, status: 401, error: 'Authentication token required for owner dashboard.' };
+    return {
+      ok: false,
+      status: 401,
+      code: 'AUTH_REQUIRED',
+      error: 'Authentication required. Please sign in to access Aadesh AI.',
+    };
   }
 
   const firebaseApiKey = getFirebaseWebApiKey();
   if (!firebaseApiKey) {
-    return { ok: false, status: 503, error: 'Firebase web configuration is unavailable on server.' };
+    return {
+      ok: false,
+      status: 503,
+      code: 'AUTH_UNAVAILABLE',
+      error: 'Firebase authentication configuration is unavailable on server.',
+    };
   }
 
   try {
@@ -59,22 +80,33 @@ async function verifyOwnerFromRequest(req: Request): Promise<{
     );
 
     if (!lookupRes.ok) {
-      return { ok: false, status: 401, error: 'Invalid or expired Firebase authentication session.' };
+      return {
+        ok: false,
+        status: 401,
+        code: 'INVALID_TOKEN',
+        error: 'Invalid or expired authentication session. Please sign in again.',
+      };
     }
 
     const data = await lookupRes.json();
     const user = Array.isArray(data?.users) ? data.users[0] : null;
-    if (!user?.email) {
-      return { ok: false, status: 401, error: 'Unable to resolve authenticated account.' };
+    if (!user?.localId || !user?.email) {
+      return {
+        ok: false,
+        status: 401,
+        code: 'INVALID_ACCOUNT',
+        error: 'Unable to resolve authenticated account.',
+      };
     }
 
     const email = String(user.email).trim().toLowerCase();
     const emailVerified = Boolean(user.emailVerified);
-    if (email !== OWNER_ADMIN_EMAIL || !emailVerified) {
+    if (!emailVerified) {
       return {
         ok: false,
         status: 403,
-        error: 'Access restricted: Only the verified platform owner can access Admin controls.',
+        code: 'EMAIL_NOT_VERIFIED',
+        error: 'Please verify your email address before accessing Aadesh AI.',
       };
     }
 
@@ -82,15 +114,70 @@ async function verifyOwnerFromRequest(req: Request): Promise<{
       ok: true,
       status: 200,
       user: {
-        uid: String(user.localId || ''),
+        uid: String(user.localId),
         email,
         displayName: user.displayName,
+        emailVerified,
         createdAt: user.createdAt,
+        isOwnerAdmin: email === OWNER_ADMIN_EMAIL && emailVerified,
       },
     };
   } catch {
-    return { ok: false, status: 500, error: 'Failed to verify owner credentials with authentication server.' };
+    return {
+      ok: false,
+      status: 500,
+      code: 'AUTH_LOOKUP_FAILED',
+      error: 'Failed to verify credentials with authentication server.',
+    };
   }
+}
+
+async function requireAuthenticatedUser(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  const result = await verifyFirebaseUserFromRequest(req);
+  if (!result.ok || !result.user) {
+    res.status(result.status).json({
+      ok: false,
+      code: result.code || 'AUTH_REQUIRED',
+      error: result.error || 'Authentication required.',
+    });
+    return;
+  }
+  (req as Request & { authUser?: AuthenticatedFirebaseUser }).authUser = result.user;
+  next();
+}
+
+async function verifyOwnerFromRequest(req: Request): Promise<{
+  ok: boolean;
+  status: number;
+  error?: string;
+  user?: AuthenticatedFirebaseUser;
+}> {
+  const result = await verifyFirebaseUserFromRequest(req);
+  if (!result.ok || !result.user) {
+    return {
+      ok: false,
+      status: result.status,
+      error: result.error || 'Authentication token required for owner dashboard.',
+    };
+  }
+
+  if (!result.user.isOwnerAdmin) {
+    return {
+      ok: false,
+      status: 403,
+      error: 'Access restricted: Only the verified platform owner can access Admin controls.',
+    };
+  }
+
+  return {
+    ok: true,
+    status: 200,
+    user: result.user,
+  };
 }
 
 const getCliArg = (flag: string): string | undefined => {
@@ -119,8 +206,17 @@ const PORT =
 const HOST = getCliArg('--host') || '0.0.0.0';
 
 const app = express();
+app.set('trust proxy', 1);
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
+
+app.get('/api', (_req: Request, res: Response): void => {
+  res.json({
+    ok: true,
+    service: 'Aadesh AI Global Hub API',
+    health: '/api/health',
+  });
+});
 
 // Supported active Flash models ordered by priority
 const SUPPORTED_FLASH_FALLBACKS = [
@@ -323,6 +419,7 @@ app.get('/api/health', (req: Request, res: Response): void => {
 
   res.json({
     status: 'ok',
+    authRequired: true,
     aiService: ai ? 'connected' : 'disconnected',
     isLiveAI: Boolean(ai),
     model: candidates[0],
@@ -332,8 +429,17 @@ app.get('/api/health', (req: Request, res: Response): void => {
   });
 });
 
+// AUTHENTICATED SESSION VERIFICATION ENDPOINT
+app.get('/api/auth/session', requireAuthenticatedUser, (req: Request, res: Response): void => {
+  const authUser = (req as Request & { authUser?: AuthenticatedFirebaseUser }).authUser;
+  res.json({
+    authenticated: true,
+    user: authUser,
+  });
+});
+
 // 1. CHAT & MULTIMODAL ENDPOINT (Live Google Gemini SDK)
-app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
+app.post('/api/chat', requireAuthenticatedUser, async (req: Request, res: Response): Promise<void> => {
   const startTime = Date.now();
   try {
     const {
@@ -522,7 +628,7 @@ Tone requirement: ${personaInstruction}${memoryBlock}`;
 });
 
 // 1B. STREAMING CHAT ENDPOINT (SSE via Gemini generateContentStream)
-app.post('/api/chat/stream', async (req: Request, res: Response): Promise<void> => {
+app.post('/api/chat/stream', requireAuthenticatedUser, async (req: Request, res: Response): Promise<void> => {
   try {
     const {
       messages = [],
@@ -648,7 +754,7 @@ Tone: ${personaInstruction}${memoryBlock}`;
 });
 
 // 1C. CONTEXT-AWARE SUGGESTED REPLIES ENDPOINT
-app.post('/api/chat/suggested-replies', async (req: Request, res: Response): Promise<void> => {
+app.post('/api/chat/suggested-replies', requireAuthenticatedUser, async (req: Request, res: Response): Promise<void> => {
   const startTime = Date.now();
   const {
     userMessage = '',
@@ -801,7 +907,7 @@ ${trimmedReply.slice(0, 1600)}
 });
 
 // Key validation route to verify a user-provided or environment API key
-app.post('/api/gemini/verify-key', async (req: Request, res: Response): Promise<void> => {
+app.post('/api/gemini/verify-key', requireAuthenticatedUser, async (req: Request, res: Response): Promise<void> => {
   try {
     const customKey = (req.body?.apiKey as string) || (req.headers['x-gemini-api-key'] as string);
     const ai = getGeminiClient(customKey);
@@ -840,7 +946,7 @@ app.post('/api/gemini/verify-key', async (req: Request, res: Response): Promise<
 });
 
 // 2. DEDICATED REAL-TIME TRANSLATION & GRAMMAR ENDPOINT
-app.post('/api/translate', async (req: Request, res: Response): Promise<void> => {
+app.post('/api/translate', requireAuthenticatedUser, async (req: Request, res: Response): Promise<void> => {
   const startTime = Date.now();
   const {
     text,
@@ -934,7 +1040,7 @@ ${String(text).slice(0, 18000)}
 });
 
 // 2B. CONCISE MESSAGE SUMMARIZER ENDPOINT (For Quick Context menu)
-app.post('/api/summarize', async (req: Request, res: Response): Promise<void> => {
+app.post('/api/summarize', requireAuthenticatedUser, async (req: Request, res: Response): Promise<void> => {
   const startTime = Date.now();
   const rawText = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
   const targetLang = typeof req.body?.targetLanguage === 'string' ? req.body.targetLanguage.trim() : '';
@@ -1024,7 +1130,7 @@ ${clippedText}
 });
 
 // 3. MEDIA GEOTAG ANALYZER ENDPOINT
-app.post('/api/analyze-geotag', async (req: Request, res: Response): Promise<void> => {
+app.post('/api/analyze-geotag', requireAuthenticatedUser, async (req: Request, res: Response): Promise<void> => {
   try {
     const { imageData, imageMimeType = 'image/jpeg', locationName, lat, lng } = req.body;
     if (!imageData || typeof imageData !== 'string') {
@@ -1497,14 +1603,14 @@ async function generateRasterImageWithGemini(params: {
   };
 }
 
-app.get('/api/images/models', (_req: Request, res: Response): void => {
+app.get('/api/images/models', requireAuthenticatedUser, (_req: Request, res: Response): void => {
   res.json({
     defaultModel: 'gemini-3.1-flash-lite-image',
     models: Object.values(IMAGE_MODEL_CAPABILITIES),
   });
 });
 
-app.post('/api/images/generate', async (req: Request, res: Response): Promise<void> => {
+app.post('/api/images/generate', requireAuthenticatedUser, async (req: Request, res: Response): Promise<void> => {
   const customKey = (req.headers['x-gemini-api-key'] as string) || req.body?.customApiKey;
   const ai = getGeminiClient(customKey);
   if (!ai) {
@@ -1537,7 +1643,7 @@ app.post('/api/images/generate', async (req: Request, res: Response): Promise<vo
   res.json(result);
 });
 
-app.post('/api/studio/image', async (req: Request, res: Response): Promise<void> => {
+app.post('/api/studio/image', requireAuthenticatedUser, async (req: Request, res: Response): Promise<void> => {
   const startTime = Date.now();
   try {
     const {
@@ -1680,7 +1786,7 @@ Use clean gradients, layered geometric and organic paths, balanced colors, and z
 });
 
 // 6. CODING LAB ENDPOINT (HTML, CSS, JS, Python, SQL)
-app.post('/api/coding', async (req: Request, res: Response): Promise<void> => {
+app.post('/api/coding', requireAuthenticatedUser, async (req: Request, res: Response): Promise<void> => {
   const startTime = Date.now();
   try {
     const {
@@ -1759,7 +1865,7 @@ If language is html, css, or javascript and mode is "build" or "lesson", also po
 });
 
 // 7. STUDY HUB ENDPOINT (Notes, MCQ Quizzes, Practice Tests, Math, English/Nepali)
-app.post('/api/study', async (req: Request, res: Response): Promise<void> => {
+app.post('/api/study', requireAuthenticatedUser, async (req: Request, res: Response): Promise<void> => {
   const startTime = Date.now();
   try {
     const {
@@ -1850,7 +1956,7 @@ If mode is "mcq", "practice_test", or "exam_prep", generate ${count} well-crafte
 });
 
 // 8. PDF & DOCUMENT AI ENDPOINT (PDF, DOCX, CSV, TXT, MD, JSON)
-app.post('/api/document', async (req: Request, res: Response): Promise<void> => {
+app.post('/api/document', requireAuthenticatedUser, async (req: Request, res: Response): Promise<void> => {
   const startTime = Date.now();
   try {
     const {
@@ -1963,7 +2069,7 @@ app.post('/api/document', async (req: Request, res: Response): Promise<void> => 
 });
 
 // 9. WEB SEARCH & RESEARCH ENDPOINT (Google Search + URL Context Grounding)
-app.post('/api/research', async (req: Request, res: Response): Promise<void> => {
+app.post('/api/research', requireAuthenticatedUser, async (req: Request, res: Response): Promise<void> => {
   const startTime = Date.now();
   try {
     const {
@@ -2045,7 +2151,7 @@ ${cleanUrls.length > 0 ? `Reference URLs:\n${cleanUrls.join('\n')}` : ''}`;
 });
 
 // 10. VIDEO ASSISTANT ENDPOINT (Video understanding, summaries, SRT subtitles, transcript & scripts)
-app.post('/api/video', async (req: Request, res: Response): Promise<void> => {
+app.post('/api/video', requireAuthenticatedUser, async (req: Request, res: Response): Promise<void> => {
   const startTime = Date.now();
   try {
     const {
@@ -2127,7 +2233,7 @@ Return a helpful summary, cleaned speech transcript (if applicable), valid SRT s
 });
 
 // 11. PERSONAL AI ASSISTANT ENDPOINT (Daily Planner, Task Breakdown, Email & Writing Drafter)
-app.post('/api/assistant', async (req: Request, res: Response): Promise<void> => {
+app.post('/api/assistant', requireAuthenticatedUser, async (req: Request, res: Response): Promise<void> => {
   const startTime = Date.now();
   try {
     const {
@@ -2215,8 +2321,8 @@ Provide structured Markdown output in "content", plus an optional "emailSubject"
   }
 });
 
-// 12. AI AGENT HUB ENDPOINT (Multi-step Planning + Explicit Approval Actions)
-app.post('/api/agent', async (req: Request, res: Response): Promise<void> => {
+// 12. AI AGENT HUB ENDPOINT (Multi-step Planning + Priority + Estimated Time + Explicit Approval Actions)
+app.post('/api/agent', requireAuthenticatedUser, async (req: Request, res: Response): Promise<void> => {
   const startTime = Date.now();
   try {
     const {
@@ -2252,7 +2358,11 @@ app.post('/api/agent', async (req: Request, res: Response): Promise<void> => {
 Goal: ${String(goal).slice(0, 2500)}
 ${context ? `Additional Context: ${String(context).slice(0, 2000)}` : ''}
 
-Create a clear 3 to 5 step execution plan with substantive Markdown output for each step, AND propose 1 to 3 optional actions in "proposedActions" (types allowed: "save_memory", "create_task", "draft_email", "download_file") that MUST wait for explicit user approval before taking effect.`;
+Create a clear 3 to 5 step execution plan with:
+- priority ("high" | "medium" | "low") reflecting execution urgency/impact
+- estimatedMinutes (realistic integer minutes between 1 and 45) and estimatedTime (e.g. "2 min", "5 min", "10 min")
+- substantive Markdown output for each step
+AND propose 1 to 3 optional actions in "proposedActions" (types allowed: "save_memory", "create_task", "draft_email", "download_file") that MUST wait for explicit user approval before taking effect.`;
 
     const { response, modelUsed } = await generateWithModelFallback(
       ai,
@@ -2274,9 +2384,12 @@ Create a clear 3 to 5 step execution plan with substantive Markdown output for e
                     stepNumber: { type: Type.INTEGER },
                     title: { type: Type.STRING },
                     detail: { type: Type.STRING },
+                    priority: { type: Type.STRING, description: 'high, medium, or low' },
+                    estimatedMinutes: { type: Type.INTEGER, description: 'Estimated duration in minutes' },
+                    estimatedTime: { type: Type.STRING, description: 'Short readable duration such as ~2 min' },
                     output: { type: Type.STRING },
                   },
-                  required: ['stepNumber', 'title', 'detail', 'output'],
+                  required: ['stepNumber', 'title', 'detail', 'priority', 'estimatedMinutes', 'estimatedTime', 'output'],
                 },
               },
               proposedActions: {
@@ -2325,13 +2438,32 @@ Create a clear 3 to 5 step execution plan with substantive Markdown output for e
       agentName: parsed.agentName || 'Aadesh AI Agent',
       summary: parsed.summary || '',
       steps: Array.isArray(parsed.steps)
-        ? parsed.steps.map((s: any, idx: number) => ({
-            stepNumber: s.stepNumber || idx + 1,
-            title: s.title || `Step ${idx + 1}`,
-            detail: s.detail || '',
-            output: s.output || '',
-            status: 'completed',
-          }))
+        ? parsed.steps.map((s: any, idx: number) => {
+            const rawPriority = String(s.priority || '').toLowerCase().trim();
+            const priority = ['high', 'medium', 'low'].includes(rawPriority)
+              ? rawPriority
+              : idx === 0
+              ? 'high'
+              : idx === 1
+              ? 'medium'
+              : 'low';
+            const estMins = Math.max(1, Math.min(120, Number(s.estimatedMinutes) || (idx === 0 ? 2 : 3)));
+            const estLabel =
+              typeof s.estimatedTime === 'string' && s.estimatedTime.trim()
+                ? s.estimatedTime.trim()
+                : `${estMins} min`;
+            return {
+              id: `step-${Date.now()}-${idx + 1}`,
+              stepNumber: s.stepNumber || idx + 1,
+              title: s.title || `Step ${idx + 1}`,
+              detail: s.detail || '',
+              priority,
+              estimatedMinutes: estMins,
+              estimatedTime: estLabel,
+              output: s.output || '',
+              status: 'completed',
+            };
+          })
         : [],
       proposedActions: normalizedActions,
       modelUsed,
@@ -2341,6 +2473,293 @@ Create a clear 3 to 5 step execution plan with substantive Markdown output for e
     res.status(isAuthFailure(err) ? 401 : 502).json({
       error: sanitizeErrorMessage(err),
       latencyMs: Date.now() - startTime,
+    });
+  }
+});
+
+// 13. INTELLIGENT AI AUTOMATION HUB ENDPOINT
+app.post('/api/automation/suggest', requireAuthenticatedUser, async (req: Request, res: Response): Promise<void> => {
+  const startTime = Date.now();
+  try {
+    const {
+      category = 'emails',
+      tone = 'professional',
+      userContext = '',
+      conversationHistory = [],
+      targetLanguage = 'en',
+      memoryContext,
+    } = req.body || {};
+
+    const validCategories: Record<string, { label: string; focus: string; service: string }> = {
+      emails: {
+        label: 'Emails',
+        focus: 'Inbox triage, priority follow-ups, high-converting email templates, and thread summarization',
+        service: 'Gmail / Workspace Email OAuth',
+      },
+      lead_generation: {
+        label: 'Lead Generation',
+        focus: 'Ideal customer targeting, multi-touch outreach sequences, qualification criteria, and CRM scoring',
+        service: 'CRM / LinkedIn Outreach Connector',
+      },
+      content_creation: {
+        label: 'Content Creation',
+        focus: 'High-impact hooks, omnichannel content calendars, repurposing workflows, and localized copy',
+        service: 'Publishing & Social Scheduler API',
+      },
+      customer_support: {
+        label: 'Customer Support',
+        focus: 'Rapid ticket triage, empathetic troubleshooting playbooks, SLA escalation rules, and FAQ macros',
+        service: 'Helpdesk / Zendesk / Intercom Integration',
+      },
+      business_reports: {
+        label: 'Business Reports',
+        focus: 'Automated weekly KPI synthesis, anomaly detection, executive scorecards, and stakeholder briefs',
+        service: 'Google Sheets / Analytics Data Connector',
+      },
+    };
+
+    const validTones: Record<string, string> = {
+      professional: 'Tone: Professional — crisp, executive, structured, data-driven, and persuasive.',
+      friendly: 'Tone: Friendly — warm, approachable, conversational, and relationship-first.',
+      creative: 'Tone: Creative — vivid, original, storytelling-driven, and memorable.',
+      concise: 'Tone: Concise — ultra-direct, high-signal, punchy, and zero filler.',
+    };
+
+    const catInfo = validCategories[String(category)] || validCategories.emails;
+    const toneInstruction = validTones[String(tone)] || validTones.professional;
+    const targetLangName = LANGUAGE_NAMES[String(targetLanguage)] || String(targetLanguage) || 'English';
+
+    const customKey = (req.headers['x-gemini-api-key'] as string) || req.body?.customApiKey;
+    const ai = getGeminiClient(customKey);
+    if (!ai) {
+      res.status(400).json({ error: 'Gemini API key is not configured.' });
+      return;
+    }
+
+    const historyText = Array.isArray(conversationHistory)
+      ? conversationHistory
+          .slice(-6)
+          .map((turn: any) => {
+            const promptLine = String(turn?.userPrompt || '').trim();
+            const replyLine = String(turn?.assistantMessage || '').trim();
+            return [
+              promptLine ? `User (${turn?.tone || tone}): ${promptLine.slice(0, 350)}` : '',
+              replyLine ? `Aadesh Automation AI: ${replyLine.slice(0, 500)}` : '',
+            ]
+              .filter(Boolean)
+              .join('\n');
+          })
+          .filter(Boolean)
+          .join('\n---\n')
+      : '';
+
+    const memoryBlock = buildMemoryBlock(memoryContext);
+    const prompt = `You are Aadesh AI Intelligent Automation Hub strategist answering the 2026 automation priority workflow.
+Selected Automation Pillar: ${catInfo.label} (${catInfo.focus})
+Required Language: ${targetLangName}
+${toneInstruction}${memoryBlock}
+
+HONESTY & ACTION RULE:
+- Do NOT pretend external emails were sent, live CRM records were updated, or third-party apps were triggered unless authorized/connected.
+- Deliver concrete, immediately usable drafts, templates, decision rules, or step-by-step workflows tailored to the user's intent.
+- Recommend ONE specific Best Next Action with clear rationale and whether external connection (${catInfo.service}) is required or can be drafted in workspace right now.
+- Provide EXACTLY 3 concise, high-value smart reply follow-up buttons ("smartReplies", 3-8 words each) tailored to advancing this workflow.
+
+${historyText ? `Previous Automation Conversation Context:\n${historyText}\n\n` : ''}User Goal / Customization Request:
+${String(userContext || `Design my high-ROI 2026 automation workflow for ${catInfo.label} with an immediate first template I can use today.`).slice(0, 2500)}`;
+
+    const { response, modelUsed } = await generateWithModelFallback(
+      ai,
+      (model) => ({
+        model,
+        contents: prompt,
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              headline: { type: Type.STRING, description: 'Action-focused strategy title' },
+              assistantMessage: { type: Type.STRING, description: 'Rich, human-like Markdown recommendation and ready-to-use copy/workflow' },
+              smartReplies: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
+                description: 'Exactly 3 context-aware follow-up smart reply suggestions (3 to 8 words each)',
+              },
+              recommendedNextAction: {
+                type: Type.OBJECT,
+                properties: {
+                  title: { type: Type.STRING },
+                  rationale: { type: Type.STRING },
+                  requiredService: { type: Type.STRING },
+                  integrationStatus: { type: Type.STRING, description: 'requires_oauth or ready_in_workspace' },
+                },
+                required: ['title', 'rationale', 'requiredService', 'integrationStatus'],
+              },
+              actionPlan: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
+                description: '3 to 4 concrete implementation steps',
+              },
+            },
+            required: ['headline', 'assistantMessage', 'smartReplies', 'recommendedNextAction', 'actionPlan'],
+          },
+        },
+      }),
+      13000,
+      20000
+    );
+
+    const parsed = extractJsonText(response.text);
+    const smartReplies = Array.isArray(parsed.smartReplies)
+      ? parsed.smartReplies
+          .filter((s: unknown): s is string => typeof s === 'string' && s.trim().length > 0)
+          .slice(0, 3)
+      : [];
+    while (smartReplies.length < 3) {
+      const defaults = [
+        'Customize this template for my team',
+        'Make it shorter and higher converting',
+        'Break into automated daily triggers',
+      ];
+      smartReplies.push(defaults[smartReplies.length]);
+    }
+
+    const nextAct = parsed.recommendedNextAction || {};
+    res.json({
+      headline: parsed.headline || `${catInfo.label} Automation Playbook`,
+      assistantMessage: parsed.assistantMessage || response.text || '',
+      smartReplies,
+      recommendedNextAction: {
+        title: String(nextAct.title || `Launch ${catInfo.label} Draft Workflow`),
+        rationale: String(nextAct.rationale || `Highest leverage first step for ${catInfo.label}.`),
+        requiredService: String(nextAct.requiredService || catInfo.service),
+        integrationStatus:
+          nextAct.integrationStatus === 'ready_in_workspace' ? 'ready_in_workspace' : 'requires_oauth',
+      },
+      actionPlan: Array.isArray(parsed.actionPlan) ? parsed.actionPlan.slice(0, 5) : [],
+      modelUsed,
+      latencyMs: Date.now() - startTime,
+    });
+  } catch (err: any) {
+    res.status(isAuthFailure(err) ? 401 : 502).json({
+      error: sanitizeErrorMessage(err),
+      latencyMs: Date.now() - startTime,
+    });
+  }
+});
+
+// 14. SCHEDULED & ON-DEMAND AUTOMATION EXECUTION ENDPOINT
+app.post('/api/automation/execute', requireAuthenticatedUser, async (req: Request, res: Response): Promise<void> => {
+  const startTime = Date.now();
+  const executedAt = new Date().toISOString();
+  try {
+    const {
+      scheduleId = 'manual',
+      taskTitle = 'Automated Workflow Run',
+      category = 'emails',
+      tone = 'professional',
+      prompt = '',
+      frequency = 'manual',
+      triggerType = 'manual',
+      targetLanguage = 'en',
+      memoryContext,
+    } = req.body || {};
+
+    const cleanPrompt = String(prompt || '').trim();
+    if (!cleanPrompt) {
+      res.status(400).json({
+        ok: false,
+        status: 'failed',
+        error: 'Automation prompt or instructions are required to execute this task.',
+        latencyMs: Date.now() - startTime,
+        executedAt,
+      });
+      return;
+    }
+
+    const customKey = (req.headers['x-gemini-api-key'] as string) || req.body?.customApiKey;
+    const ai = getGeminiClient(customKey);
+    if (!ai) {
+      res.status(400).json({
+        ok: false,
+        status: 'failed',
+        error: 'Gemini API key is not configured on the server or in Settings.',
+        latencyMs: Date.now() - startTime,
+        executedAt,
+      });
+      return;
+    }
+
+    const categoryLabels: Record<string, string> = {
+      emails: 'Emails & Inbox Triage',
+      lead_generation: 'Lead Generation & Outreach',
+      content_creation: 'Content Creation & Repurposing',
+      customer_support: 'Customer Support & SLA Macros',
+      business_reports: 'Business KPI Reports & Insights',
+    };
+
+    const targetLangName = LANGUAGE_NAMES[String(targetLanguage)] || String(targetLanguage) || 'English';
+    const memoryBlock = buildMemoryBlock(memoryContext);
+    const fullPrompt = `You are Aadesh AI Automated Task Execution Engine running a ${String(frequency)} automation task (${String(triggerType)} trigger).
+Task Title: ${String(taskTitle).slice(0, 200)}
+Automation Pillar: ${categoryLabels[String(category)] || String(category)}
+Required Tone: ${String(tone)}
+Target Language: ${targetLangName}
+Schedule Ref: ${String(scheduleId)}${memoryBlock}
+
+Task Instructions:
+${cleanPrompt.slice(0, 2500)}
+
+Produce the completed automated deliverable for this run in structured Markdown, plus 3 concise key outcomes ("highlights") and a one-sentence recommendation for the next scheduled run ("nextScheduledNote"). Do NOT fabricate external API send receipts if no external OAuth integration was supplied—produce the ready-to-send / ready-to-publish deliverable cleanly.`;
+
+    const { response, modelUsed } = await generateWithModelFallback(
+      ai,
+      (model) => ({
+        model,
+        contents: fullPrompt,
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              executionHeadline: { type: Type.STRING },
+              deliverableContent: { type: Type.STRING },
+              highlights: { type: Type.ARRAY, items: { type: Type.STRING } },
+              nextScheduledNote: { type: Type.STRING },
+            },
+            required: ['executionHeadline', 'deliverableContent', 'highlights', 'nextScheduledNote'],
+          },
+        },
+      }),
+      14000,
+      20000
+    );
+
+    const parsed = extractJsonText(response.text);
+    const deliverable = String(parsed.deliverableContent || response.text || '').trim();
+    const highlights = Array.isArray(parsed.highlights)
+      ? parsed.highlights.filter((h: unknown): h is string => typeof h === 'string' && h.trim().length > 0).slice(0, 4)
+      : [];
+
+    res.json({
+      ok: true,
+      status: 'success',
+      executionHeadline: String(parsed.executionHeadline || taskTitle),
+      deliverableContent: deliverable,
+      highlights,
+      nextScheduledNote: String(parsed.nextScheduledNote || 'Scheduled task completed cleanly.'),
+      modelUsed,
+      latencyMs: Date.now() - startTime,
+      executedAt,
+    });
+  } catch (err: any) {
+    const safeError = sanitizeErrorMessage(err);
+    res.status(isAuthFailure(err) ? 401 : 502).json({
+      ok: false,
+      status: 'failed',
+      error: safeError,
+      latencyMs: Date.now() - startTime,
+      executedAt,
     });
   }
 });
@@ -2355,8 +2774,9 @@ app.all('/api/*', (req: Request, res: Response): void => {
 
 // Vite middleware in dev or static files in local production
 async function startServer() {
-  if (process.env.NODE_ENV !== 'production') {
-    const { createServer } = await import('vite');
+  if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL && !process.env.VERCEL_ENV) {
+    const vitePackage = 'vite';
+    const { createServer } = await import(/* @vite-ignore */ vitePackage);
     const vite = await createServer({
       server: { middlewareMode: true },
       appType: 'spa',

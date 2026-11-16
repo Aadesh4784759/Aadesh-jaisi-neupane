@@ -71,6 +71,7 @@ import { DEFAULT_SESSION_CATEGORIES } from '../utils/storage';
 import { DocumentAssistantModal } from './DocumentAssistantModal';
 import { AnimatedWelcomeHero } from './AnimatedWelcomeHero';
 import { AgentModePanel } from './AgentModePanel';
+import { getAuthHeaders } from '../utils/firebase';
 
 interface ChatViewProps {
   currentSession: ChatSession;
@@ -419,10 +420,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
     }
 
     try {
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (settings.customGeminiApiKey) {
-        headers['x-gemini-api-key'] = settings.customGeminiApiKey;
-      }
+      const headers = await getAuthHeaders({
+        'Content-Type': 'application/json',
+        ...(settings.customGeminiApiKey ? { 'x-gemini-api-key': settings.customGeminiApiKey } : {}),
+      });
 
       const res = await fetch('/api/summarize', {
         method: 'POST',

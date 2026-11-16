@@ -14,6 +14,7 @@ import {
 import { AppSettings, LanguageOption } from '../types';
 import { SUPPORTED_LANGUAGES, UI_TRANSLATIONS } from '../data/languages';
 import { voiceAssistant } from '../utils/speech';
+import { getAuthHeaders } from '../utils/firebase';
 
 interface InterpreterViewProps {
   settings: AppSettings;
@@ -109,10 +110,10 @@ export const InterpreterView: React.FC<InterpreterViewProps> = ({
         translatedText = `[Offline Translated (${targetLangObj.name})] ${sourceText}`;
         culturalNote = 'Translated via local offline dictionary cache.';
       } else {
-        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-        if (settings.customGeminiApiKey) {
-          headers['x-gemini-api-key'] = settings.customGeminiApiKey;
-        }
+        const headers = await getAuthHeaders({
+          'Content-Type': 'application/json',
+          ...(settings.customGeminiApiKey ? { 'x-gemini-api-key': settings.customGeminiApiKey } : {}),
+        });
         const res = await fetch('/api/translate', {
           method: 'POST',
           headers,

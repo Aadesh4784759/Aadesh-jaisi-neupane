@@ -1,5 +1,5 @@
 // Aadesh AI Global Hub Service Worker
-const CACHE_NAME = 'aadesh-ai-v2';
+const CACHE_NAME = 'aadesh-ai-v3';
 const STATIC_ASSETS = [
   '/',
   '/index.html',

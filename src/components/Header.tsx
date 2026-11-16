@@ -46,6 +46,7 @@ interface HeaderProps {
   user: UserProfile;
   isOwnerAdmin?: boolean;
   onOpenAuth: (mode?: 'signin' | 'register' | 'profile') => void;
+  onSignOut?: () => void;
   onOpenGamification: () => void;
   onOpenInstall?: () => void;
 }
@@ -65,6 +66,7 @@ export const Header: React.FC<HeaderProps> = ({
   user,
   isOwnerAdmin = false,
   onOpenAuth,
+  onSignOut,
   onOpenGamification,
   onOpenInstall,
 }) => {
@@ -224,7 +226,7 @@ export const Header: React.FC<HeaderProps> = ({
               </span>
               <div className="hidden xs:flex text-[9px] font-extrabold text-amber-300 items-center gap-1 leading-none mt-0.5 bg-gradient-to-r from-amber-500/25 via-amber-500/15 to-transparent px-1.5 py-0.5 rounded border border-amber-400/50 shadow-[0_0_6px_rgba(245,158,11,0.3)] max-w-[96px] sm:max-w-[130px]">
                 <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0 animate-ping" />
-                <span className="tracking-wider uppercase truncate">@{user.username || 'guest'}</span>
+                <span className="tracking-wider uppercase truncate">@{user.username || 'member'}</span>
               </div>
             </div>
 
@@ -263,14 +265,14 @@ export const Header: React.FC<HeaderProps> = ({
                   <h4 className="text-xs font-bold text-white truncate flex items-center gap-1.5">
                     <span className="truncate">{user.name}</span>
                     <span className="text-[9px] px-1.5 py-0.2 rounded bg-amber-950 text-amber-300 border border-amber-500/40 font-semibold uppercase shrink-0">
-                      {isOwnerAdmin ? 'Owner' : user.isLoggedIn ? 'Member' : 'Guest'}
+                      {isOwnerAdmin ? 'Owner' : 'Verified'}
                     </span>
                   </h4>
                   <p className="text-[10px] text-amber-400 font-semibold truncate">
-                    @{user.username || 'guest'}
+                    @{user.username || 'member'}
                   </p>
                   <p className="text-[10px] text-gray-400 truncate">
-                    {user.email || 'Not signed in'}
+                    {user.email || 'Verified account'}
                   </p>
                 </div>
               </div>
@@ -371,9 +373,22 @@ export const Header: React.FC<HeaderProps> = ({
                 )}
               </div>
 
-              {/* Sign In / Sign Out Button */}
-              <div className="pt-2 border-t border-white/10">
-                {user.isLoggedIn ? (
+              {/* Sign Out Actions */}
+              <div className="pt-2 border-t border-white/10 space-y-1.5">
+                {onSignOut ? (
+                  <>
+                    <button
+                      onClick={() => {
+                        setProfileDropdownOpen(false);
+                        void onSignOut();
+                      }}
+                      className="w-full py-2 px-3 rounded-xl text-xs font-semibold text-rose-300 hover:text-white bg-rose-950/35 hover:bg-rose-900/55 border border-rose-500/35 flex items-center justify-center gap-2 cursor-pointer transition-colors"
+                    >
+                      <LogOut className="w-3.5 h-3.5" />
+                      <span>Sign Out</span>
+                    </button>
+                  </>
+                ) : user.isLoggedIn ? (
                   <button
                     onClick={() => {
                       setProfileDropdownOpen(false);

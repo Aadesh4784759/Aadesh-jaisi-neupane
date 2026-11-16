@@ -15,7 +15,8 @@ import {
   Loader2,
   Ban,
 } from 'lucide-react';
-import { AgentPersonaId, AgentProposedAction, AgentStepPlan, AppSettings } from '../types';
+import { AgentPersonaId, AgentProposedAction, AgentStepPlan, AgentTaskPriority, AppSettings } from '../types';
+import { getAuthHeaders } from '../utils/firebase';
 import { AgentProgressBar } from './AgentProgressBar';
 import { AgentTaskHierarchy } from './AgentTaskHierarchy';
 import {
@@ -107,32 +108,48 @@ export const AgentModePanel: React.FC<AgentModePanelProps> = ({
 
     setSteps([
       {
+        id: 'init-step-1',
         stepNumber: 1,
         title: 'Analyze Goal & Task Hierarchy',
         detail: 'Parsing user objectives and preparing agent plan...',
         toolName: 'Goal Parser',
+        priority: 'high',
+        estimatedMinutes: 1,
+        estimatedTime: '~1 min',
         status: 'running',
       },
       {
+        id: 'init-step-2',
         stepNumber: 2,
         title: 'Authorize External Gemini Agent API Call',
         detail: 'Waiting for user Confirm/Deny before calling /api/agent',
         toolName: 'POST /api/agent',
+        priority: 'high',
+        estimatedMinutes: 1,
+        estimatedTime: '~30s',
         isSensitive: true,
         status: 'pending',
       },
       {
+        id: 'init-step-3',
         stepNumber: 3,
         title: 'Execute Multi-Step Reasoning Chain',
         detail: 'Synthesizing step-by-step outputs and deliverables...',
         toolName: 'Gemini Reasoning Tool',
+        priority: 'medium',
+        estimatedMinutes: 3,
+        estimatedTime: '~3 min',
         status: 'pending',
       },
       {
+        id: 'init-step-4',
         stepNumber: 4,
         title: 'Stage Follow-Up Sensitive Actions',
         detail: 'Preparing guarded follow-up actions for user review...',
         toolName: 'Action Guard',
+        priority: 'low',
+        estimatedMinutes: 2,
+        estimatedTime: '~2 min',
         status: 'pending',
       },
     ]);
@@ -181,10 +198,10 @@ export const AgentModePanel: React.FC<AgentModePanelProps> = ({
     );
 
     try {
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (settings.customGeminiApiKey) {
-        headers['x-gemini-api-key'] = settings.customGeminiApiKey;
-      }
+      const headers = await getAuthHeaders({
+        'Content-Type': 'application/json',
+        ...(settings.customGeminiApiKey ? { 'x-gemini-api-key': settings.customGeminiApiKey } : {}),
+      });
 
       const res = await fetch('/api/agent', {
         method: 'POST',
@@ -202,14 +219,30 @@ export const AgentModePanel: React.FC<AgentModePanelProps> = ({
       }
 
       const serverSteps: AgentStepPlan[] = Array.isArray(data.steps)
-        ? data.steps.map((s: any, idx: number) => ({
-            stepNumber: s.stepNumber || idx + 1,
-            title: s.title || `Step ${idx + 1}`,
-            detail: s.detail || '',
-            output: s.output || '',
-            toolName: s.toolName || (idx === 0 ? 'Gemini Planner' : 'Agent Subtask'),
-            status: 'pending' as const,
-          }))
+        ? data.steps.map((s: any, idx: number) => {
+            const rawPriority = String(s.priority || '').toLowerCase();
+            const priority: AgentTaskPriority =
+              rawPriority === 'high' || rawPriority === 'medium' || rawPriority === 'low'
+                ? rawPriority
+                : idx === 0
+                ? 'high'
+                : idx === 1
+                ? 'medium'
+                : 'low';
+            const estMins = Number(s.estimatedMinutes) || (idx === 0 ? 2 : 3);
+            return {
+              id: s.id || `step-${Date.now()}-${idx + 1}`,
+              stepNumber: s.stepNumber || idx + 1,
+              title: s.title || `Step ${idx + 1}`,
+              detail: s.detail || '',
+              output: s.output || '',
+              toolName: s.toolName || (idx === 0 ? 'Gemini Planner' : 'Agent Subtask'),
+              priority,
+              estimatedMinutes: estMins,
+              estimatedTime: s.estimatedTime || `~${estMins} min`,
+              status: 'pending' as const,
+            };
+          })
         : [];
 
       setAgentName(data.agentName || activePersonaLabel);
@@ -428,6 +461,10 @@ export const AgentModePanel: React.FC<AgentModePanelProps> = ({
               [stepNum]: !prev[stepNum],
             }))
           }
+          onReorderSteps={(reorderedSteps) => {
+            setSteps(reorderedSteps);
+            showToast('Updated sub-task execution order.');
+          }}
         />
       )}
 

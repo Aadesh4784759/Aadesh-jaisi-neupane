@@ -12,6 +12,7 @@ import {
   ShieldCheck,
   Smartphone,
   Clock,
+  Zap,
 } from 'lucide-react';
 import { UI_TRANSLATIONS } from '../data/languages';
 
@@ -36,6 +37,7 @@ export const NavigationDock: React.FC<NavigationDockProps> = ({
 
   const navItems = [
     { id: 'chat', label: t.chatTab || 'Chat', icon: MessageSquareText },
+    { id: 'automation', label: 'Automate', icon: Zap },
     { id: 'images', label: t.imagesTab || 'Images', icon: ImagePlus },
     { id: 'voice', label: t.voiceTab || 'Voice', icon: Radio },
     { id: 'interpret', label: t.interpreterTab || 'Translate', icon: Languages },

@@ -288,15 +288,111 @@ export interface AgentProposedAction {
   executed?: boolean;
 }
 
+export type AgentTaskPriority = 'high' | 'medium' | 'low';
+
 export interface AgentStepPlan {
+  id?: string;
   stepNumber: number;
   title: string;
   detail: string;
   status: 'pending' | 'running' | 'completed' | 'failed' | 'awaiting_approval' | 'denied';
+  priority?: AgentTaskPriority;
+  estimatedMinutes?: number;
+  estimatedTime?: string;
   output?: string;
   toolName?: string;
   isSensitive?: boolean;
   parentStepNumber?: number;
+}
+
+export type AutomationTaskOptionId =
+  | 'emails'
+  | 'lead_generation'
+  | 'content_creation'
+  | 'customer_support'
+  | 'business_reports';
+
+export type AutomationTone = 'professional' | 'friendly' | 'creative' | 'concise';
+
+export interface AutomationRecommendedAction {
+  title: string;
+  rationale: string;
+  requiredService: string;
+  integrationStatus: 'requires_oauth' | 'ready_in_workspace';
+}
+
+export interface AutomationSuggestionResponse {
+  headline: string;
+  assistantMessage: string;
+  smartReplies: string[];
+  recommendedNextAction: AutomationRecommendedAction;
+  actionPlan: string[];
+  modelUsed?: string;
+  latencyMs?: number;
+}
+
+export interface AutomationConversationTurn {
+  id: string;
+  category: AutomationTaskOptionId;
+  tone: AutomationTone;
+  userPrompt: string;
+  response: AutomationSuggestionResponse;
+  createdAt: number;
+}
+
+export type AutomationScheduleFrequency = 'daily' | 'weekly' | 'monthly';
+export type AutomationRunStatus = 'running' | 'success' | 'failed';
+export type AutomationRunTrigger = 'manual' | 'scheduled' | 'strategy_action';
+
+export interface AutomationScheduleItem {
+  id: string;
+  userId: string;
+  title: string;
+  category: AutomationTaskOptionId;
+  frequency: AutomationScheduleFrequency;
+  timeOfDay: string; // HH:mm
+  dayOfWeek?: string; // Monday, Tuesday, etc. for weekly
+  prompt: string;
+  tone: AutomationTone;
+  targetLanguage: string;
+  enabled: boolean;
+  nextRunAt: number;
+  lastRunAt?: number;
+  lastStatus: 'idle' | 'running' | 'success' | 'failed';
+  runCount: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface AutomationRunLogItem {
+  id: string;
+  userId: string;
+  scheduleId?: string;
+  taskTitle: string;
+  category: AutomationTaskOptionId;
+  tone: AutomationTone;
+  triggerType: AutomationRunTrigger;
+  status: AutomationRunStatus;
+  statusMessage: string;
+  outputSummary: string;
+  errorMessage?: string;
+  modelUsed?: string;
+  latencyMs?: number;
+  startedAt: number;
+  completedAt?: number;
+}
+
+export interface AutomationExecuteResponse {
+  ok: boolean;
+  status: 'success' | 'failed';
+  executionHeadline?: string;
+  deliverableContent?: string;
+  highlights?: string[];
+  nextScheduledNote?: string;
+  modelUsed?: string;
+  latencyMs: number;
+  executedAt: string;
+  error?: string;
 }
 
 export type ImageAspectRatio = '1:1' | '16:9' | '9:16' | '4:3';
@@ -324,4 +420,5 @@ export interface GeneratedImageItem {
   createdAt: number;
   latencyMs?: number;
 }
+
 

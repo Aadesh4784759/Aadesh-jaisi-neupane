@@ -398,6 +398,60 @@
         "latencyMs": { "type": "number" }
       },
       "required": ["id", "userId", "prompt", "style", "aspectRatio", "modelName", "storageLocation", "createdAt"]
+    },
+    "AutomationSchedule": {
+      "title": "AutomationSchedule",
+      "description": "User recurring automation schedule configuration",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "title": { "type": "string", "maxLength": 200 },
+        "category": {
+          "type": "string",
+          "enum": ["emails", "lead_generation", "content_creation", "customer_support", "business_reports"]
+        },
+        "frequency": { "type": "string", "enum": ["daily", "weekly", "monthly"] },
+        "timeOfDay": { "type": "string", "maxLength": 10 },
+        "dayOfWeek": { "type": "string", "maxLength": 16 },
+        "prompt": { "type": "string", "maxLength": 2000 },
+        "tone": { "type": "string", "enum": ["professional", "friendly", "creative", "concise"] },
+        "targetLanguage": { "type": "string", "maxLength": 20 },
+        "enabled": { "type": "boolean" },
+        "nextRunAt": { "type": "string", "maxLength": 50 },
+        "lastRunAt": { "type": "string", "maxLength": 50 },
+        "lastStatus": { "type": "string", "enum": ["idle", "running", "success", "failed"] },
+        "runCount": { "type": "number" },
+        "createdAt": { "type": "string", "maxLength": 50 },
+        "updatedAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "userId", "title", "category", "frequency", "timeOfDay", "prompt", "tone", "enabled", "nextRunAt", "lastStatus", "runCount", "createdAt", "updatedAt"]
+    },
+    "AutomationRunLog": {
+      "title": "AutomationRunLog",
+      "description": "History, status updates, and success/failure results for user automation runs",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "scheduleId": { "type": "string", "maxLength": 128 },
+        "taskTitle": { "type": "string", "maxLength": 200 },
+        "category": {
+          "type": "string",
+          "enum": ["emails", "lead_generation", "content_creation", "customer_support", "business_reports"]
+        },
+        "tone": { "type": "string", "enum": ["professional", "friendly", "creative", "concise"] },
+        "triggerType": { "type": "string", "enum": ["manual", "scheduled", "strategy_action"] },
+        "status": { "type": "string", "enum": ["running", "success", "failed"] },
+        "statusMessage": { "type": "string", "maxLength": 500 },
+        "outputSummary": { "type": "string", "maxLength": 4000 },
+        "errorMessage": { "type": "string", "maxLength": 1000 },
+        "modelUsed": { "type": "string", "maxLength": 80 },
+        "latencyMs": { "type": "number" },
+        "startedAt": { "type": "string", "maxLength": 50 },
+        "completedAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "userId", "taskTitle", "category", "tone", "triggerType", "status", "statusMessage", "outputSummary", "startedAt"]
     }
   },
   "firestore": {
@@ -432,6 +486,14 @@
     "/users/{userId}/generatedImages/{imageId}": {
       "schema": "GeneratedImage",
       "description": "User AI image generation metadata records"
+    },
+    "/users/{userId}/automationSchedules/{scheduleId}": {
+      "schema": "AutomationSchedule",
+      "description": "User recurring automation schedules linked to verified account"
+    },
+    "/users/{userId}/automationLogs/{logId}": {
+      "schema": "AutomationRunLog",
+      "description": "User automation execution activity log entries with status and results"
     },
     "/usage_analytics/{eventId}": {
       "schema": "UsageAnalytics",

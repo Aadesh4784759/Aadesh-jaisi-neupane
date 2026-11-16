@@ -33,6 +33,7 @@ import {
 } from '../utils/imageHistoryStorage';
 import {
   deleteGeneratedImageMetaFromFirestore,
+  getAuthHeaders,
   loadGeneratedImagesMetaFromFirestore,
   recordUsageAnalyticsToFirestore,
   saveGeneratedImageMetaToFirestore,
@@ -157,9 +158,11 @@ export const ImageStudioView: React.FC<ImageStudioViewProps> = ({
   // Fetch supported models & capabilities from backend
   useEffect(() => {
     let cancelled = false;
-    fetch('/api/images/models')
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
+    (async () => {
+      try {
+        const headers = await getAuthHeaders();
+        const res = await fetch('/api/images/models', { headers });
+        const data = res.ok ? await res.json() : null;
         if (cancelled || !data?.models?.length) return;
         setModels(data.models);
         if (data.defaultModel) {
@@ -167,12 +170,14 @@ export const ImageStudioView: React.FC<ImageStudioViewProps> = ({
             data.models.some((m: ImageModelOption) => m.id === prev) ? prev : data.defaultModel
           );
         }
-      })
-      .catch(() => {});
+      } catch {
+        // Silent fallback to DEFAULT_IMAGE_MODELS
+      }
+    })();
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [user?.id, user?.isLoggedIn]);
 
   // Load persistent history from IndexedDB + optional Firestore metadata when logged in
   useEffect(() => {
@@ -249,10 +254,10 @@ export const ImageStudioView: React.FC<ImageStudioViewProps> = ({
     setFallbackNotice(null);
 
     try {
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (settings.customGeminiApiKey) {
-        headers['x-gemini-api-key'] = settings.customGeminiApiKey;
-      }
+      const headers = await getAuthHeaders({
+        'Content-Type': 'application/json',
+        ...(settings.customGeminiApiKey ? { 'x-gemini-api-key': settings.customGeminiApiKey } : {}),
+      });
 
       const payload: Record<string, any> = {
         prompt: promptToUse,

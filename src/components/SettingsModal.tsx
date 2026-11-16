@@ -38,6 +38,7 @@ import { AppSettings, ChatSession, GeotaggedMedia, VoicePersona, VoicePersonaInf
 import { OFFLINE_PHRASEBOOK, SUPPORTED_LANGUAGES, UI_TRANSLATIONS, VOICE_PERSONAS } from '../data/languages';
 import { voiceAssistant } from '../utils/speech';
 import { COLOR_THEME_PRESETS } from '../utils/avatarTheme';
+import { getAuthHeaders } from '../utils/firebase';
 import {
   BulkExportFormat,
   ChatExportFormat,
@@ -115,12 +116,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const handleVerifyGeminiKey = async () => {
     setKeyVerifyStatus({ loading: true });
     try {
+      const headers = await getAuthHeaders({
+        'Content-Type': 'application/json',
+        'x-gemini-api-key': customKeyInput.trim(),
+      });
       const res = await fetch('/api/gemini/verify-key', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-gemini-api-key': customKeyInput.trim(),
-        },
+        headers,
         body: JSON.stringify({ apiKey: customKeyInput.trim() }),
       });
       const data = await res.json();
