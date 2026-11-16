@@ -28,7 +28,7 @@ import {
 } from 'lucide-react';
 import { AppSettings, ChatSession, GeotaggedMedia, UserProfile, VoicePersona } from '../types';
 import { SUPPORTED_LANGUAGES, VOICE_PERSONAS } from '../data/languages';
-import { COUNTRY_OPTIONS, detectUserCountry } from '../utils/country';
+import { COUNTRY_OPTIONS, detectUserCountry, detectCountryViaGPS } from '../utils/country';
 import { updateUserProfile } from '../utils/firebase';
 import { saveUserLocalExtras } from '../utils/storage';
 import { voiceAssistant } from '../utils/speech';
@@ -79,6 +79,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [editCountry, setEditCountry] = useState(user.country || 'Global');
   const [editFlag, setEditFlag] = useState(user.countryFlag || '🌐');
   const [editAvatar, setEditAvatar] = useState(user.avatarUrl || '');
+  const [countrySearchQuery, setCountrySearchQuery] = useState('');
+  const [isDetectingGps, setIsDetectingGps] = useState(false);
   const [savingProfile, setSavingProfile] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState(false);
@@ -149,6 +151,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       saveUserLocalExtras(user.id, {
         country: editCountry,
         countryFlag: editFlag,
+        isManualCountry: true,
         customAvatarDataUrl: editAvatar.startsWith('data:') ? editAvatar : undefined,
       });
 
@@ -166,6 +169,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         username: cleanHandle,
         country: editCountry,
         countryFlag: editFlag,
+        isManualCountry: true,
         avatarUrl: editAvatar,
       });
 
@@ -374,21 +378,55 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   </label>
                 </div>
 
-                <div className="space-y-1 text-xs">
-                  <div className="flex items-center justify-between">
-                    <span className="text-purple-200/80 font-semibold">Country &amp; Flag</span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const detected = detectUserCountry();
-                        setEditCountry(detected.country);
-                        setEditFlag(detected.flag);
-                      }}
-                      className="text-[11px] text-purple-300 hover:text-white underline cursor-pointer"
-                    >
-                      Auto-Detect
-                    </button>
+                <div className="space-y-2 text-xs">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-purple-200/80 font-semibold">Country &amp; Flag (Manual or Auto)</span>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const detected = detectUserCountry();
+                          setEditCountry(detected.country);
+                          setEditFlag(detected.flag);
+                          showToast(`Auto-detected: ${detected.country} ${detected.flag}`);
+                        }}
+                        className="text-[11px] text-purple-300 hover:text-white underline cursor-pointer"
+                      >
+                        Auto-Detect
+                      </button>
+                      <span className="text-purple-400/50">•</span>
+                      <button
+                        type="button"
+                        disabled={isDetectingGps}
+                        onClick={async () => {
+                          setIsDetectingGps(true);
+                          const gpsResult = await detectCountryViaGPS();
+                          setIsDetectingGps(false);
+                          if (gpsResult) {
+                            setEditCountry(gpsResult.country);
+                            setEditFlag(gpsResult.flag);
+                            showToast(`GPS Detected: ${gpsResult.country} ${gpsResult.flag}`);
+                          } else {
+                            showToast('GPS permission denied or unavailable. Please select manually.');
+                          }
+                        }}
+                        className="text-[11px] text-cyan-300 hover:text-white underline cursor-pointer disabled:opacity-50"
+                      >
+                        {isDetectingGps ? 'Detecting GPS...' : 'Detect via GPS'}
+                      </button>
+                    </div>
                   </div>
+
+                  {/* Searchable country filter input */}
+                  <input
+                    type="text"
+                    value={countrySearchQuery}
+                    onChange={(e) => setCountrySearchQuery(e.target.value)}
+                    placeholder="Search country name or code (e.g., US, Nepal, Japan)..."
+                    className="w-full min-h-[38px] px-3 py-1.5 rounded-xl bg-[#140e2a] border border-purple-400/30 focus:border-purple-400 text-white outline-none text-xs"
+                  />
+
+                  {/* Searchable Country Selector */}
                   <select
                     value={editCountry}
                     onChange={(e) => {
@@ -401,12 +439,20 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                         setEditFlag('🌐');
                       }
                     }}
-                    className="w-full min-h-[42px] px-3 py-2 rounded-xl bg-[#140e2a] border border-purple-400/30 focus:border-purple-400 text-white outline-none"
+                    size={5}
+                    className="w-full px-2 py-1.5 rounded-xl bg-[#140e2a] border border-purple-400/30 focus:border-purple-400 text-white outline-none font-medium cursor-pointer"
                   >
-                    <option value="Global">🌐 Global</option>
-                    {COUNTRY_OPTIONS.map((c) => (
+                    <option value="Global">🌐 Global (International)</option>
+                    {COUNTRY_OPTIONS.filter((c) => {
+                      if (!countrySearchQuery.trim()) return true;
+                      const q = countrySearchQuery.toLowerCase();
+                      return (
+                        c.country.toLowerCase().includes(q) ||
+                        c.code.toLowerCase().includes(q)
+                      );
+                    }).map((c) => (
                       <option key={c.code} value={c.country}>
-                        {c.flag} {c.country}
+                        {c.flag} {c.country} ({c.code})
                       </option>
                     ))}
                   </select>

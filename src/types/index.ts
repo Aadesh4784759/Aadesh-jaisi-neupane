@@ -154,6 +154,7 @@ export interface UserProfile {
   avatarColor?: string;
   country?: string;
   countryFlag?: string;
+  isManualCountry?: boolean;
   provider: 'google' | 'email' | 'phone' | 'facebook' | 'guest';
   linkedProviders: ('google' | 'email' | 'phone' | 'facebook')[];
   isLoggedIn: boolean;

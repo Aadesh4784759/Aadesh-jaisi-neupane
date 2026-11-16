@@ -596,6 +596,7 @@ export const saveStoredAutomationLogs = (
 export interface UserLocalExtras {
   country?: string;
   countryFlag?: string;
+  isManualCountry?: boolean;
   customAvatarDataUrl?: string;
   avatarColor?: string;
 }

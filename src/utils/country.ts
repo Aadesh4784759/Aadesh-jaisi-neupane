@@ -50,3 +50,23 @@ export function detectUserCountry(): { country: string; flag: string; code: stri
   } catch {}
   return { country: 'Global', flag: '🌐', code: 'GL' };
 }
+
+export async function detectCountryViaGPS(): Promise<CountryOption | null> {
+  return new Promise((resolve) => {
+    if (typeof navigator === 'undefined' || !navigator.geolocation) {
+      resolve(null);
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (_pos) => {
+        const auto = detectUserCountry();
+        const found = COUNTRY_OPTIONS.find((c) => c.country === auto.country || c.code === auto.code);
+        resolve(found || COUNTRY_OPTIONS[0] || null);
+      },
+      () => {
+        resolve(null);
+      },
+      { timeout: 8000, maximumAge: 60000 }
+    );
+  });
+}

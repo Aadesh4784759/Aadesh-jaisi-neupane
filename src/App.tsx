@@ -159,11 +159,15 @@ export default function App() {
   const isAuthenticatedVerified = Boolean(fbAuthUser && fbAuthUser.emailVerified);
   const isOnline = isBrowserOnline && !settings.offlineModeForce;
   const isAppReady = isAuthInitialized && hasInitialHealthSettled;
+  const isOwner = Boolean(
+    user.isLoggedIn &&
+      (user.email?.toLowerCase().trim() === OWNER_ADMIN_EMAIL ||
+        fbAuthUser?.email?.toLowerCase().trim() === OWNER_ADMIN_EMAIL ||
+        user.email?.toLowerCase().trim() === 'aadeshjaisi6@gmail.com' ||
+        fbAuthUser?.email?.toLowerCase().trim() === 'aadeshjaisi6@gmail.com')
+  );
   const isOwnerAdmin = Boolean(
-    isAuthenticatedVerified &&
-      user.isLoggedIn &&
-      user.email?.toLowerCase() === OWNER_ADMIN_EMAIL &&
-      user.role === 'admin'
+    isOwner && (user.role === 'admin' || isAuthenticatedVerified)
   );
 
   const hydrateVerifiedUserSession = async (fbUser: FirebaseUser) => {
@@ -183,6 +187,13 @@ export default function App() {
 
     const extras = getUserLocalExtras(fbUser.uid);
     const detectedCountry = detectUserCountry();
+    const isManual = Boolean(extras.isManualCountry || (fsProfile as any)?.isManualCountry);
+    const resolvedCountry = isManual
+      ? (extras.country || fsProfile?.country || detectedCountry.country)
+      : detectedCountry.country;
+    const resolvedFlag = isManual
+      ? (extras.countryFlag || fsProfile?.countryFlag || detectedCountry.flag)
+      : detectedCountry.flag;
 
     setUser((prev) => {
       const baseUser = prev.id === fbUser.uid ? prev : { ...DEFAULT_USER };
@@ -195,8 +206,9 @@ export default function App() {
         avatarUrl:
           extras.customAvatarDataUrl || fbUser.photoURL || fsProfile?.avatarUrl || baseUser.avatarUrl || '',
         avatarColor: extras.avatarColor || baseUser.avatarColor || '#8b5cf6',
-        country: extras.country || baseUser.country || detectedCountry.country,
-        countryFlag: extras.countryFlag || baseUser.countryFlag || detectedCountry.flag,
+        country: resolvedCountry,
+        countryFlag: resolvedFlag,
+        isManualCountry: isManual,
         provider: providerName,
         isLoggedIn: true,
         role: isVerifiedOwner ? 'admin' : fsProfile?.role || 'user',
@@ -1621,9 +1633,9 @@ export default function App() {
         )}
       </main>
 
-      {/* EXACT SIX BOTTOM NAVIGATION BUTTONS: Chat, Analysis, Transfer, Voice, More, Settings */}
+      {/* BOTTOM NAVIGATION: 6 buttons for regular users, plus Owner button for aadeshjaisi6@gmail.com */}
       <NavigationDock
-        activeTab={activeTab === 'admin' ? 'settings' : activeTab}
+        activeTab={activeTab}
         onSelectTab={(tab) => {
           if (tab === 'settings') {
             setSettingsSection('settings');
@@ -1631,6 +1643,7 @@ export default function App() {
           setActiveTab(tab);
         }}
         isKeyboardOpen={isKeyboardOpen}
+        isOwner={isOwner}
       />
 
       {/* FULL ADVANCED SETTINGS & EXPORT BACKUP MODAL */}
