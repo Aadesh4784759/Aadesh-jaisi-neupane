@@ -39,7 +39,7 @@ import {
   recordMetricEvent,
 } from './utils/storage';
 import { SUPPORTED_LANGUAGES, VOICE_PERSONAS } from './data/languages';
-import { detectUserCountry, detectCountryApproxViaIP } from './utils/country';
+import { detectUserCountry, detectCountryApproxViaIP, resolveCountryForProfile } from './utils/country';
 import { Header } from './components/Header';
 import { NavigationDock, BottomNavTab } from './components/NavigationDock';
 import { FuturisticBackground } from './components/FuturisticBackground';
@@ -60,6 +60,10 @@ import { SplashScreen } from './components/SplashScreen';
 import {
   recordGamificationActivity,
   evaluateCurrentStreakOnLoad,
+  evaluateStreakStateOnRead,
+  applyDailyActivityToStreakState,
+  isStreakRecoveryEligible,
+  recoverBrokenStreakState,
   generateStreakHistory,
 } from './utils/gamification';
 import { voiceAssistant } from './utils/speech';
@@ -276,18 +280,14 @@ export default function App() {
     const previousLastSeen = extras.lastSeenAt || fsProfile?.lastActiveAt;
     saveUserLocalExtras(fbUser.uid, { lastSeenAt: nowMs });
 
-    const detectedCountry = detectUserCountry();
-    const isManual = Boolean(extras.isManualCountry || (fsProfile as any)?.isManualCountry);
-    const resolvedCountry = isManual
-      ? (extras.country || fsProfile?.country || detectedCountry.country)
-      : detectedCountry.country !== 'Global'
-      ? detectedCountry.country
-      : fsProfile?.country || detectedCountry.country;
-    const resolvedFlag = isManual
-      ? (extras.countryFlag || fsProfile?.countryFlag || detectedCountry.flag)
-      : detectedCountry.country !== 'Global'
-      ? detectedCountry.flag
-      : fsProfile?.countryFlag || detectedCountry.flag;
+    const resolvedCountryInfo = resolveCountryForProfile({
+      savedCountry: extras.country || fsProfile?.country,
+      savedCountryCode: extras.countryCode || (fsProfile as any)?.countryCode,
+      savedFlag: extras.countryFlag || fsProfile?.countryFlag,
+      savedTimezone: extras.timezone || (fsProfile as any)?.timezone,
+      savedMethod: extras.countryDetectionMethod || (fsProfile as any)?.countryDetectionMethod,
+      isManual: extras.isManualCountry || (fsProfile as any)?.isManualCountry,
+    });
 
     const resolvedName = fsProfile?.name || cleanName;
     const resolvedNickname = extras.nickname || fsProfile?.nickname || undefined;
@@ -317,22 +317,45 @@ export default function App() {
 
     setUser((prev) => {
       const baseUser = prev.id === fbUser.uid ? prev : { ...DEFAULT_USER };
-      const rawSavedStreak = Math.max(
-        Number((fsProfile as any)?.streakDays || 0),
-        Number(baseUser.streakDays || 0)
-      );
-      const savedLastActive =
-        (fsProfile as any)?.lastActiveDate || baseUser.lastActiveDate || '';
-      const evaluatedStreak = evaluateCurrentStreakOnLoad(rawSavedStreak, savedLastActive);
-      const resolvedLongestStreak = Math.max(
-        Number((fsProfile as any)?.longestStreak || 0),
-        Number(baseUser.longestStreak || 0),
-        evaluatedStreak
-      );
+      const hasFsProfile = Boolean(fsProfile && typeof fsProfile === 'object');
+      const resolvedTz = resolvedCountryInfo.timeZone;
+
+      // Authoritative Firestore streak record cross-referenced with user timezone and lastActiveDate
+      const rawState = {
+        currentStreak: hasFsProfile
+          ? Number((fsProfile as any)?.currentStreak ?? (fsProfile as any)?.streakDays ?? 0)
+          : Number(baseUser.currentStreak ?? baseUser.streakDays ?? 0),
+        longestStreak: hasFsProfile
+          ? Math.max(
+              Number((fsProfile as any)?.longestStreak || 0),
+              Number((fsProfile as any)?.currentStreak ?? (fsProfile as any)?.streakDays ?? 0)
+            )
+          : Math.max(Number(baseUser.longestStreak || 0), Number(baseUser.currentStreak ?? baseUser.streakDays ?? 0)),
+        lastActiveDate: hasFsProfile
+          ? (fsProfile as any)?.lastActiveDate || ''
+          : baseUser.lastActiveDate || '',
+        timezone: resolvedTz,
+        recoveryCount: hasFsProfile
+          ? Number((fsProfile as any)?.recoveryCount ?? 0)
+          : Number(baseUser.recoveryCount ?? 0),
+        recoveryMonth: hasFsProfile
+          ? (fsProfile as any)?.recoveryMonth || ''
+          : baseUser.recoveryMonth || '',
+        streakBeforeBreak: hasFsProfile
+          ? Number((fsProfile as any)?.streakBeforeBreak ?? 0)
+          : Number(baseUser.streakBeforeBreak ?? 0),
+        streakBrokenDate: hasFsProfile
+          ? (fsProfile as any)?.streakBrokenDate || ''
+          : baseUser.streakBrokenDate || '',
+      };
+
+      const evaluatedStreakState = evaluateStreakStateOnRead(rawState, nowMs, resolvedTz);
       const streakHist =
-        baseUser.streakHistory && baseUser.streakHistory.length > 0
+        baseUser.streakHistory &&
+        baseUser.streakHistory.length > 0 &&
+        baseUser.streakDays === evaluatedStreakState.currentStreak
           ? baseUser.streakHistory
-          : generateStreakHistory(evaluatedStreak);
+          : generateStreakHistory(evaluatedStreakState.currentStreak, undefined, resolvedTz, nowMs);
 
       const updated: UserProfile = {
         ...baseUser,
@@ -350,12 +373,20 @@ export default function App() {
           baseUser.avatarUrl ||
           '',
         avatarColor: extras.avatarColor || baseUser.avatarColor || '#8b5cf6',
-        country: resolvedCountry,
-        countryFlag: resolvedFlag,
-        isManualCountry: isManual,
-        streakDays: evaluatedStreak,
-        longestStreak: resolvedLongestStreak,
-        lastActiveDate: savedLastActive,
+        country: resolvedCountryInfo.country,
+        countryCode: resolvedCountryInfo.code,
+        countryFlag: resolvedCountryInfo.flag,
+        timezone: resolvedCountryInfo.timeZone,
+        countryDetectionMethod: resolvedCountryInfo.method,
+        isManualCountry: resolvedCountryInfo.isManual,
+        streakDays: evaluatedStreakState.currentStreak,
+        currentStreak: evaluatedStreakState.currentStreak,
+        longestStreak: evaluatedStreakState.longestStreak,
+        lastActiveDate: evaluatedStreakState.lastActiveDate,
+        recoveryCount: evaluatedStreakState.recoveryCount,
+        recoveryMonth: evaluatedStreakState.recoveryMonth,
+        streakBeforeBreak: evaluatedStreakState.streakBeforeBreak,
+        streakBrokenDate: evaluatedStreakState.streakBrokenDate,
         streakHistory: streakHist,
         termsAccepted: fsProfile?.termsAccepted ?? true,
         termsAcceptedAt: fsProfile?.termsAcceptedAt,
@@ -403,17 +434,20 @@ export default function App() {
     }
 
     // If auto-detection fell back to 'Global', try approximate region lookup once without requesting GPS
-    if (!isManual && resolvedCountry === 'Global') {
+    if (!resolvedCountryInfo.isManual && resolvedCountryInfo.country === 'Global') {
       void detectCountryApproxViaIP().then((ipOption) => {
         if (!ipOption || activeFbUidRef.current !== fbUser.uid) return;
         setUser((prev) => {
-          if (prev.id !== fbUser.uid || prev.isManualCountry || prev.country !== 'Global') {
+          if (prev.id !== fbUser.uid || prev.isManualCountry || (prev.country && prev.country !== 'Global')) {
             return prev;
           }
           const updated: UserProfile = {
             ...prev,
             country: ipOption.country,
+            countryCode: ipOption.code,
             countryFlag: ipOption.flag,
+            timezone: ipOption.timeZone || prev.timezone,
+            countryDetectionMethod: 'ip',
           };
           saveStoredUser(updated);
           syncUserProfileToFirestore(sanitizeUserForFirestore(updated)).catch(() => {});
@@ -464,26 +498,16 @@ export default function App() {
             sessionMap.set(cs.id, cs);
           }
         }
-        const merged = Array.from(sessionMap.values()).sort((a, b) => b.updatedAt - a.updatedAt);
-        if (isFreshLaunchRef.current && !hasUserPickedSessionRef.current) {
-          const resolved = resolveReopenNewChat(
-            merged,
-            settingsRef.current.defaultTargetLanguage,
-            fbUser.uid
-          );
-          setSessions(resolved.sessions);
-          saveStoredSessions(resolved.sessions, fbUser.uid);
-          setCurrentSessionId(resolved.sessionId);
-          setActiveTab('chat');
-        } else {
-          setSessions(merged);
-          saveStoredSessions(merged, fbUser.uid);
-          if (merged[0]?.id) {
-            setCurrentSessionId((prevId) =>
-              merged.some((s) => s.id === prevId) ? prevId : merged[0].id
-            );
-          }
-        }
+        const merged = Array.from(sessionMap.values());
+        const resolved = resolveReopenNewChat(
+          merged,
+          settingsRef.current.defaultTargetLanguage,
+          fbUser.uid
+        );
+        setSessions(resolved.sessions);
+        saveStoredSessions(resolved.sessions, fbUser.uid);
+        setCurrentSessionId(resolved.sessionId);
+        setActiveTab('chat');
       }
     } catch {}
   };
@@ -1223,6 +1247,7 @@ export default function App() {
             : 'chat',
           language: params.targetLanguage,
           latencyMs,
+          timeZone: user.timezone,
         }).catch(() => {});
       }
 
@@ -1365,6 +1390,19 @@ export default function App() {
     }
   };
 
+  const handleRecoverStreak = () => {
+    const res = recoverBrokenStreakState(user);
+    if (!res.ok) {
+      return;
+    }
+    const updated: UserProfile = {
+      ...user,
+      ...res.nextState,
+      streakDays: res.nextState.currentStreak,
+    };
+    handleUpdateUser(updated);
+  };
+
   const handleSignOut = async () => {
     activeFbUidRef.current = null;
     setShowOnboarding(false);
@@ -1398,12 +1436,14 @@ export default function App() {
 
   const handleNewSession = (initialCategory?: string) => {
     hasUserPickedSessionRef.current = true;
+    setChatDraft(null);
+    setActiveTab('chat');
     const cleanCategory =
       initialCategory && initialCategory.trim() && initialCategory !== 'All'
         ? initialCategory.trim().slice(0, 48)
         : 'General';
     const newSession: ChatSession = {
-      id: `session-${Date.now()}`,
+      id: `session-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       title: `Conversation ${sessions.length + 1}`,
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -2116,6 +2156,7 @@ export default function App() {
         isOpen={isGamificationModalOpen}
         onClose={() => setIsGamificationModalOpen(false)}
         user={user}
+        onRecoverStreak={handleRecoverStreak}
       />
 
       {/* ANDROID, IOS & DESKTOP INSTALL MODAL */}

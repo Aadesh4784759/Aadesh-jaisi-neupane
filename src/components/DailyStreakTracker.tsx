@@ -1,11 +1,24 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { motion, useReducedMotion } from 'motion/react';
-import { Flame, Target, Calendar, Sparkles, Database, RefreshCw, Trophy, CheckCircle2 } from 'lucide-react';
+import {
+  Flame,
+  Target,
+  Calendar,
+  Sparkles,
+  Database,
+  RefreshCw,
+  Trophy,
+  CheckCircle2,
+  ShieldCheck,
+  RotateCcw,
+} from 'lucide-react';
 import { UserProfile } from '../types';
 import {
   CalculatedStreakSummary,
   calculateConsecutiveStreakFromDates,
   computeLevelInfo,
+  isStreakRecoveryEligible,
+  getMonthlyRecoveryUsage,
 } from '../utils/gamification';
 import { fetchUserUsageDatesFromFirestore } from '../utils/firebase';
 
@@ -13,6 +26,7 @@ interface DailyStreakTrackerProps {
   user: UserProfile;
   onOpenGamification?: () => void;
   onStreakCalculated?: (summary: CalculatedStreakSummary) => void;
+  onRecoverStreak?: () => void;
   className?: string;
 }
 
@@ -20,6 +34,7 @@ export const DailyStreakTracker: React.FC<DailyStreakTrackerProps> = ({
   user,
   onOpenGamification,
   onStreakCalculated,
+  onRecoverStreak,
   className = '',
 }) => {
   const prefersReducedMotion = useReducedMotion();
@@ -34,7 +49,7 @@ export const DailyStreakTracker: React.FC<DailyStreakTrackerProps> = ({
     }
     setIsSyncingLogs(true);
     try {
-      const res = await fetchUserUsageDatesFromFirestore(user.id);
+      const res = await fetchUserUsageDatesFromFirestore(user.id, user.timezone);
       setFirestoreDateCounts(res.dateCounts);
       setLogSource(res.source);
     } catch (err) {
@@ -48,7 +63,7 @@ export const DailyStreakTracker: React.FC<DailyStreakTrackerProps> = ({
   useEffect(() => {
     loadFirestoreLogs();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user.id, user.isLoggedIn, user.xp]);
+  }, [user.id, user.isLoggedIn, user.xp, user.timezone]);
 
   // Merge Firestore logs with local streakHistory so offline or newly earned interactions reflect immediately
   const streakSummary = useMemo<CalculatedStreakSummary>(() => {
@@ -65,9 +80,34 @@ export const DailyStreakTracker: React.FC<DailyStreakTrackerProps> = ({
       merged,
       user.streakDays || 0,
       user.longestStreak || 0,
-      30
+      30,
+      {
+        timeZone: user.timezone,
+        authoritativeStreak: user.currentStreak ?? user.streakDays,
+        lastActiveDate: user.lastActiveDate,
+      }
     );
-  }, [firestoreDateCounts, user.streakHistory, user.lastActiveDate, user.streakDays, user.longestStreak]);
+  }, [
+    firestoreDateCounts,
+    user.streakHistory,
+    user.lastActiveDate,
+    user.streakDays,
+    user.currentStreak,
+    user.longestStreak,
+    user.timezone,
+  ]);
+
+  const recoveryInfo = useMemo(() => {
+    return getMonthlyRecoveryUsage({
+      recoveryCount: user.recoveryCount ?? 0,
+      recoveryMonth: user.recoveryMonth ?? '',
+      timezone: user.timezone || 'UTC',
+    });
+  }, [user.recoveryCount, user.recoveryMonth, user.timezone]);
+
+  const recoveryEligibility = useMemo(() => {
+    return isStreakRecoveryEligible(user);
+  }, [user]);
 
   useEffect(() => {
     onStreakCalculated?.(streakSummary);
@@ -249,6 +289,33 @@ export const DailyStreakTracker: React.FC<DailyStreakTrackerProps> = ({
         </div>
       </div>
 
+      {/* Streak Recovery Banner when broken & eligible */}
+      {recoveryEligibility.eligible && onRecoverStreak && (
+        <div className="p-3 rounded-xl bg-gradient-to-r from-amber-500/25 via-orange-500/20 to-rose-500/20 border border-amber-400/60 flex items-center justify-between gap-3 shadow-[0_0_16px_rgba(245,158,11,0.2)]">
+          <div className="flex items-center gap-2 min-w-0">
+            <RotateCcw className="w-4 h-4 text-amber-300 shrink-0" />
+            <div>
+              <div className="text-xs font-bold text-amber-200">
+                Streak Recovery Available!
+              </div>
+              <div className="text-[10px] text-gray-300">
+                Restore your {recoveryEligibility.restorableStreak}-day streak ({recoveryEligibility.recoveriesRemaining} uses left this month)
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onRecoverStreak();
+            }}
+            className="px-3 py-1.5 rounded-lg bg-gradient-to-r from-amber-400 to-orange-500 hover:from-amber-300 hover:to-orange-400 text-black font-extrabold text-[11px] shrink-0 cursor-pointer shadow-md transition-all"
+          >
+            Recover Streak
+          </button>
+        </div>
+      )}
+
       {/* Progress Bar Towards 'Weekly Master' Streak Badge */}
       <div className="p-3.5 rounded-xl bg-[#090a0f]/85 border border-amber-400/35 space-y-2 shadow-[0_0_16px_rgba(245,158,11,0.12)]">
         <div className="flex items-center justify-between gap-2 text-[11px] font-semibold">
@@ -415,6 +482,15 @@ export const DailyStreakTracker: React.FC<DailyStreakTrackerProps> = ({
             className="h-full rounded-full bg-gradient-to-r from-rose-500 to-amber-500 transition-all duration-300"
           />
         </div>
+      </div>
+
+      {/* Monthly Recovery Status Footer */}
+      <div className="flex items-center justify-between text-[10px] text-gray-400 pt-1 border-t border-white/5">
+        <span className="flex items-center gap-1.5">
+          <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+          <span>Monthly Protections: {recoveryInfo.remaining}/3 available</span>
+        </span>
+        <span className="text-gray-500 font-mono text-[9px]">{user.timezone || 'UTC'}</span>
       </div>
     </div>
   );

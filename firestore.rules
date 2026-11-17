@@ -45,8 +45,9 @@ service cloud.firestore {
           'userId', 'displayName', 'nickname', 'age', 'onboardingCompleted', 'memoryConsent',
           'username', 'email', 'photoURL',
           'preferredLanguage', 'preferredTheme', 'termsAccepted', 'termsAcceptedAt',
-          'country', 'countryFlag', 'isManualCountry',
-          'streakDays', 'longestStreak', 'lastActiveDate',
+          'country', 'countryCode', 'countryFlag', 'timezone', 'countryDetectionMethod', 'isManualCountry',
+          'streakDays', 'currentStreak', 'longestStreak', 'lastActiveDate',
+          'recoveryCount', 'recoveryMonth', 'streakBeforeBreak', 'streakBrokenDate',
           'status', 'role', 'provider',
           'messageCount', 'conversationCount', 'createdAt', 'updatedAt', 'lastActiveAt'
         ])
@@ -65,11 +66,19 @@ service cloud.firestore {
         && (!('termsAccepted' in data) || data.termsAccepted is bool)
         && (!('termsAcceptedAt' in data) || (data.termsAcceptedAt is string && data.termsAcceptedAt.size() <= 50))
         && (!('country' in data) || (data.country is string && data.country.size() <= 80))
+        && (!('countryCode' in data) || (data.countryCode is string && data.countryCode.size() <= 10))
         && (!('countryFlag' in data) || (data.countryFlag is string && data.countryFlag.size() <= 16))
+        && (!('timezone' in data) || (data.timezone is string && data.timezone.size() <= 64))
+        && (!('countryDetectionMethod' in data) || data.countryDetectionMethod in ['gps', 'ip', 'timezone', 'manual'])
         && (!('isManualCountry' in data) || data.isManualCountry is bool)
         && (!('streakDays' in data) || (data.streakDays is number && data.streakDays >= 0 && data.streakDays <= 10000))
+        && (!('currentStreak' in data) || (data.currentStreak is number && data.currentStreak >= 0 && data.currentStreak <= 10000))
         && (!('longestStreak' in data) || (data.longestStreak is number && data.longestStreak >= 0 && data.longestStreak <= 10000))
         && (!('lastActiveDate' in data) || (data.lastActiveDate is string && data.lastActiveDate.size() <= 20))
+        && (!('recoveryCount' in data) || (data.recoveryCount is int && data.recoveryCount >= 0 && data.recoveryCount <= 3))
+        && (!('recoveryMonth' in data) || (data.recoveryMonth is string && data.recoveryMonth.size() <= 16))
+        && (!('streakBeforeBreak' in data) || (data.streakBeforeBreak is number && data.streakBeforeBreak >= 0 && data.streakBeforeBreak <= 10000))
+        && (!('streakBrokenDate' in data) || (data.streakBrokenDate is string && data.streakBrokenDate.size() <= 20))
         && (!('status' in data) || data.status in ['active', 'suspended'])
         && (!('role' in data) || data.role in ['user', 'admin'])
         && (!('provider' in data) || (data.provider is string && data.provider.size() <= 32))
@@ -85,8 +94,9 @@ service cloud.firestore {
           'userId', 'displayName', 'nickname', 'age', 'onboardingCompleted', 'memoryConsent',
           'username', 'email', 'photoURL',
           'preferredLanguage', 'preferredTheme', 'termsAccepted', 'termsAcceptedAt',
-          'country', 'countryFlag', 'isManualCountry',
-          'streakDays', 'longestStreak', 'lastActiveDate',
+          'country', 'countryCode', 'countryFlag', 'timezone', 'countryDetectionMethod', 'isManualCountry',
+          'streakDays', 'currentStreak', 'longestStreak', 'lastActiveDate',
+          'recoveryCount', 'recoveryMonth', 'streakBeforeBreak', 'streakBrokenDate',
           'status', 'role', 'provider',
           'messageCount', 'conversationCount', 'createdAt', 'updatedAt', 'lastActiveAt'
         ])
@@ -105,11 +115,19 @@ service cloud.firestore {
         && (!('termsAccepted' in data) || data.termsAccepted is bool)
         && (!('termsAcceptedAt' in data) || (data.termsAcceptedAt is string && data.termsAcceptedAt.size() <= 50))
         && (!('country' in data) || (data.country is string && data.country.size() <= 80))
+        && (!('countryCode' in data) || (data.countryCode is string && data.countryCode.size() <= 10))
         && (!('countryFlag' in data) || (data.countryFlag is string && data.countryFlag.size() <= 16))
+        && (!('timezone' in data) || (data.timezone is string && data.timezone.size() <= 64))
+        && (!('countryDetectionMethod' in data) || data.countryDetectionMethod in ['gps', 'ip', 'timezone', 'manual'])
         && (!('isManualCountry' in data) || data.isManualCountry is bool)
         && (!('streakDays' in data) || (data.streakDays is number && data.streakDays >= 0 && data.streakDays <= 10000))
+        && (!('currentStreak' in data) || (data.currentStreak is number && data.currentStreak >= 0 && data.currentStreak <= 10000))
         && (!('longestStreak' in data) || (data.longestStreak is number && data.longestStreak >= 0 && data.longestStreak <= 10000))
         && (!('lastActiveDate' in data) || (data.lastActiveDate is string && data.lastActiveDate.size() <= 20))
+        && (!('recoveryCount' in data) || (data.recoveryCount is int && data.recoveryCount >= 0 && data.recoveryCount <= 3))
+        && (!('recoveryMonth' in data) || (data.recoveryMonth is string && data.recoveryMonth.size() <= 16))
+        && (!('streakBeforeBreak' in data) || (data.streakBeforeBreak is number && data.streakBeforeBreak >= 0 && data.streakBeforeBreak <= 10000))
+        && (!('streakBrokenDate' in data) || (data.streakBrokenDate is string && data.streakBrokenDate.size() <= 20))
         && (!('status' in data) || data.status in ['active', 'suspended'])
         && (!('role' in data) || data.role in ['user', 'admin'])
         && (!('provider' in data) || (data.provider is string && data.provider.size() <= 32))
@@ -346,8 +364,9 @@ service cloud.firestore {
               'displayName', 'nickname', 'age', 'onboardingCompleted', 'memoryConsent',
               'username', 'email', 'photoURL',
               'preferredLanguage', 'preferredTheme', 'termsAccepted', 'termsAcceptedAt',
-              'country', 'countryFlag', 'isManualCountry',
-              'streakDays', 'longestStreak', 'lastActiveDate',
+              'country', 'countryCode', 'countryFlag', 'timezone', 'countryDetectionMethod', 'isManualCountry',
+              'streakDays', 'currentStreak', 'longestStreak', 'lastActiveDate',
+              'recoveryCount', 'recoveryMonth', 'streakBeforeBreak', 'streakBrokenDate',
               'provider', 'messageCount',
               'conversationCount', 'updatedAt', 'lastActiveAt'
             ])

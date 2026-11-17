@@ -607,6 +607,26 @@ export const ChatView: React.FC<ChatViewProps> = ({
     el.style.height = `${Math.min(156, Math.max(40, el.scrollHeight))}px`;
   }, [inputText]);
 
+  const prevChatSessionIdRef = useRef<string>(currentSession.id);
+  useEffect(() => {
+    if (prevChatSessionIdRef.current !== currentSession.id) {
+      prevChatSessionIdRef.current = currentSession.id;
+      if (!externalDraft) {
+        setInputText('');
+        setSelectedImage(null);
+        setSelectedFile(null);
+        setSelectedVideo(null);
+        setAttachedLocation(undefined);
+        setChatError(null);
+        setVoiceError(null);
+        setSharePopoverMsgId(null);
+        setReactionPickerMsgId(null);
+        setQuickContextMenu(null);
+        setMessageSummary(null);
+      }
+    }
+  }, [currentSession.id, externalDraft]);
+
   // Automatically scroll to the latest message whenever the current session's message array is updated
   useEffect(() => {
     if (searchFilter.trim()) return;

@@ -156,7 +156,10 @@ export interface UserProfile {
   avatarUrl?: string;
   avatarColor?: string;
   country?: string;
+  countryCode?: string;
   countryFlag?: string;
+  timezone?: string;
+  countryDetectionMethod?: 'gps' | 'ip' | 'timezone' | 'manual';
   isManualCountry?: boolean;
   termsAccepted?: boolean;
   termsAcceptedAt?: string;
@@ -169,13 +172,18 @@ export interface UserProfile {
   lastActiveAt?: number;
   preferredLanguage?: string;
   streakDays: number;
+  currentStreak?: number;
   longestStreak: number;
+  recoveryCount?: number;
+  recoveryMonth?: string; // YYYY-MM in user's IANA timezone
+  streakBeforeBreak?: number;
+  streakBrokenDate?: string; // YYYY-MM-DD of lastActiveDate before break
   xp: number;
   level: number;
   levelTitle: string;
   dailyGoalTarget: number;
   dailyGoalCurrent: number;
-  lastActiveDate: string; // YYYY-MM-DD
+  lastActiveDate: string; // YYYY-MM-DD in user's IANA timezone
   streakHistory: DailyStreakDay[];
   badges: AchievementBadge[];
 }

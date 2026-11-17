@@ -48,6 +48,8 @@ export const DEFAULT_SESSION_CATEGORIES = [
 
 export const OWNER_ADMIN_EMAIL = 'aadeshjaisi6@gmail.com';
 
+const detectedInitialCountry = detectUserCountry();
+
 // Never display Aadesh Jaisi as every visitor's personal name; keep creator credit in footer/branding.
 export const DEFAULT_USER: UserProfile = {
   id: 'guest_explorer',
@@ -56,8 +58,11 @@ export const DEFAULT_USER: UserProfile = {
   email: '',
   avatarUrl: '',
   avatarColor: '#8b5cf6',
-  country: detectUserCountry().country,
-  countryFlag: detectUserCountry().flag,
+  country: detectedInitialCountry.country,
+  countryCode: detectedInitialCountry.code,
+  countryFlag: detectedInitialCountry.flag,
+  timezone: detectedInitialCountry.timeZone,
+  countryDetectionMethod: 'timezone',
   provider: 'guest',
   linkedProviders: [],
   isLoggedIn: false,
@@ -67,14 +72,19 @@ export const DEFAULT_USER: UserProfile = {
   lastActiveAt: Date.now(),
   preferredLanguage: 'en',
   streakDays: 0,
+  currentStreak: 0,
   longestStreak: 0,
+  recoveryCount: 0,
+  recoveryMonth: '',
+  streakBeforeBreak: 0,
+  streakBrokenDate: '',
   xp: 0,
   level: 1,
   levelTitle: 'Curious Novice',
   dailyGoalTarget: 5,
   dailyGoalCurrent: 0,
   lastActiveDate: '',
-  streakHistory: generateStreakHistory(0),
+  streakHistory: generateStreakHistory(0, undefined, detectedInitialCountry.timeZone),
   badges: INITIAL_BADGES,
 };
 
@@ -627,10 +637,20 @@ export interface UserLocalExtras {
   memoryConsent?: 'pending' | 'agreed' | 'disagreed';
   lastSeenAt?: number;
   country?: string;
+  countryCode?: string;
   countryFlag?: string;
+  timezone?: string;
+  countryDetectionMethod?: 'gps' | 'ip' | 'timezone' | 'manual';
   isManualCountry?: boolean;
   customAvatarDataUrl?: string;
   avatarColor?: string;
+  currentStreak?: number;
+  longestStreak?: number;
+  lastActiveDate?: string;
+  recoveryCount?: number;
+  recoveryMonth?: string;
+  streakBeforeBreak?: number;
+  streakBrokenDate?: string;
 }
 
 export const getUserLocalExtras = (userId?: string): UserLocalExtras => {

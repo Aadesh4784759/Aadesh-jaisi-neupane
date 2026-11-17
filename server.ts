@@ -3303,8 +3303,9 @@ app.get('/api/geo/ip-country', async (req: Request, res: Response): Promise<void
         const ipData = await ipRes.json();
         const code = String(ipData?.country_code || '').trim().toUpperCase();
         const country = String(ipData?.country_name || '').trim();
-        if (/^[A-Z]{2}$/.test(code)) {
-          res.json({ ok: true, code, country, approximate: true, source: 'ip-lookup' });
+        const timezone = String(ipData?.timezone || '').trim();
+        if (/^[A-Z]{2}$/.test(code) && code !== 'XX' && code !== 'T1') {
+          res.json({ ok: true, code, country, ...(timezone ? { timezone } : {}), approximate: true, source: 'ip-lookup' });
           return;
         }
       }
@@ -3312,7 +3313,32 @@ app.get('/api/geo/ip-country', async (req: Request, res: Response): Promise<void
       clearTimeout(timer);
     }
   } catch {
-    // Non-fatal fallback
+    // Non-fatal primary fallback
+  }
+
+  try {
+    const controller2 = new AbortController();
+    const timer2 = setTimeout(() => controller2.abort(), 3500);
+    try {
+      const ipWhoRes = await fetch('https://ipwho.is/', {
+        headers: { 'User-Agent': 'AadeshAI/2.5' },
+        signal: controller2.signal,
+      });
+      if (ipWhoRes.ok) {
+        const whoData = await ipWhoRes.json();
+        const code = String(whoData?.country_code || '').trim().toUpperCase();
+        const country = String(whoData?.country || '').trim();
+        const timezone = String(whoData?.timezone?.id || '').trim();
+        if (whoData?.success !== false && /^[A-Z]{2}$/.test(code) && code !== 'XX' && code !== 'T1') {
+          res.json({ ok: true, code, country, ...(timezone ? { timezone } : {}), approximate: true, source: 'ip-lookup-secondary' });
+          return;
+        }
+      }
+    } finally {
+      clearTimeout(timer2);
+    }
+  } catch {
+    // Non-fatal secondary fallback
   }
 
   res.json({ ok: false, approximate: true });

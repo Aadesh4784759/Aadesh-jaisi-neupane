@@ -47,6 +47,7 @@ import {
   UserProfile,
 } from '../types';
 import { OWNER_ADMIN_EMAIL } from './storage';
+import { getLocalDateKeyInTimezone } from './gamification';
 
 export enum OperationType {
   CREATE = 'create',
@@ -348,11 +349,19 @@ export async function syncUserProfileToFirestore(
       termsAccepted: profile.termsAccepted ?? true,
       termsAcceptedAt: (profile.termsAcceptedAt || nowIso).slice(0, 50),
       country: (profile.country || 'Global').slice(0, 80),
+      countryCode: (profile.countryCode || 'GL').slice(0, 10),
       countryFlag: (profile.countryFlag || '🌐').slice(0, 16),
+      timezone: (profile.timezone || 'UTC').slice(0, 64),
+      countryDetectionMethod: profile.countryDetectionMethod || 'timezone',
       isManualCountry: Boolean(profile.isManualCountry),
       streakDays: safeStreakDays,
+      currentStreak: safeStreakDays,
       longestStreak: safeLongestStreak,
       ...(safeLastActiveDate ? { lastActiveDate: safeLastActiveDate } : {}),
+      ...(typeof profile.recoveryCount === 'number' ? { recoveryCount: Math.max(0, Math.min(3, profile.recoveryCount)) } : {}),
+      ...(profile.recoveryMonth ? { recoveryMonth: profile.recoveryMonth.slice(0, 16) } : {}),
+      ...(typeof profile.streakBeforeBreak === 'number' ? { streakBeforeBreak: profile.streakBeforeBreak } : {}),
+      ...(profile.streakBrokenDate ? { streakBrokenDate: profile.streakBrokenDate.slice(0, 20) } : {}),
     };
 
     if (!existingSnap.exists()) {
@@ -411,14 +420,22 @@ export async function loadUserProfileFromFirestore(
       avatarUrl: data.photoURL,
       preferredLanguage: data.preferredLanguage,
       country: data.country,
+      countryCode: data.countryCode,
       countryFlag: data.countryFlag,
+      timezone: data.timezone,
+      countryDetectionMethod: data.countryDetectionMethod,
       isManualCountry: typeof data.isManualCountry === 'boolean' ? data.isManualCountry : undefined,
       termsAccepted: data.termsAccepted,
       termsAcceptedAt: data.termsAcceptedAt,
       preferredTheme: data.preferredTheme,
-      streakDays: typeof data.streakDays === 'number' ? data.streakDays : undefined,
+      streakDays: typeof data.streakDays === 'number' ? data.streakDays : typeof data.currentStreak === 'number' ? data.currentStreak : undefined,
+      currentStreak: typeof data.currentStreak === 'number' ? data.currentStreak : typeof data.streakDays === 'number' ? data.streakDays : undefined,
       longestStreak: typeof data.longestStreak === 'number' ? data.longestStreak : undefined,
       lastActiveDate: typeof data.lastActiveDate === 'string' ? data.lastActiveDate : undefined,
+      recoveryCount: typeof data.recoveryCount === 'number' ? data.recoveryCount : undefined,
+      recoveryMonth: typeof data.recoveryMonth === 'string' ? data.recoveryMonth : undefined,
+      streakBeforeBreak: typeof data.streakBeforeBreak === 'number' ? data.streakBeforeBreak : undefined,
+      streakBrokenDate: typeof data.streakBrokenDate === 'string' ? data.streakBrokenDate : undefined,
       status: data.status || 'active',
       role: data.role || 'user',
       createdAt: data.createdAt ? new Date(data.createdAt).getTime() : undefined,
@@ -639,12 +656,14 @@ export async function recordUsageAnalyticsToFirestore(params: {
   eventType: 'chat' | 'voice' | 'image' | 'translation' | 'file';
   language?: string;
   latencyMs?: number;
+  timeZone?: string;
 }): Promise<void> {
   if (!db || !auth?.currentUser) return;
   const uid = safeDocId(auth.currentUser.uid);
   const eventId = safeDocId(`evt-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`);
   const path = `usage_analytics/${eventId}`;
   const now = new Date();
+  const dateKey = getLocalDateKeyInTimezone(now.getTime(), params.timeZone);
   try {
     await setDoc(doc(db, 'usage_analytics', eventId), {
       id: eventId,
@@ -652,7 +671,7 @@ export async function recordUsageAnalyticsToFirestore(params: {
       eventType: params.eventType,
       language: (params.language || 'en').slice(0, 20),
       latencyMs: typeof params.latencyMs === 'number' ? params.latencyMs : 0,
-      dateKey: now.toISOString().slice(0, 10),
+      dateKey,
       timestamp: now.toISOString(),
     });
   } catch (err) {
@@ -669,7 +688,8 @@ export interface FirestoreUsageStreakResult {
 }
 
 export async function fetchUserUsageDatesFromFirestore(
-  userId: string
+  userId: string,
+  timeZone?: string
 ): Promise<FirestoreUsageStreakResult> {
   if (!db || !auth?.currentUser || auth.currentUser.uid !== userId) {
     return { dateCounts: {}, totalInteractions: 0, source: 'local' };
@@ -686,12 +706,16 @@ export async function fetchUserUsageDatesFromFirestore(
     );
     analyticsSnap.docs.forEach((d) => {
       const data = d.data();
-      const dateKey =
-        typeof data.dateKey === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(data.dateKey)
-          ? data.dateKey
-          : typeof data.timestamp === 'string'
-          ? data.timestamp.slice(0, 10)
-          : '';
+      let dateKey = '';
+      if (typeof data.timestamp === 'string') {
+        const ms = new Date(data.timestamp).getTime();
+        if (!Number.isNaN(ms)) {
+          dateKey = getLocalDateKeyInTimezone(ms, timeZone);
+        }
+      }
+      if (!dateKey && typeof data.dateKey === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(data.dateKey)) {
+        dateKey = data.dateKey;
+      }
       if (dateKey && /^\d{4}-\d{2}-\d{2}$/.test(dateKey)) {
         dateCounts[dateKey] = (dateCounts[dateKey] || 0) + 1;
         totalInteractions += 1;
@@ -710,8 +734,20 @@ export async function fetchUserUsageDatesFromFirestore(
     const convSnap = await getDocs(query(collection(db, 'users', uid, 'conversations'), limit(100)));
     convSnap.docs.forEach((d) => {
       const data = d.data();
-      const updatedKey = typeof data.updatedAt === 'string' ? data.updatedAt.slice(0, 10) : '';
-      const createdKey = typeof data.createdAt === 'string' ? data.createdAt.slice(0, 10) : '';
+      let updatedKey = '';
+      let createdKey = '';
+      if (typeof data.updatedAt === 'string') {
+        const ms = new Date(data.updatedAt).getTime();
+        if (!Number.isNaN(ms)) {
+          updatedKey = getLocalDateKeyInTimezone(ms, timeZone);
+        }
+      }
+      if (typeof data.createdAt === 'string') {
+        const ms = new Date(data.createdAt).getTime();
+        if (!Number.isNaN(ms)) {
+          createdKey = getLocalDateKeyInTimezone(ms, timeZone);
+        }
+      }
       if (updatedKey && /^\d{4}-\d{2}-\d{2}$/.test(updatedKey)) {
         dateCounts[updatedKey] = Math.max(dateCounts[updatedKey] || 0, 1);
       }

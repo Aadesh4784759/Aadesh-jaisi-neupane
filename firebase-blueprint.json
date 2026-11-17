@@ -72,10 +72,25 @@
           "description": "User selected or detected country name",
           "maxLength": 80
         },
+        "countryCode": {
+          "type": "string",
+          "description": "ISO 3166-1 alpha-2 country code or GL for Global",
+          "maxLength": 10
+        },
         "countryFlag": {
           "type": "string",
           "description": "Emoji flag for user country",
           "maxLength": 16
+        },
+        "timezone": {
+          "type": "string",
+          "description": "User saved IANA timezone identifier (e.g. Asia/Kathmandu)",
+          "maxLength": 64
+        },
+        "countryDetectionMethod": {
+          "type": "string",
+          "description": "How the country was resolved (gps, ip, timezone, manual)",
+          "enum": ["gps", "ip", "timezone", "manual"]
         },
         "isManualCountry": {
           "type": "boolean",
@@ -85,13 +100,35 @@
           "type": "number",
           "description": "Current consecutive active streak days"
         },
+        "currentStreak": {
+          "type": "number",
+          "description": "Current consecutive active streak days (atomic mirror of streakDays)"
+        },
         "longestStreak": {
           "type": "number",
           "description": "Highest achieved consecutive active streak days"
         },
         "lastActiveDate": {
           "type": "string",
-          "description": "Last active YYYY-MM-DD date string",
+          "description": "Last active YYYY-MM-DD date string in user IANA timezone",
+          "maxLength": 20
+        },
+        "recoveryCount": {
+          "type": "number",
+          "description": "Number of streak recoveries used in recoveryMonth (max 3 per calendar month)"
+        },
+        "recoveryMonth": {
+          "type": "string",
+          "description": "Calendar month key YYYY-MM in user IANA timezone for monthly recovery limit",
+          "maxLength": 16
+        },
+        "streakBeforeBreak": {
+          "type": "number",
+          "description": "Previous consecutive streak eligible for recovery after missing a day"
+        },
+        "streakBrokenDate": {
+          "type": "string",
+          "description": "YYYY-MM-DD of the last active day prior to streak break",
           "maxLength": 20
         },
         "status": {

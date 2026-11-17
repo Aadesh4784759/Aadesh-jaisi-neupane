@@ -17,12 +17,14 @@ interface GamificationModalProps {
   isOpen: boolean;
   onClose: () => void;
   user: UserProfile;
+  onRecoverStreak?: () => void;
 }
 
 export const GamificationModal: React.FC<GamificationModalProps> = ({
   isOpen,
   onClose,
   user,
+  onRecoverStreak,
 }) => {
   const prefersReducedMotion = useReducedMotion();
   const [liveStreakSummary, setLiveStreakSummary] = useState<CalculatedStreakSummary | null>(null);
@@ -116,6 +118,7 @@ export const GamificationModal: React.FC<GamificationModalProps> = ({
           <DailyStreakTracker
             user={user}
             onStreakCalculated={setLiveStreakSummary}
+            onRecoverStreak={onRecoverStreak}
           />
 
           {/* Main Streak & XP Scoreboard */}

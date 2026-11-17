@@ -98,7 +98,30 @@ export const Header: React.FC<HeaderProps> = ({
   const displayName = user.name?.trim() || 'User';
   const flagEmoji = user.countryFlag || '🌐';
   const countryName = user.country || 'Global';
-  const streakCount = Math.max(0, user.streakDays || 0);
+  const streakCount = Math.max(0, user.currentStreak ?? user.streakDays ?? 0);
+
+  const [isLoginLighting, setIsLoginLighting] = useState<boolean>(false);
+  const prevLoggedInRef = useRef<boolean>(user.isLoggedIn);
+  const prevUserIdRef = useRef<string | null>(user.id || null);
+
+  useEffect(() => {
+    // Trigger the blue-purple glow and fire-lighting animation on login or initial authenticated mount
+    if (user.isLoggedIn && user.id && user.id !== 'guest' && user.id !== 'unauthenticated') {
+      const isNewLogin = !prevLoggedInRef.current || prevUserIdRef.current !== user.id;
+      if (isNewLogin) {
+        setIsLoginLighting(true);
+        const timer = window.setTimeout(() => {
+          setIsLoginLighting(false);
+        }, 3800);
+        prevLoggedInRef.current = true;
+        prevUserIdRef.current = user.id;
+        return () => window.clearTimeout(timer);
+      }
+    } else {
+      prevLoggedInRef.current = false;
+      prevUserIdRef.current = null;
+    }
+  }, [user.isLoggedIn, user.id]);
 
   const statusMeta = (() => {
     switch (aiHealth.state) {
@@ -303,74 +326,208 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
       </div>
 
-      {/* RIGHT: Animated Unified Rectangular Profile Panel (Streak first + Photo + Full Name + Country Flag & Name + Dropdown) */}
+      {/* RIGHT: Animated Unified Rectangular Profile Panel (Premium Streak Badge + Photo + Full Name + Country + Dropdown) */}
       <div className="relative min-w-0 shrink" ref={profileContainerRef}>
-        <motion.button
-          type="button"
+        <motion.div
           whileHover={{ scale: 1.015 }}
-          whileTap={{ scale: 0.985 }}
-          onClick={() => setProfileMenuOpen((prev) => !prev)}
-          aria-expanded={profileMenuOpen}
-          aria-haspopup="menu"
-          title={`${displayName} • ${countryName} • ${streakCount}-Day Streak`}
-          aria-label={`Open account menu for ${displayName}`}
-          className="min-h-[42px] flex items-center gap-2 sm:gap-2.5 px-2.5 sm:px-3 py-1 rounded-xl glass-card border border-purple-400/35 hover:border-purple-400/70 transition-colors cursor-pointer group min-w-0 max-w-[235px] sm:max-w-[360px] shadow-[0_0_20px_rgba(139,92,246,0.18)] focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-400"
+          className={`min-h-[44px] flex items-center p-1 sm:p-1.5 rounded-2xl glass-card border transition-all cursor-pointer group min-w-0 max-w-[275px] sm:max-w-[420px] relative overflow-hidden select-none ${
+            isLoginLighting
+              ? 'border-purple-400/90 shadow-[0_0_30px_rgba(59,130,246,0.65),0_0_55px_rgba(147,51,234,0.55),0_0_75px_rgba(245,158,11,0.35)]'
+              : 'border-purple-400/40 hover:border-sky-400/70 shadow-[0_0_24px_rgba(139,92,246,0.22)]'
+          }`}
         >
-          {/* 1. Daily Streak Counter First */}
-          <span
-            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-amber-500/15 border border-amber-400/35 text-xs font-extrabold text-amber-300 tabular-nums shrink-0"
-            title={`${streakCount}-Day Consecutive Streak`}
-          >
-            <span aria-hidden="true">🔥</span>
-            <span>{streakCount}</span>
-          </span>
-
-          {/* 2. Circular Profile Photo */}
-          <div
-            className="w-8 h-8 rounded-full p-[1.5px] shrink-0 transition-transform duration-200 group-hover:scale-105"
-            style={{
-              background: `linear-gradient(135deg, ${avatarTokens.primaryHex}, ${avatarTokens.lightHex})`,
-              boxShadow: `0 0 12px rgba(${avatarTokens.primaryRgb}, 0.45)`,
-            }}
-          >
-            {user.avatarUrl ? (
-              <img
-                src={user.avatarUrl}
-                alt={displayName}
-                referrerPolicy="no-referrer"
-                className="w-full h-full object-cover rounded-full bg-[#120e24]"
-              />
-            ) : (
-              <div
-                className="w-full h-full rounded-full flex items-center justify-center text-white text-xs font-black"
-                style={{
-                  background: `linear-gradient(135deg, ${avatarTokens.deepHex}, #16102b)`,
-                }}
-              >
-                {displayName.charAt(0).toUpperCase()}
-              </div>
-            )}
-          </div>
-
-          {/* 3. Full Display Name + Country Flag & Name (No @ prefix, No UID) */}
-          <div className="flex flex-col items-start text-left min-w-0">
-            <span className="text-xs sm:text-sm font-bold text-white group-hover:text-purple-200 transition-colors truncate max-w-[95px] sm:max-w-[165px] leading-tight">
-              {displayName}
-            </span>
-            <span className="inline-flex items-center gap-1 text-[10.5px] text-purple-200/80 font-medium truncate max-w-[95px] sm:max-w-[165px] leading-tight">
-              <span aria-hidden="true">{flagEmoji}</span>
-              <span className="truncate">{countryName}</span>
-            </span>
-          </div>
-
-          {/* 4. Dropdown Chevron */}
-          <ChevronDown
-            className={`w-3.5 h-3.5 text-purple-300/80 transition-transform duration-150 shrink-0 ${
-              profileMenuOpen ? 'rotate-180' : ''
-            }`}
+          {/* Ambient Blue-Purple Background Glow Sweep */}
+          <motion.div
             aria-hidden="true"
+            animate={
+              isLoginLighting
+                ? {
+                    opacity: [0.35, 0.85, 0.45, 0.9, 0.35],
+                    background: [
+                      'radial-gradient(circle at 15% 50%, rgba(59,130,246,0.45), rgba(147,51,234,0.35), transparent 70%)',
+                      'radial-gradient(circle at 50% 50%, rgba(147,51,234,0.55), rgba(59,130,246,0.45), transparent 70%)',
+                      'radial-gradient(circle at 85% 50%, rgba(59,130,246,0.45), rgba(245,158,11,0.35), transparent 70%)',
+                    ],
+                  }
+                : {
+                    opacity: [0.25, 0.5, 0.25],
+                    scale: [1, 1.04, 1],
+                  }
+            }
+            transition={{
+              duration: isLoginLighting ? 1.8 : 3.8,
+              repeat: isLoginLighting ? 2 : Infinity,
+              ease: 'easeInOut',
+            }}
+            className="absolute inset-0 bg-gradient-to-r from-blue-600/15 via-purple-600/20 to-amber-500/15 pointer-events-none rounded-2xl"
           />
-        </motion.button>
+
+          {/* Shimmer sweep line on login */}
+          {isLoginLighting && (
+            <motion.div
+              aria-hidden="true"
+              initial={{ x: '-120%' }}
+              animate={{ x: '180%' }}
+              transition={{ duration: 1.4, repeat: 2, ease: 'easeInOut' }}
+              className="absolute inset-y-0 w-1/3 bg-gradient-to-r from-transparent via-sky-300/35 to-transparent pointer-events-none z-10"
+            />
+          )}
+
+          {/* 1. PREMIUM ROUNDED-RECTANGLE STREAK BADGE */}
+          <motion.button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              if (onStreakClick) {
+                onStreakClick();
+              } else {
+                setProfileMenuOpen((prev) => !prev);
+              }
+            }}
+            whileHover={{ scale: 1.04 }}
+            whileTap={{ scale: 0.96 }}
+            aria-label={`${streakCount} Day Streak. Click to view streak tracker and gamification`}
+            title={`${streakCount}-Day Activity Streak (Click to view)`}
+            className={`flex items-center gap-1.5 sm:gap-2 px-2 sm:px-2.5 py-1 rounded-xl border transition-all cursor-pointer relative shrink-0 overflow-hidden ${
+              isLoginLighting
+                ? 'bg-gradient-to-r from-amber-500/35 via-orange-500/30 to-purple-600/30 border-amber-300/80 shadow-[0_0_20px_rgba(251,191,36,0.55)]'
+                : 'bg-gradient-to-r from-amber-500/20 via-orange-500/20 to-purple-600/20 border-amber-400/40 hover:border-amber-300/70 shadow-[0_0_12px_rgba(251,191,36,0.25)]'
+            }`}
+          >
+            {/* Fire Ignition & Lighting Aura */}
+            <div className="relative flex items-center justify-center shrink-0">
+              {isLoginLighting && (
+                <motion.span
+                  aria-hidden="true"
+                  initial={{ scale: 0.6, opacity: 0.9 }}
+                  animate={{ scale: [0.6, 2.0, 1.2], opacity: [0.9, 0.4, 0] }}
+                  transition={{ duration: 1.2, repeat: 2, ease: 'easeOut' }}
+                  className="absolute inset-0 rounded-full bg-gradient-to-r from-blue-400 via-amber-400 to-purple-500 blur-sm pointer-events-none"
+                />
+              )}
+
+              {/* Glowing Fire Icon with Login Flame Ignition Animation */}
+              <motion.div
+                animate={
+                  isLoginLighting
+                    ? {
+                        scale: [0.5, 1.45, 0.95, 1.2, 1],
+                        rotate: [0, -12, 10, -5, 0],
+                        filter: [
+                          'drop-shadow(0 0 4px #3b82f6)',
+                          'drop-shadow(0 0 18px #f59e0b) drop-shadow(0 0 28px #9333ea)',
+                          'drop-shadow(0 0 10px #f59e0b)',
+                        ],
+                      }
+                    : {
+                        scale: [1, 1.15, 1],
+                        rotate: [0, 4, -4, 0],
+                      }
+                }
+                transition={{
+                  duration: isLoginLighting ? 1.6 : 2.5,
+                  repeat: isLoginLighting ? 2 : Infinity,
+                  ease: 'easeInOut',
+                }}
+                className="flex items-center justify-center text-amber-400 leading-none drop-shadow-[0_0_10px_rgba(251,191,36,0.95)]"
+                aria-hidden="true"
+              >
+                <Flame className="w-4 h-4 sm:w-4.5 sm:h-4.5 fill-amber-400 text-amber-300 drop-shadow-[0_0_10px_rgba(245,158,11,0.95)]" />
+              </motion.div>
+            </div>
+
+            {/* Streak Count & Uppercase DAY STREAK Label */}
+            <div className="flex flex-col items-start leading-none pr-0.5">
+              <motion.span
+                animate={
+                  isLoginLighting
+                    ? {
+                        scale: [0.8, 1.25, 1],
+                        color: ['#fbbf24', '#ffffff', '#fde68a'],
+                        textShadow: [
+                          '0 0 4px rgba(59,130,246,0.8)',
+                          '0 0 14px rgba(251,191,36,1)',
+                          '0 0 8px rgba(251,191,36,0.6)',
+                        ],
+                      }
+                    : undefined
+                }
+                transition={{ duration: 1.2, repeat: isLoginLighting ? 2 : 0 }}
+                className="text-xs sm:text-sm font-black text-amber-300 tabular-nums leading-none tracking-tight"
+              >
+                {streakCount}
+              </motion.span>
+              <span className="text-[8px] sm:text-[8.5px] font-black text-amber-200/90 uppercase tracking-tight leading-tight mt-0.5 whitespace-nowrap">
+                Day Streak
+              </span>
+            </div>
+          </motion.button>
+
+          {/* Luminous Vertical Divider Transitioning into User Profile Area */}
+          <div
+            aria-hidden="true"
+            className="h-6 w-[1px] bg-gradient-to-b from-transparent via-purple-400/40 to-transparent mx-1 sm:mx-1.5 shrink-0"
+          />
+
+          {/* 2. USER PROFILE INTERACTIVE AREA (Photo + Full Name + Country + Dropdown Chevron) */}
+          <button
+            type="button"
+            onClick={() => setProfileMenuOpen((prev) => !prev)}
+            aria-expanded={profileMenuOpen}
+            aria-haspopup="menu"
+            aria-label={`Open account menu for ${displayName}`}
+            title={`${displayName} • ${countryName} • ${streakCount}-Day Streak`}
+            className="flex items-center gap-2 min-w-0 flex-1 px-1 py-0.5 cursor-pointer text-left focus:outline-none"
+          >
+            {/* Circular Profile Photo with Glowing Theme Border */}
+            <div
+              className="w-7 h-7 sm:w-8 sm:h-8 rounded-full p-[1.5px] shrink-0 transition-transform duration-200 group-hover:scale-105"
+              style={{
+                background: `linear-gradient(135deg, ${avatarTokens.primaryHex}, ${avatarTokens.lightHex})`,
+                boxShadow: isLoginLighting
+                  ? `0 0 18px rgba(147,51,234,0.85), 0 0 25px rgba(59,130,246,0.6)`
+                  : `0 0 12px rgba(${avatarTokens.primaryRgb}, 0.5)`,
+              }}
+            >
+              {user.avatarUrl ? (
+                <img
+                  src={user.avatarUrl}
+                  alt={displayName}
+                  referrerPolicy="no-referrer"
+                  className="w-full h-full object-cover rounded-full bg-[#120e24]"
+                />
+              ) : (
+                <div
+                  className="w-full h-full rounded-full flex items-center justify-center text-white text-[11px] font-black"
+                  style={{
+                    background: `linear-gradient(135deg, ${avatarTokens.deepHex}, #16102b)`,
+                  }}
+                >
+                  {displayName.charAt(0).toUpperCase()}
+                </div>
+              )}
+            </div>
+
+            {/* Full Display Name + Country Flag & Name */}
+            <div className="flex flex-col items-start min-w-0 leading-tight">
+              <span className="text-xs sm:text-sm font-extrabold text-white group-hover:text-purple-200 transition-colors truncate max-w-[85px] sm:max-w-[145px]">
+                {displayName}
+              </span>
+              <span className="inline-flex items-center gap-1 text-[10px] sm:text-[10.5px] text-purple-200/80 font-medium truncate max-w-[85px] sm:max-w-[145px]">
+                <span aria-hidden="true">{flagEmoji}</span>
+                <span className="truncate">{countryName}</span>
+              </span>
+            </div>
+
+            {/* Dropdown Chevron */}
+            <ChevronDown
+              className={`w-3.5 h-3.5 text-purple-300/80 transition-transform duration-150 shrink-0 ml-auto ${
+                profileMenuOpen ? 'rotate-180' : ''
+              }`}
+              aria-hidden="true"
+            />
+          </button>
+        </motion.div>
 
         {/* Animated Profile Dropdown Menu */}
         <AnimatePresence>

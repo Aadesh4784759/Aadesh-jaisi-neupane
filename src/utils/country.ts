@@ -43,15 +43,49 @@ export function findCountryOption(code?: string, countryName?: string): CountryO
   return null;
 }
 
-export function detectUserCountry(): { country: string; flag: string; code: string } {
+export type CountryDetectionMethod = 'gps' | 'ip' | 'timezone' | 'manual';
+
+export interface ResolvedCountryInfo {
+  country: string;
+  code: string;
+  flag: string;
+  timeZone: string;
+  method: CountryDetectionMethod;
+  isManual: boolean;
+}
+
+export function getBrowserTimezone(): string {
   try {
-    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
-    const matchByTz = ALL_COUNTRY_CLOCKS.find((c: CountryClockEntry) => c.timeZone === tz);
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (tz && tz.trim()) {
+      new Intl.DateTimeFormat('en-US', { timeZone: tz }).format(new Date());
+      return tz;
+    }
+  } catch {
+    // Non-fatal
+  }
+  return 'UTC';
+}
+
+export function isConfirmedCountryValue(country?: string, code?: string): boolean {
+  const c = (country || '').trim();
+  const iso = (code || '').trim().toUpperCase();
+  if (!c && !iso) return false;
+  if (c === 'Global' || c === 'Unknown') return false;
+  if (iso === 'GL' || iso === 'XX' || iso === 'T1') return false;
+  return true;
+}
+
+export function detectUserCountry(): { country: string; flag: string; code: string; timeZone: string } {
+  const browserTz = getBrowserTimezone();
+  try {
+    const matchByTz = ALL_COUNTRY_CLOCKS.find((c: CountryClockEntry) => c.timeZone === browserTz);
     if (matchByTz) {
       return {
         country: matchByTz.country,
         flag: matchByTz.flag,
         code: matchByTz.code,
+        timeZone: matchByTz.timeZone || browserTz,
       };
     }
 
@@ -64,13 +98,53 @@ export function detectUserCountry(): { country: string; flag: string; code: stri
           country: matchByCode.country,
           flag: matchByCode.flag,
           code: matchByCode.code,
+          timeZone: browserTz !== 'UTC' ? browserTz : matchByCode.timeZone || 'UTC',
         };
       }
     }
   } catch {
     // Non-fatal fallback
   }
-  return { country: 'Global', flag: '🌐', code: 'GL' };
+  // Never default to UK or any arbitrary country when detection fails; use neutral Global
+  return { country: 'Global', flag: '🌐', code: 'GL', timeZone: browserTz };
+}
+
+export function resolveCountryForProfile(params: {
+  savedCountry?: string;
+  savedCountryCode?: string;
+  savedFlag?: string;
+  savedTimezone?: string;
+  savedMethod?: CountryDetectionMethod;
+  isManual?: boolean;
+}): ResolvedCountryInfo {
+  const browserTz = getBrowserTimezone();
+  const hasSavedConfirmed = isConfirmedCountryValue(params.savedCountry, params.savedCountryCode);
+  const matchedSaved = findCountryOption(params.savedCountryCode, params.savedCountry);
+
+  if (params.isManual || hasSavedConfirmed) {
+    const country = matchedSaved?.country || params.savedCountry || 'Global';
+    const code = matchedSaved?.code || params.savedCountryCode || (country === 'Global' ? 'GL' : '');
+    const flag = params.savedFlag || matchedSaved?.flag || '🌐';
+    const timeZone = params.savedTimezone || matchedSaved?.timeZone || browserTz;
+    return {
+      country,
+      code,
+      flag,
+      timeZone,
+      method: params.isManual ? 'manual' : params.savedMethod || (hasSavedConfirmed ? 'ip' : 'timezone'),
+      isManual: Boolean(params.isManual),
+    };
+  }
+
+  const auto = detectUserCountry();
+  return {
+    country: auto.country,
+    code: auto.code,
+    flag: auto.flag,
+    timeZone: params.savedTimezone || auto.timeZone || browserTz,
+    method: 'timezone',
+    isManual: false,
+  };
 }
 
 export async function detectCountryApproxViaIP(): Promise<CountryOption | null> {
@@ -79,7 +153,17 @@ export async function detectCountryApproxViaIP(): Promise<CountryOption | null> 
     if (!res.ok) return null;
     const data = await res.json();
     if (!data?.ok) return null;
-    return findCountryOption(data.code, data.country);
+    const matched = findCountryOption(data.code, data.country);
+    if (!matched) return null;
+    if (typeof data.timezone === 'string' && data.timezone.trim()) {
+      try {
+        new Intl.DateTimeFormat('en-US', { timeZone: data.timezone }).format(new Date());
+        return { ...matched, timeZone: data.timezone };
+      } catch {
+        // Ignore invalid timezone string from external response
+      }
+    }
+    return matched;
   } catch {
     return null;
   }
