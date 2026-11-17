@@ -293,6 +293,11 @@ export async function syncUserProfileToFirestore(profile: UserProfile): Promise<
         email: (profile.email || '').slice(0, 160),
         photoURL: (profile.avatarUrl || '').slice(0, 1000),
         preferredLanguage: (profile.preferredLanguage || 'en').slice(0, 20),
+        preferredTheme: ((profile as any).preferredTheme || '').slice(0, 40),
+        termsAccepted: profile.termsAccepted ?? true,
+        termsAcceptedAt: profile.termsAcceptedAt || nowIso,
+        country: (profile.country || 'Global').slice(0, 80),
+        countryFlag: (profile.countryFlag || '🌐').slice(0, 16),
         status: 'active',
         role: isVerifiedOwner ? 'admin' : 'user',
         provider: profile.provider.slice(0, 32),
@@ -309,6 +314,11 @@ export async function syncUserProfileToFirestore(profile: UserProfile): Promise<
         email: (profile.email || '').slice(0, 160),
         photoURL: (profile.avatarUrl || '').slice(0, 1000),
         preferredLanguage: (profile.preferredLanguage || 'en').slice(0, 20),
+        preferredTheme: ((profile as any).preferredTheme || '').slice(0, 40),
+        termsAccepted: profile.termsAccepted ?? true,
+        termsAcceptedAt: profile.termsAcceptedAt || nowIso,
+        country: (profile.country || 'Global').slice(0, 80),
+        countryFlag: (profile.countryFlag || '🌐').slice(0, 16),
         provider: profile.provider.slice(0, 32),
         ...(isVerifiedOwner ? { role: 'admin', status: 'active' } : {}),
         updatedAt: nowIso,
@@ -337,11 +347,16 @@ export async function loadUserProfileFromFirestore(uid: string): Promise<Partial
       email: data.email,
       avatarUrl: data.photoURL,
       preferredLanguage: data.preferredLanguage,
+      country: data.country,
+      countryFlag: data.countryFlag,
+      termsAccepted: data.termsAccepted,
+      termsAcceptedAt: data.termsAcceptedAt,
+      ...(data.preferredTheme ? { preferredTheme: data.preferredTheme } : {}),
       status: data.status || 'active',
       role: data.role || 'user',
       createdAt: data.createdAt ? new Date(data.createdAt).getTime() : undefined,
       lastActiveAt: data.lastActiveAt ? new Date(data.lastActiveAt).getTime() : undefined,
-    };
+    } as any;
   } catch (err) {
     console.warn('Load user profile warning:', err);
     if (err instanceof Error && err.message.toLowerCase().includes('permission')) {

@@ -19,18 +19,71 @@ export interface DynamicThemeTokens {
 export const DEFAULT_AVATAR_COLOR = '#8b5cf6';
 
 export interface ColorThemePreset {
-  id: 'purple-galaxy' | 'ocean-blue' | 'emerald-green' | 'sunset-orange' | 'cyber-neon';
+  id: 'dark-galaxy' | 'pure-light' | 'purple-galaxy' | 'ocean-blue' | 'emerald-green' | 'sunset-orange' | 'cyber-neon';
   name: string;
   hex: string;
   gradientClass: string;
+  themeMode?: 'dark' | 'light';
+  description?: string;
 }
 
 export const COLOR_THEME_PRESETS: ColorThemePreset[] = [
-  { id: 'ocean-blue', name: 'Ocean Blue', hex: '#0ea5e9', gradientClass: 'from-sky-500 to-blue-600' },
-  { id: 'purple-galaxy', name: 'Purple Galaxy', hex: '#8b5cf6', gradientClass: 'from-purple-500 to-indigo-600' },
-  { id: 'emerald-green', name: 'Emerald Green', hex: '#10b981', gradientClass: 'from-emerald-500 to-teal-600' },
-  { id: 'sunset-orange', name: 'Sunset Orange', hex: '#f97316', gradientClass: 'from-orange-500 to-rose-500' },
-  { id: 'cyber-neon', name: 'Cyber Neon', hex: '#ec4899', gradientClass: 'from-fuchsia-500 to-cyan-500' },
+  {
+    id: 'dark-galaxy',
+    name: 'Dark Galaxy',
+    hex: '#8b5cf6',
+    gradientClass: 'from-purple-600 via-indigo-600 to-violet-800',
+    themeMode: 'dark',
+    description: 'Deep cosmic violet space with glowing purple-indigo nebula',
+  },
+  {
+    id: 'pure-light',
+    name: 'Pure Light',
+    hex: '#7c3aed',
+    gradientClass: 'from-violet-500 via-purple-500 to-indigo-600',
+    themeMode: 'light',
+    description: 'Luminous lavender-white palette with pristine contrast',
+  },
+  {
+    id: 'ocean-blue',
+    name: 'Ocean Blue',
+    hex: '#0ea5e9',
+    gradientClass: 'from-sky-500 via-blue-600 to-indigo-600',
+    themeMode: 'dark',
+    description: 'Electric azure sky and deep Pacific blue waves',
+  },
+  {
+    id: 'emerald-green',
+    name: 'Emerald Green',
+    hex: '#10b981',
+    gradientClass: 'from-emerald-500 via-teal-600 to-cyan-600',
+    themeMode: 'dark',
+    description: 'Vivid aurora mint, jade forests, and neon emerald glow',
+  },
+  {
+    id: 'sunset-orange',
+    name: 'Sunset Orange',
+    hex: '#f97316',
+    gradientClass: 'from-orange-500 via-rose-500 to-pink-600',
+    themeMode: 'dark',
+    description: 'Warm solar amber and dusk rose horizon brilliance',
+  },
+  {
+    id: 'cyber-neon',
+    name: 'Cyber Neon',
+    hex: '#ec4899',
+    gradientClass: 'from-fuchsia-500 via-pink-500 to-cyan-500',
+    themeMode: 'dark',
+    description: 'High-energy fuchsia and synthwave cyan neon matrix',
+  },
+  {
+    id: 'purple-galaxy',
+    name: 'Purple Galaxy',
+    hex: '#8b5cf6',
+    gradientClass: 'from-purple-500 to-indigo-600',
+    themeMode: 'dark',
+    description: 'Classic Aadesh AI deep cosmic violet theme',
+  },
 ];
 
 export const AVATAR_COLOR_PRESETS: AvatarColorPreset[] = [

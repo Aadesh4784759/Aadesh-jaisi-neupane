@@ -204,11 +204,15 @@ export default function App() {
         username: fsProfile?.username || cleanHandle,
         email: fbUser.email || baseUser.email || '',
         avatarUrl:
-          extras.customAvatarDataUrl || fbUser.photoURL || fsProfile?.avatarUrl || baseUser.avatarUrl || '',
+          (providerName === 'google' && fbUser.photoURL)
+            ? fbUser.photoURL
+            : extras.customAvatarDataUrl || fbUser.photoURL || fsProfile?.avatarUrl || baseUser.avatarUrl || '',
         avatarColor: extras.avatarColor || baseUser.avatarColor || '#8b5cf6',
         country: resolvedCountry,
         countryFlag: resolvedFlag,
         isManualCountry: isManual,
+        termsAccepted: fsProfile?.termsAccepted ?? true,
+        termsAcceptedAt: fsProfile?.termsAcceptedAt,
         provider: providerName,
         isLoggedIn: true,
         role: isVerifiedOwner ? 'admin' : fsProfile?.role || 'user',
@@ -227,6 +231,19 @@ export default function App() {
 
     if (fsProfile?.preferredLanguage) {
       handleUpdateSettings({ uiLanguage: fsProfile.preferredLanguage });
+    }
+
+    if ((fsProfile as any)?.preferredTheme) {
+      const savedThemeId = (fsProfile as any).preferredTheme;
+      const themePreset = COLOR_THEME_PRESETS.find(
+        (t) => t.id === savedThemeId || t.name.toLowerCase() === savedThemeId.toLowerCase()
+      );
+      if (themePreset) {
+        handleUpdateSettings({
+          colorTheme: themePreset.id,
+          theme: themePreset.themeMode || 'dark',
+        });
+      }
     }
 
     try {
@@ -494,6 +511,15 @@ export default function App() {
       saveStoredSettings(updated);
       return updated;
     });
+    if ((newSettings.colorTheme || newSettings.theme) && user.isLoggedIn) {
+      const themeToSave = newSettings.colorTheme || (newSettings.theme === 'light' ? 'pure-light' : 'dark-galaxy');
+      syncUserProfileToFirestore(
+        sanitizeUserForFirestore({
+          ...user,
+          ...({ preferredTheme: themeToSave } as any),
+        })
+      ).catch(() => {});
+    }
   };
 
   const handleToggleForceOffline = () => {

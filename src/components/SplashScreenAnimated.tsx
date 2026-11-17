@@ -21,8 +21,8 @@ const LOADING_MESSAGES = {
   welcome: 'Welcome to Aadesh AI',
 } as const;
 
-const MIN_SHOWCASE_MS = 1650;
-const STALL_RETRY_PROMPT_MS = 7500;
+const MIN_SHOWCASE_MS = 1350;
+const STALL_RETRY_PROMPT_MS = 6500;
 
 const SplashScreenAnimated: React.FC<SplashScreenProps> = ({
   isAppReady = false,
@@ -193,14 +193,15 @@ const SplashScreenAnimated: React.FC<SplashScreenProps> = ({
               initial={
                 prefersReducedMotion
                   ? { opacity: 0 }
-                  : { opacity: 0, scale: 0.68, rotateX: 22, rotateY: -18 }
+                  : { opacity: 0, scale: 0.55, rotateX: 28, rotateY: -22, filter: 'blur(6px)' }
               }
               animate={
                 prefersReducedMotion
                   ? { opacity: 1 }
                   : {
                       opacity: 1,
-                      scale: 1,
+                      scale: [0.55, 1.04, 1],
+                      filter: 'blur(0px)',
                       rotateX: [0, 4, 0, -4, 0],
                       rotateY: [0, -5, 0, 5, 0],
                     }
@@ -209,8 +210,9 @@ const SplashScreenAnimated: React.FC<SplashScreenProps> = ({
                 prefersReducedMotion
                   ? { duration: 0.2 }
                   : {
-                      opacity: { duration: 0.55 },
-                      scale: { duration: 0.75, ease: [0.22, 1, 0.36, 1] },
+                      opacity: { duration: 0.65 },
+                      scale: { duration: 0.85, ease: [0.22, 1, 0.36, 1] },
+                      filter: { duration: 0.5 },
                       rotateX: { duration: 6, repeat: Infinity, ease: 'easeInOut' },
                       rotateY: { duration: 6, repeat: Infinity, ease: 'easeInOut' },
                     }

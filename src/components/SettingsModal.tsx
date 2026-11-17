@@ -1007,17 +1007,33 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     ))}
                   </div>
                 </div>
-                <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
-                  {COLOR_THEME_PRESETS.map((preset) => {
-                    const isSelected = (settings.colorTheme || 'purple-galaxy') === preset.id;
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-2">
+                  {COLOR_THEME_PRESETS.filter((p) => p.id !== 'purple-galaxy').map((preset) => {
+                    const isSelected =
+                      (preset.id === 'pure-light' && settings.theme === 'light') ||
+                      (settings.theme !== 'light' && (
+                        settings.colorTheme === preset.id ||
+                        (preset.id === 'dark-galaxy' && (!settings.colorTheme || settings.colorTheme === 'purple-galaxy'))
+                      ));
                     return (
                       <button
                         key={preset.id}
                         type="button"
-                        onClick={() => onUpdateSettings({ colorTheme: preset.id })}
+                        onClick={() => {
+                          const isLight = preset.themeMode === 'light';
+                          onUpdateSettings({
+                            colorTheme: preset.id,
+                            theme: isLight ? 'light' : 'dark',
+                          });
+                          if (isLight) {
+                            document.body.classList.add('light-theme');
+                          } else {
+                            document.body.classList.remove('light-theme');
+                          }
+                        }}
                         className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
                           isSelected
-                            ? 'bg-purple-900/40 border-purple-400 text-white shadow-md'
+                            ? 'bg-purple-900/40 border-purple-400 text-white shadow-md ring-1 ring-purple-400'
                             : 'bg-[#090a0f] border-[#232738] text-gray-300 hover:border-white/25'
                         }`}
                       >

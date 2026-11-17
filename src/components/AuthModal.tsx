@@ -22,6 +22,7 @@ import {
   formatAuthError,
 } from '../utils/firebase';
 import { OWNER_ADMIN_EMAIL } from '../utils/storage';
+import { TermsPrivacyModal } from './TermsPrivacyModal';
 
 interface AuthModalProps {
   isOpen: boolean;
@@ -48,6 +49,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [agreedToTerms, setAgreedToTerms] = useState(false);
+  const [isTermsModalOpen, setIsTermsModalOpen] = useState(false);
+  const [termsModalTab, setTermsModalTab] = useState<'terms' | 'privacy'>('terms');
 
   useEffect(() => {
     if (isOpen) {
@@ -166,6 +170,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       setErrorMessage('Password must be at least 6 characters long.');
       return;
     }
+    if (!agreedToTerms) {
+      setErrorMessage('Please accept the Terms of Service and Privacy Policy to register.');
+      return;
+    }
     setIsLoading(true);
     setErrorMessage(null);
 
@@ -183,6 +191,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         provider: 'email',
         linkedProviders: Array.from(new Set([...currentUser.linkedProviders, 'email'])),
         isLoggedIn: true,
+        termsAccepted: true,
+        termsAcceptedAt: new Date().toISOString(),
         role: 'user',
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
@@ -516,10 +526,51 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   </div>
                 )}
 
+                {authMode === 'register' && (
+                  <div className="flex items-start gap-2 pt-1 pb-1">
+                    <input
+                      type="checkbox"
+                      id="authmodal-terms"
+                      required
+                      checked={agreedToTerms}
+                      onChange={(e) => setAgreedToTerms(e.target.checked)}
+                      className="mt-0.5 w-3.5 h-3.5 rounded border-[#232738] bg-[#131520] accent-purple-600 shrink-0 cursor-pointer"
+                    />
+                    <label
+                      htmlFor="authmodal-terms"
+                      className="text-[10px] text-gray-300 leading-snug cursor-pointer select-none"
+                    >
+                      I agree to the{' '}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setTermsModalTab('terms');
+                          setIsTermsModalOpen(true);
+                        }}
+                        className="text-purple-300 hover:text-white underline font-semibold cursor-pointer"
+                      >
+                        Terms of Service
+                      </button>{' '}
+                      and{' '}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setTermsModalTab('privacy');
+                          setIsTermsModalOpen(true);
+                        }}
+                        className="text-purple-300 hover:text-white underline font-semibold cursor-pointer"
+                      >
+                        Privacy Policy
+                      </button>
+                      .
+                    </label>
+                  </div>
+                )}
+
                 <button
                   type="submit"
-                  disabled={isLoading}
-                  className="purple-glow-btn w-full py-2.5 px-4 rounded-xl font-bold text-xs text-white flex items-center justify-center gap-2 cursor-pointer transition-all shadow-md disabled:opacity-60"
+                  disabled={isLoading || (authMode === 'register' && !agreedToTerms)}
+                  className="purple-glow-btn w-full py-2.5 px-4 rounded-xl font-bold text-xs text-white flex items-center justify-center gap-2 cursor-pointer transition-all shadow-md disabled:opacity-50"
                 >
                   {isLoading && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
                   <span>
@@ -588,6 +639,15 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             <span className="font-medium">{toastMessage}</span>
           </div>
         )}
+
+        {/* Terms of Service & Privacy Policy Modal */}
+        <TermsPrivacyModal
+          isOpen={isTermsModalOpen}
+          onClose={() => setIsTermsModalOpen(false)}
+          initialTab={termsModalTab}
+          showAgreeButton={authMode === 'register'}
+          onAgreeAndClose={() => setAgreedToTerms(true)}
+        />
       </div>
     </div>
   );

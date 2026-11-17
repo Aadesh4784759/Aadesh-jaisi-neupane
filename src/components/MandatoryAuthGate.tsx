@@ -27,6 +27,7 @@ import {
   signInWithGoogle,
 } from '../utils/firebase';
 import { BrandLogo } from './BrandLogo';
+import { TermsPrivacyModal } from './TermsPrivacyModal';
 
 export type AuthGateStage = 'login' | 'signup' | 'verify-email' | 'forgot-password';
 
@@ -53,6 +54,9 @@ export const MandatoryAuthGate: React.FC<MandatoryAuthGateProps> = ({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
   const [resendCooldown, setResendCooldown] = useState(0);
+  const [agreedToTerms, setAgreedToTerms] = useState(false);
+  const [isTermsModalOpen, setIsTermsModalOpen] = useState(false);
+  const [termsModalTab, setTermsModalTab] = useState<'terms' | 'privacy'>('terms');
 
   // Sync stage cleanly if Firebase auth transitions to an unverified user
   useEffect(() => {
@@ -143,6 +147,10 @@ export const MandatoryAuthGate: React.FC<MandatoryAuthGateProps> = ({
     }
     if (password !== confirmPassword) {
       setErrorMessage('Passwords do not match. Please re-enter carefully.');
+      return;
+    }
+    if (!agreedToTerms) {
+      setErrorMessage('Please read and agree to the Terms of Service and Privacy Policy to register.');
       return;
     }
 
@@ -516,10 +524,50 @@ export const MandatoryAuthGate: React.FC<MandatoryAuthGateProps> = ({
                 </div>
               </div>
 
+              {/* Explicit Terms of Service & Privacy Policy Agreement */}
+              <div className="flex items-start gap-2.5 pt-1 pb-1">
+                <input
+                  type="checkbox"
+                  id="gate-terms-checkbox"
+                  required
+                  checked={agreedToTerms}
+                  onChange={(e) => setAgreedToTerms(e.target.checked)}
+                  className="mt-0.5 w-4 h-4 rounded border-[#232738] bg-[#090a0f] accent-purple-600 shrink-0 cursor-pointer"
+                />
+                <label
+                  htmlFor="gate-terms-checkbox"
+                  className="text-[11px] text-gray-300 leading-snug cursor-pointer select-none"
+                >
+                  I agree to the{' '}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTermsModalTab('terms');
+                      setIsTermsModalOpen(true);
+                    }}
+                    className="text-purple-300 hover:text-white underline font-semibold cursor-pointer"
+                  >
+                    Terms of Service
+                  </button>{' '}
+                  and{' '}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTermsModalTab('privacy');
+                      setIsTermsModalOpen(true);
+                    }}
+                    className="text-purple-300 hover:text-white underline font-semibold cursor-pointer"
+                  >
+                    Privacy Policy
+                  </button>
+                  .
+                </label>
+              </div>
+
               <button
                 type="submit"
-                disabled={isSubmitting}
-                className="purple-glow-btn w-full py-2.5 px-4 rounded-xl text-sm font-bold text-white flex items-center justify-center gap-2 cursor-pointer disabled:opacity-55"
+                disabled={isSubmitting || !agreedToTerms}
+                className="purple-glow-btn w-full py-2.5 px-4 rounded-xl text-sm font-bold text-white flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
               >
                 {isSubmitting ? (
                   <>
@@ -703,6 +751,15 @@ export const MandatoryAuthGate: React.FC<MandatoryAuthGateProps> = ({
           <span>Protected by Firebase Auth &amp; Server-Verified Sessions • Created by Aadesh Jaisi</span>
         </div>
       </div>
+
+      {/* Terms of Service & Privacy Policy Modal */}
+      <TermsPrivacyModal
+        isOpen={isTermsModalOpen}
+        onClose={() => setIsTermsModalOpen(false)}
+        initialTab={termsModalTab}
+        showAgreeButton={stage === 'signup'}
+        onAgreeAndClose={() => setAgreedToTerms(true)}
+      />
     </div>
   );
 };

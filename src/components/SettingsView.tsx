@@ -34,9 +34,11 @@ import { saveUserLocalExtras } from '../utils/storage';
 import { voiceAssistant } from '../utils/speech';
 import {
   AVATAR_COLOR_PRESETS,
+  COLOR_THEME_PRESETS,
   DEFAULT_AVATAR_COLOR,
   generateThemeTokensFromColor,
 } from '../utils/avatarTheme';
+import { TermsPrivacyModal } from './TermsPrivacyModal';
 
 interface SettingsViewProps {
   initialSection?: 'profile' | 'settings';
@@ -88,6 +90,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [notifPermission, setNotifPermission] = useState<string>(() =>
     typeof Notification !== 'undefined' ? Notification.permission : 'unsupported'
   );
+  const [isTermsModalOpen, setIsTermsModalOpen] = useState(false);
+  const [termsModalTab, setTermsModalTab] = useState<'terms' | 'privacy'>('terms');
 
   const avatarFileInputRef = useRef<HTMLInputElement>(null);
 
@@ -554,49 +558,85 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       ) : (
         /* SETTINGS SECTION */
         <div className="space-y-4">
-          {/* 1. Theme & Appearance */}
+          {/* 1. Theme & Appearance Selection */}
           <div className="glass-card rounded-3xl p-5 border border-purple-400/25 space-y-4">
-            <div className="flex items-center gap-2 border-b border-white/10 pb-3">
-              {settings.theme === 'light' ? (
-                <Sun className="w-4 h-4 text-amber-400" />
-              ) : (
-                <Moon className="w-4 h-4 text-purple-300" />
-              )}
-              <h2 className="text-sm font-bold text-white">Theme &amp; Display</h2>
+            <div className="flex items-center justify-between border-b border-white/10 pb-3">
+              <div className="flex items-center gap-2">
+                <Palette className="w-4 h-4 text-purple-300" />
+                <h2 className="text-sm font-bold text-white">App Theme &amp; Visual Style</h2>
+              </div>
+              <span className="text-[11px] font-semibold text-purple-300/80">
+                Active: {settings.theme === 'light' ? 'Pure Light' : COLOR_THEME_PRESETS.find((p) => p.id === settings.colorTheme)?.name || 'Dark Galaxy'}
+              </span>
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
-              <button
-                type="button"
-                onClick={() => {
-                  onUpdateSettings({ theme: 'dark' });
-                  document.body.classList.remove('light-theme');
-                }}
-                className={`min-h-[48px] p-3 rounded-2xl border text-xs font-bold flex items-center justify-center gap-2 cursor-pointer ${
-                  settings.theme !== 'light'
-                    ? 'purple-glow-btn text-white border-purple-300/60'
-                    : 'bg-[#0b0818]/70 border-white/10 text-purple-200'
-                }`}
-              >
-                <Moon className="w-4 h-4" />
-                <span>Dark Futuristic</span>
-              </button>
+            <p className="text-xs text-purple-200/75">
+              Select your preferred appearance. Your chosen theme is persisted across browser refreshes and synced to your cloud account.
+            </p>
 
-              <button
-                type="button"
-                onClick={() => {
-                  onUpdateSettings({ theme: 'light' });
-                  document.body.classList.add('light-theme');
-                }}
-                className={`min-h-[48px] p-3 rounded-2xl border text-xs font-bold flex items-center justify-center gap-2 cursor-pointer ${
-                  settings.theme === 'light'
-                    ? 'purple-glow-btn text-white border-purple-300/60'
-                    : 'bg-[#0b0818]/70 border-white/10 text-purple-200'
-                }`}
-              >
-                <Sun className="w-4 h-4" />
-                <span>Light Lavender</span>
-              </button>
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+              {COLOR_THEME_PRESETS.filter((p) => p.id !== 'purple-galaxy').map((preset) => {
+                const isSelected =
+                  (preset.id === 'pure-light' && settings.theme === 'light') ||
+                  (settings.theme !== 'light' && (
+                    settings.colorTheme === preset.id ||
+                    (preset.id === 'dark-galaxy' && (!settings.colorTheme || settings.colorTheme === 'purple-galaxy'))
+                  ));
+
+                return (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    onClick={() => {
+                      const isLight = preset.themeMode === 'light';
+                      onUpdateSettings({
+                        theme: isLight ? 'light' : 'dark',
+                        colorTheme: preset.id,
+                      });
+                      if (isLight) {
+                        document.body.classList.add('light-theme');
+                        document.documentElement.classList.remove('dark');
+                      } else {
+                        document.body.classList.remove('light-theme');
+                        document.documentElement.classList.add('dark');
+                      }
+                      showToast(`Applied ${preset.name} theme.`);
+                    }}
+                    className={`p-3.5 rounded-2xl border text-left transition-all cursor-pointer relative flex flex-col justify-between gap-3 ${
+                      isSelected
+                        ? 'bg-purple-600/30 border-purple-300 text-white shadow-[0_0_22px_rgba(139,92,246,0.35)] ring-1 ring-purple-400'
+                        : 'bg-[#0b0818]/75 border-white/10 text-purple-200/80 hover:border-purple-400/40 hover:bg-[#120e24]'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <span
+                          className="w-4 h-4 rounded-full border border-white/30 shadow-sm shrink-0"
+                          style={{ backgroundColor: preset.hex }}
+                        />
+                        <span className="text-xs font-bold text-white">{preset.name}</span>
+                      </div>
+                      {isSelected ? (
+                        <span className="w-5 h-5 rounded-full bg-emerald-500/30 border border-emerald-400 text-emerald-300 flex items-center justify-center shrink-0">
+                          <Check className="w-3 h-3" />
+                        </span>
+                      ) : (
+                        <span className="text-[10px] uppercase font-bold text-gray-500">
+                          {preset.themeMode === 'light' ? 'Light' : 'Dark'}
+                        </span>
+                      )}
+                    </div>
+
+                    <div
+                      className={`h-2 w-full rounded-full bg-gradient-to-r ${preset.gradientClass} opacity-85`}
+                    />
+
+                    <p className="text-[11px] text-purple-200/65 line-clamp-2">
+                      {preset.description || `${preset.name} ambient coloring.`}
+                    </p>
+                  </button>
+                );
+              })}
             </div>
           </div>
 
@@ -856,6 +896,18 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <div className="flex flex-wrap items-center gap-2.5 pt-2">
               <button
                 type="button"
+                onClick={() => {
+                  setTermsModalTab('terms');
+                  setIsTermsModalOpen(true);
+                }}
+                className="min-h-[42px] px-4 py-2 rounded-2xl bg-purple-600/25 hover:bg-purple-600/40 border border-purple-400/35 text-xs font-semibold text-purple-100 flex items-center gap-2 cursor-pointer"
+              >
+                <Shield className="w-4 h-4 text-purple-300" />
+                <span>Terms of Service &amp; Privacy Policy</span>
+              </button>
+
+              <button
+                type="button"
                 onClick={onOpenFullBackup}
                 className="min-h-[42px] px-4 py-2 rounded-2xl bg-white/5 hover:bg-white/10 border border-white/15 text-xs font-semibold text-purple-100 flex items-center gap-2 cursor-pointer"
               >
@@ -927,6 +979,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
         </div>
       )}
+
+      {/* Terms of Service & Privacy Policy Modal */}
+      <TermsPrivacyModal
+        isOpen={isTermsModalOpen}
+        onClose={() => setIsTermsModalOpen(false)}
+        initialTab={termsModalTab}
+      />
     </div>
   );
 };

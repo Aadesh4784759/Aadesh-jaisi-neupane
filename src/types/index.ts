@@ -155,6 +155,8 @@ export interface UserProfile {
   country?: string;
   countryFlag?: string;
   isManualCountry?: boolean;
+  termsAccepted?: boolean;
+  termsAcceptedAt?: string;
   provider: 'google' | 'email' | 'phone' | 'facebook' | 'guest';
   linkedProviders: ('google' | 'email' | 'phone' | 'facebook')[];
   isLoggedIn: boolean;
@@ -238,7 +240,7 @@ export interface AppSettings {
   voicePersona: VoicePersona;
   highContrast: boolean;
   theme?: 'dark' | 'light';
-  colorTheme?: 'purple-galaxy' | 'ocean-blue' | 'emerald-green' | 'sunset-orange' | 'cyber-neon';
+  colorTheme?: 'dark-galaxy' | 'pure-light' | 'purple-galaxy' | 'ocean-blue' | 'emerald-green' | 'sunset-orange' | 'cyber-neon';
   dynamicAvatarTheme?: boolean;
   customGeminiApiKey?: string;
   geminiModel?: string;
