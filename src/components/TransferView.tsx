@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { motion, AnimatePresence } from 'motion/react';
 import {
   ArrowLeftRight,
   Upload,
@@ -16,9 +17,26 @@ import {
   File as FileIcon,
   Radio,
   AlertCircle,
+  Languages,
+  Copy,
+  Check,
+  Volume2,
+  Mic,
+  MicOff,
+  RefreshCw,
+  Clock,
+  MessageSquare,
 } from 'lucide-react';
-import { TransferHistoryEntry } from '../types';
-import { getStoredTransferHistory, saveStoredTransferHistory } from '../utils/storage';
+import { AppSettings, TransferHistoryEntry, TranslationHistoryEntry } from '../types';
+import {
+  getStoredTransferHistory,
+  saveStoredTransferHistory,
+  getStoredTranslationHistory,
+  saveStoredTranslationHistory,
+} from '../utils/storage';
+import { SUPPORTED_LANGUAGES, isRtlLanguage } from '../data/languages';
+import { voiceAssistant } from '../utils/speech';
+import { getAuthHeaders } from '../utils/firebase';
 
 interface QueuedFileItem {
   id: string;
@@ -49,6 +67,11 @@ interface IncomingPeerFile {
 interface TransferViewProps {
   userId: string;
   userName: string;
+  settings?: AppSettings;
+  isOnline?: boolean;
+  onUpdateSettings?: (patch: Partial<AppSettings>) => void;
+  onRecordTranslationMetric?: (sourceLang: string, targetLang: string, latencyMs: number) => void;
+  onOpenInChat?: (text: string) => void;
   onAttachFileToChat?: (params: {
     name: string;
     mimeType: string;
@@ -76,9 +99,31 @@ async function computeSha256Hex(buffer: ArrayBuffer): Promise<string> {
 export const TransferView: React.FC<TransferViewProps> = ({
   userId,
   userName,
+  settings,
+  isOnline = true,
+  onRecordTranslationMetric,
+  onOpenInChat,
   onAttachFileToChat,
 }) => {
-  const [activeMode, setActiveMode] = useState<'send' | 'receive' | 'history'>('send');
+  const [activeMode, setActiveMode] = useState<'translate' | 'send' | 'receive' | 'history'>('translate');
+
+  // Translation Workspace State
+  const [sourceLang, setSourceLang] = useState<string>('auto');
+  const [targetLang, setTargetLang] = useState<string>(settings?.defaultTargetLanguage || 'ne');
+  const [sourceText, setSourceText] = useState<string>('');
+  const [translatedText, setTranslatedText] = useState<string>('');
+  const [detectedSourceLang, setDetectedSourceLang] = useState<string>('');
+  const [pronunciation, setPronunciation] = useState<string>('');
+  const [culturalNote, setCulturalNote] = useState<string>('');
+  const [translationLatency, setTranslationLatency] = useState<number | null>(null);
+  const [isTranslating, setIsTranslating] = useState<boolean>(false);
+  const [isVoiceListening, setIsVoiceListening] = useState<boolean>(false);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [translationHistory, setTranslationHistory] = useState<TranslationHistoryEntry[]>(() =>
+    getStoredTranslationHistory(userId)
+  );
+
+  // File Transfer State
   const [queuedFiles, setQueuedFiles] = useState<QueuedFileItem[]>([]);
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null);
   const [incomingFiles, setIncomingFiles] = useState<IncomingPeerFile[]>([]);
@@ -99,9 +144,9 @@ export const TransferView: React.FC<TransferViewProps> = ({
 
   useEffect(() => {
     setHistory(getStoredTransferHistory(userId));
+    setTranslationHistory(getStoredTranslationHistory(userId));
   }, [userId]);
 
-  // Cross-tab BroadcastChannel for real same-browser / same-device file transfer
   useEffect(() => {
     if (typeof BroadcastChannel === 'undefined') return;
     const ch = new BroadcastChannel('aadesh_ai_transfer_channel');
@@ -134,7 +179,7 @@ export const TransferView: React.FC<TransferViewProps> = ({
       });
       setStatusNotice({
         type: 'success',
-        text: `Received "${incoming.fileName}" from ${incoming.senderName}. Ready in Receive Files.`,
+        text: `Received "${incoming.fileName}" from ${incoming.senderName}. Ready in Receive.`,
       });
     };
 
@@ -150,6 +195,172 @@ export const TransferView: React.FC<TransferViewProps> = ({
       saveStoredTransferHistory(next, userId);
       return next;
     });
+  };
+
+  const handleRunTranslation = async (textOverride?: string, isVoice = false) => {
+    const cleanText = (textOverride ?? sourceText).trim();
+    if (!cleanText || isTranslating) return;
+
+    if (!isOnline) {
+      setStatusNotice({
+        type: 'error',
+        text: 'Translation requires an active internet connection for Gemini AI.',
+      });
+      return;
+    }
+
+    setIsTranslating(true);
+    setStatusNotice(null);
+
+    try {
+      const headers = await getAuthHeaders({
+        'Content-Type': 'application/json',
+        ...(settings?.customGeminiApiKey ? { 'x-gemini-api-key': settings.customGeminiApiKey } : {}),
+      });
+
+      const res = await fetch('/api/translate', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          text: cleanText,
+          sourceLang,
+          targetLang,
+          customApiKey: settings?.customGeminiApiKey,
+        }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || `Translation failed (HTTP ${res.status})`);
+      }
+
+      const resultText = String(data.translatedText || '').trim();
+      const detected = String(data.detectedSourceLang || (sourceLang === 'auto' ? 'en' : sourceLang)).trim();
+      const latencyMs = Number(data.latencyMs || 280);
+
+      setTranslatedText(resultText);
+      setDetectedSourceLang(detected);
+      setPronunciation(String(data.pronunciation || ''));
+      setCulturalNote(String(data.culturalNote || ''));
+      setTranslationLatency(latencyMs);
+
+      const historyEntry: TranslationHistoryEntry = {
+        id: `tr-${Date.now()}`,
+        sourceText: cleanText,
+        translatedText: resultText,
+        sourceLang,
+        detectedSourceLang: detected,
+        targetLang,
+        pronunciation: data.pronunciation ? String(data.pronunciation) : undefined,
+        culturalNote: data.culturalNote ? String(data.culturalNote) : undefined,
+        timestamp: Date.now(),
+        isVoice,
+      };
+
+      setTranslationHistory((prev) => {
+        const next = [historyEntry, ...prev].slice(0, 80);
+        saveStoredTranslationHistory(next, userId);
+        return next;
+      });
+
+      onRecordTranslationMetric?.(detected, targetLang, latencyMs);
+
+      if (isVoice && settings?.autoSpeakAIResponses && resultText) {
+        const tgtObj = SUPPORTED_LANGUAGES.find((l) => l.code === targetLang) || SUPPORTED_LANGUAGES[0];
+        voiceAssistant.speak(resultText, tgtObj.speechCode, {
+          rate: settings?.voiceSpeed ?? 1.0,
+          pitch: settings?.voicePitch ?? 1.0,
+          volume: settings?.voiceVolume ?? 1.0,
+        });
+      }
+    } catch (err: any) {
+      setStatusNotice({
+        type: 'error',
+        text: err?.message || 'Unable to translate right now.',
+      });
+    } finally {
+      setIsTranslating(false);
+    }
+  };
+
+  const handleSwapLanguages = () => {
+    const resolvedSource =
+      sourceLang === 'auto'
+        ? detectedSourceLang || (targetLang === 'en' ? 'ne' : 'en')
+        : sourceLang;
+    const nextSource = targetLang;
+    const nextTarget = resolvedSource;
+
+    setSourceLang(nextSource);
+    setTargetLang(nextTarget);
+    if (translatedText.trim()) {
+      setSourceText(translatedText);
+      setTranslatedText(sourceText);
+    }
+    setDetectedSourceLang('');
+  };
+
+  const handleToggleVoiceTranslation = () => {
+    if (isVoiceListening) {
+      voiceAssistant.stopListening();
+      setIsVoiceListening(false);
+      return;
+    }
+
+    if (!voiceAssistant.isSupported()) {
+      setStatusNotice({
+        type: 'info',
+        text: 'Browser speech recognition is unavailable here. Type text or use the Voice Studio audio recorder.',
+      });
+      return;
+    }
+
+    const activeSrcCode = sourceLang === 'auto' ? settings?.uiLanguage || 'en' : sourceLang;
+    const srcLangObj = SUPPORTED_LANGUAGES.find((l) => l.code === activeSrcCode) || SUPPORTED_LANGUAGES[0];
+
+    const started = voiceAssistant.startListening(srcLangObj.speechCode, {
+      onStart: () => setIsVoiceListening(true),
+      onResult: (transcript, isFinal) => {
+        setSourceText(transcript);
+        if (isFinal && transcript.trim()) {
+          setIsVoiceListening(false);
+          void handleRunTranslation(transcript.trim(), true);
+        }
+      },
+      onError: (err) => {
+        setIsVoiceListening(false);
+        setStatusNotice({ type: 'error', text: err });
+      },
+      onEnd: () => setIsVoiceListening(false),
+    });
+
+    if (!started) {
+      setIsVoiceListening(false);
+    }
+  };
+
+  const handleSpeakText = (text: string, langCode: string) => {
+    if (!text.trim()) return;
+    if (!voiceAssistant.isSpeechSynthesisSupported()) {
+      setStatusNotice({
+        type: 'info',
+        text: 'Browser Text-to-Speech is not supported on this device.',
+      });
+      return;
+    }
+    const langObj = SUPPORTED_LANGUAGES.find((l) => l.code === langCode) || SUPPORTED_LANGUAGES[0];
+    voiceAssistant.speak(text, langObj.speechCode, {
+      rate: settings?.voiceSpeed ?? 1.0,
+      pitch: settings?.voicePitch ?? 1.0,
+      volume: settings?.voiceVolume ?? 1.0,
+    });
+  };
+
+  const handleCopy = (id: string, value: string) => {
+    if (!value) return;
+    navigator.clipboard.writeText(value);
+    setCopiedId(id);
+    window.setTimeout(() => setCopiedId(null), 1600);
   };
 
   const processSelectedFiles = (fileList: FileList | null) => {
@@ -235,7 +446,7 @@ export const TransferView: React.FC<TransferViewProps> = ({
     if (!supportsWebShareFiles) {
       setStatusNotice({
         type: 'info',
-        text: 'Web Share Sheet with files is not supported in this browser. Use Save / Download or Cross-Tab Send.',
+        text: 'Web Share Sheet with files is not supported in this browser. Use Save Copy or Cross-Tab Send.',
       });
       return;
     }
@@ -397,28 +608,35 @@ export const TransferView: React.FC<TransferViewProps> = ({
     });
   };
 
+  const sourceLangObj = SUPPORTED_LANGUAGES.find((l) => l.code === sourceLang);
+  const targetLangObj = SUPPORTED_LANGUAGES.find((l) => l.code === targetLang) || SUPPORTED_LANGUAGES[1];
+  const detectedLangObj = detectedSourceLang
+    ? SUPPORTED_LANGUAGES.find((l) => l.code === detectedSourceLang)
+    : undefined;
+
   return (
     <div className="max-w-5xl mx-auto w-full px-3 sm:px-6 py-5 pb-32 space-y-5">
-      {/* Transfer Header */}
-      <div className="glass-card rounded-3xl p-5 sm:p-6 border border-purple-400/30 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+      {/* Transfer & Translation Header */}
+      <div className="v2-neu-card rounded-3xl p-5 sm:p-6 border border-purple-400/30 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         <div className="space-y-1">
-          <div className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-purple-300">
-            <ArrowLeftRight className="w-4 h-4 text-purple-400" />
-            <span>File &amp; Media Hub</span>
+          <div className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-sky-300">
+            <ArrowLeftRight className="w-4 h-4 text-sky-400" />
+            <span>Aadesh AI · Language &amp; File Transfer</span>
           </div>
-          <h1 className="text-xl sm:text-2xl font-black text-white">Transfer Center</h1>
+          <h1 className="text-xl sm:text-2xl font-black text-white">Transfer Studio</h1>
           <p className="text-xs text-purple-200/75">
-            Send, receive, inspect SHA-256 file info, share documents or images, and track real transfer progress.
+            Real-time text &amp; voice translation across global languages, plus SHA-256 verified file transfer.
           </p>
         </div>
 
         {/* Mode Switcher */}
-        <div className="inline-flex p-1 rounded-2xl bg-[#0b0818] border border-purple-400/25 self-start sm:self-center">
+        <div className="inline-flex flex-wrap p-1 rounded-2xl v2-neu-inset gap-1 self-start lg:self-center">
           {(
             [
-              { id: 'send', label: 'Send & Upload', icon: Send },
+              { id: 'translate', label: 'AI Translator', icon: Languages },
+              { id: 'send', label: 'Send Files', icon: Send },
               { id: 'receive', label: `Receive (${incomingFiles.length})`, icon: Inbox },
-              { id: 'history', label: `History (${history.length})`, icon: Download },
+              { id: 'history', label: `File Log (${history.length})`, icon: Download },
             ] as const
           ).map((tab) => {
             const Icon = tab.icon;
@@ -430,7 +648,7 @@ export const TransferView: React.FC<TransferViewProps> = ({
                 onClick={() => setActiveMode(tab.id)}
                 className={`min-h-[40px] px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer whitespace-nowrap ${
                   active
-                    ? 'purple-glow-btn text-white'
+                    ? 'electric-purple-btn text-white'
                     : 'text-purple-200/75 hover:text-white'
                 }`}
               >
@@ -459,7 +677,7 @@ export const TransferView: React.FC<TransferViewProps> = ({
             ) : statusNotice.type === 'error' ? (
               <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
             ) : (
-              <Info className="w-4 h-4 text-purple-300 shrink-0" />
+              <Info className="w-4 h-4 text-sky-300 shrink-0" />
             )}
             <span>{statusNotice.text}</span>
           </div>
@@ -517,41 +735,398 @@ export const TransferView: React.FC<TransferViewProps> = ({
         className="hidden"
       />
 
+      {/* TRANSLATION WORKSPACE */}
+      {activeMode === 'translate' && (
+        <div className="space-y-5">
+          <div className="v2-neu-card rounded-3xl p-5 sm:p-6 border border-sky-400/30 space-y-4">
+            {/* Language Controls Row */}
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5">
+              <div className="flex-1 space-y-1">
+                <label className="text-[11px] font-bold text-sky-200 uppercase tracking-wider pl-1">
+                  Source Language
+                </label>
+                <select
+                  aria-label="Source language"
+                  value={sourceLang}
+                  onChange={(e) => setSourceLang(e.target.value)}
+                  className="w-full min-h-[44px] px-3.5 py-2 rounded-2xl v2-neu-inset text-xs sm:text-sm font-semibold text-white outline-none cursor-pointer"
+                >
+                  <option value="auto" className="bg-[#120e24]">
+                    ✨ Auto-Detect Language
+                  </option>
+                  {SUPPORTED_LANGUAGES.map((l) => (
+                    <option key={l.code} value={l.code} className="bg-[#120e24]">
+                      {l.flag} {l.name} ({l.nativeName})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="flex items-end justify-center pt-1 sm:pt-5">
+                <button
+                  type="button"
+                  onClick={handleSwapLanguages}
+                  title="Swap languages"
+                  aria-label="Swap source and target languages"
+                  className="w-11 h-11 rounded-2xl bg-gradient-to-br from-purple-600/35 to-sky-500/35 hover:from-purple-600/55 hover:to-sky-500/55 border border-sky-400/40 text-white flex items-center justify-center cursor-pointer transition-transform active:scale-95"
+                >
+                  <ArrowLeftRight className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div className="flex-1 space-y-1">
+                <label className="text-[11px] font-bold text-purple-200 uppercase tracking-wider pl-1">
+                  Target Language
+                </label>
+                <select
+                  aria-label="Target language"
+                  value={targetLang}
+                  onChange={(e) => setTargetLang(e.target.value)}
+                  className="w-full min-h-[44px] px-3.5 py-2 rounded-2xl v2-neu-inset text-xs sm:text-sm font-semibold text-white outline-none cursor-pointer"
+                >
+                  {SUPPORTED_LANGUAGES.map((l) => (
+                    <option key={l.code} value={l.code} className="bg-[#120e24]">
+                      {l.flag} {l.name} ({l.nativeName})
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            {/* Dual Translation Panels */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              {/* Source Panel */}
+              <div className="v2-neu-inset rounded-2xl p-4 flex flex-col justify-between gap-3 border border-purple-400/20">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-bold text-purple-200 flex items-center gap-1.5">
+                    <span>{sourceLang === 'auto' ? '✨' : sourceLangObj?.flag}</span>
+                    <span>
+                      {sourceLang === 'auto'
+                        ? detectedLangObj
+                          ? `Auto-Detected: ${detectedLangObj.flag} ${detectedLangObj.name}`
+                          : 'Automatic Language Detection'
+                        : sourceLangObj?.name}
+                    </span>
+                  </span>
+
+                  {sourceText && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSourceText('');
+                        setTranslatedText('');
+                        setDetectedSourceLang('');
+                        setPronunciation('');
+                        setCulturalNote('');
+                      }}
+                      className="text-[11px] text-purple-300 hover:text-white cursor-pointer"
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+
+                <textarea
+                  rows={5}
+                  value={sourceText}
+                  dir={isRtlLanguage(sourceLang === 'auto' ? detectedSourceLang : sourceLang, sourceText) ? 'rtl' : 'ltr'}
+                  onChange={(e) => setSourceText(e.target.value)}
+                  placeholder="Type, paste, or tap the microphone below to speak & translate..."
+                  className="w-full bg-transparent text-sm sm:text-base text-white placeholder-purple-300/45 outline-none resize-none leading-relaxed"
+                />
+
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-white/10">
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={handleToggleVoiceTranslation}
+                      className={`min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer border transition-all ${
+                        isVoiceListening
+                          ? 'bg-rose-600 border-rose-300 text-white animate-pulse'
+                          : 'bg-white/5 hover:bg-white/10 border-purple-400/30 text-purple-100'
+                      }`}
+                    >
+                      {isVoiceListening ? <MicOff className="w-3.5 h-3.5" /> : <Mic className="w-3.5 h-3.5 text-sky-400" />}
+                      <span>{isVoiceListening ? 'Listening...' : 'Voice Input'}</span>
+                    </button>
+
+                    {sourceText.trim() && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleSpeakText(
+                            sourceText,
+                            sourceLang === 'auto' ? detectedSourceLang || 'en' : sourceLang
+                          )
+                        }
+                        title="Listen to source text"
+                        className="min-h-[38px] px-2.5 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/15 text-purple-200 cursor-pointer"
+                      >
+                        <Volume2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-mono text-purple-300/70 tabular-nums">
+                      {sourceText.length} chars
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => void handleRunTranslation()}
+                      disabled={isTranslating || !sourceText.trim()}
+                      className="electric-purple-btn min-h-[38px] px-4 py-1.5 rounded-xl text-xs font-extrabold text-white flex items-center gap-1.5 cursor-pointer disabled:opacity-45"
+                    >
+                      {isTranslating ? (
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Sparkles className="w-3.5 h-3.5" />
+                      )}
+                      <span>{isTranslating ? 'Translating...' : 'Translate'}</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Translated Result Panel */}
+              <div className="rounded-2xl p-4 bg-gradient-to-br from-indigo-950/60 via-purple-950/55 to-sky-950/55 border border-sky-400/30 flex flex-col justify-between gap-3">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-bold text-sky-200 flex items-center gap-1.5">
+                    <span>{targetLangObj.flag}</span>
+                    <span>{targetLangObj.name}</span>
+                  </span>
+                  {translationLatency !== null && translatedText && (
+                    <span className="text-[10px] font-mono text-sky-300/80 tabular-nums">
+                      {translationLatency} ms
+                    </span>
+                  )}
+                </div>
+
+                <div
+                  dir={isRtlLanguage(targetLang, translatedText) ? 'rtl' : 'ltr'}
+                  className="min-h-[120px] text-sm sm:text-base text-white leading-relaxed whitespace-pre-wrap"
+                >
+                  {isTranslating ? (
+                    <div className="flex items-center gap-2 text-xs text-sky-200/80 py-6">
+                      <RefreshCw className="w-4 h-4 animate-spin text-sky-400" />
+                      <span>Synthesizing natural translation with Gemini...</span>
+                    </div>
+                  ) : translatedText ? (
+                    translatedText
+                  ) : (
+                    <span className="text-xs text-purple-200/50">
+                      Your translation will appear here with pronunciation &amp; voice playback.
+                    </span>
+                  )}
+                </div>
+
+                {(pronunciation || culturalNote) && translatedText && (
+                  <div className="space-y-1.5 pt-2 border-t border-white/10 text-[11px]">
+                    {pronunciation && (
+                      <div className="text-sky-200">
+                        <strong className="text-sky-300">Pronunciation:</strong> {pronunciation}
+                      </div>
+                    )}
+                    {culturalNote && (
+                      <div className="text-purple-200/85">
+                        <strong className="text-purple-300">Context Note:</strong> {culturalNote}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-white/10">
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      disabled={!translatedText}
+                      onClick={() => handleCopy('translated', translatedText)}
+                      className="min-h-[36px] px-3 py-1 rounded-xl bg-white/10 hover:bg-white/15 border border-white/15 text-xs font-bold text-white flex items-center gap-1.5 cursor-pointer disabled:opacity-40"
+                    >
+                      {copiedId === 'translated' ? (
+                        <Check className="w-3.5 h-3.5 text-emerald-400" />
+                      ) : (
+                        <Copy className="w-3.5 h-3.5 text-sky-300" />
+                      )}
+                      <span>{copiedId === 'translated' ? 'Copied' : 'Copy'}</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={!translatedText}
+                      onClick={() => handleSpeakText(translatedText, targetLang)}
+                      className="min-h-[36px] px-3 py-1 rounded-xl bg-white/10 hover:bg-white/15 border border-white/15 text-xs font-bold text-white flex items-center gap-1.5 cursor-pointer disabled:opacity-40"
+                    >
+                      <Volume2 className="w-3.5 h-3.5 text-sky-300" />
+                      <span>Listen</span>
+                    </button>
+                  </div>
+
+                  {onOpenInChat && translatedText && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onOpenInChat(
+                          `Please expand on this translation (${targetLangObj.name}):\n"${translatedText}"`
+                        )
+                      }
+                      className="min-h-[36px] px-3 py-1 rounded-xl bg-purple-600/30 hover:bg-purple-600/50 border border-purple-400/35 text-xs font-bold text-purple-100 flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <MessageSquare className="w-3.5 h-3.5 text-sky-300" />
+                      <span>Ask Chat</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Translation History */}
+          <div className="v2-neu-card rounded-3xl p-5 border border-purple-400/25 space-y-3">
+            <div className="flex items-center justify-between border-b border-white/10 pb-3">
+              <div className="flex items-center gap-2">
+                <Clock className="w-4 h-4 text-sky-400" />
+                <h2 className="text-sm font-bold text-white">
+                  Translation History ({translationHistory.length})
+                </h2>
+              </div>
+              {translationHistory.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTranslationHistory([]);
+                    saveStoredTranslationHistory([], userId);
+                  }}
+                  className="text-xs text-rose-300 hover:text-rose-200 flex items-center gap-1 cursor-pointer"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Clear History</span>
+                </button>
+              )}
+            </div>
+
+            {translationHistory.length === 0 ? (
+              <p className="text-xs text-purple-200/65 text-center py-6">
+                Completed text &amp; voice translations will be saved here automatically.
+              </p>
+            ) : (
+              <div className="space-y-2.5 max-h-80 overflow-y-auto pr-1">
+                <AnimatePresence>
+                  {translationHistory.map((item) => {
+                    const fromObj = SUPPORTED_LANGUAGES.find(
+                      (l) => l.code === (item.detectedSourceLang || item.sourceLang)
+                    );
+                    const toObj = SUPPORTED_LANGUAGES.find((l) => l.code === item.targetLang);
+                    return (
+                      <motion.div
+                        key={item.id}
+                        initial={{ opacity: 0, y: 6 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0 }}
+                        className="p-3.5 rounded-2xl v2-neu-inset flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                      >
+                        <div className="min-w-0 space-y-1">
+                          <div className="flex items-center gap-2 text-[10px] font-bold uppercase text-sky-300">
+                            <span>
+                              {fromObj?.flag || '🌐'} {fromObj?.name || item.detectedSourceLang || 'Auto'} →{' '}
+                              {toObj?.flag || '🌐'} {toObj?.name || item.targetLang}
+                            </span>
+                            {item.isVoice && (
+                              <span className="px-1.5 py-0.5 rounded bg-purple-500/25 border border-purple-400/35 text-purple-200">
+                                Voice
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-xs text-purple-200/80 truncate">{item.sourceText}</p>
+                          <p
+                            dir={isRtlLanguage(item.targetLang, item.translatedText) ? 'rtl' : 'ltr'}
+                            className="text-xs sm:text-sm font-semibold text-white break-words"
+                          >
+                            {item.translatedText}
+                          </p>
+                        </div>
+
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => handleSpeakText(item.translatedText, item.targetLang)}
+                            title="Listen"
+                            className="p-2 rounded-xl bg-white/5 hover:bg-white/10 border border-white/15 text-sky-300 cursor-pointer"
+                          >
+                            <Volume2 className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleCopy(item.id, item.translatedText)}
+                            title="Copy translation"
+                            className="p-2 rounded-xl bg-white/5 hover:bg-white/10 border border-white/15 text-purple-200 cursor-pointer"
+                          >
+                            {copiedId === item.id ? (
+                              <Check className="w-3.5 h-3.5 text-emerald-400" />
+                            ) : (
+                              <Copy className="w-3.5 h-3.5" />
+                            )}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSourceLang(item.sourceLang || 'auto');
+                              setTargetLang(item.targetLang);
+                              setSourceText(item.sourceText);
+                              setTranslatedText(item.translatedText);
+                              setDetectedSourceLang(item.detectedSourceLang || '');
+                              setPronunciation(item.pronunciation || '');
+                              setCulturalNote(item.culturalNote || '');
+                            }}
+                            title="Load into translator"
+                            className="px-2.5 py-1.5 rounded-xl bg-purple-600/25 hover:bg-purple-600/45 border border-purple-400/35 text-[11px] font-bold text-purple-100 cursor-pointer"
+                          >
+                            Load
+                          </button>
+                        </div>
+                      </motion.div>
+                    );
+                  })}
+                </AnimatePresence>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {activeMode === 'send' && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
           {/* Left: Dropzone + Quick Share Pickers + Progress Queue */}
           <div className="lg:col-span-7 space-y-4">
-            {/* Quick Action Tiles */}
             <div className="grid grid-cols-3 gap-2.5">
               <button
                 type="button"
                 onClick={() => anyFileInputRef.current?.click()}
-                className="glass-card glass-card-hover min-h-[76px] p-3 rounded-2xl border border-purple-400/25 flex flex-col items-center justify-center gap-1.5 cursor-pointer text-center"
+                className="v2-neu-card glass-card-hover min-h-[76px] p-3 rounded-2xl border border-purple-400/25 flex flex-col items-center justify-center gap-1.5 cursor-pointer text-center"
               >
-                <Upload className="w-5 h-5 text-purple-300" />
+                <Upload className="w-5 h-5 text-sky-300" />
                 <span className="text-xs font-bold text-white whitespace-nowrap">Upload Files</span>
               </button>
 
               <button
                 type="button"
                 onClick={() => docInputRef.current?.click()}
-                className="glass-card glass-card-hover min-h-[76px] p-3 rounded-2xl border border-purple-400/25 flex flex-col items-center justify-center gap-1.5 cursor-pointer text-center"
+                className="v2-neu-card glass-card-hover min-h-[76px] p-3 rounded-2xl border border-purple-400/25 flex flex-col items-center justify-center gap-1.5 cursor-pointer text-center"
               >
-                <FileText className="w-5 h-5 text-violet-300" />
+                <FileText className="w-5 h-5 text-purple-300" />
                 <span className="text-xs font-bold text-white whitespace-nowrap">Share Docs</span>
               </button>
 
               <button
                 type="button"
                 onClick={() => imageInputRef.current?.click()}
-                className="glass-card glass-card-hover min-h-[76px] p-3 rounded-2xl border border-purple-400/25 flex flex-col items-center justify-center gap-1.5 cursor-pointer text-center"
+                className="v2-neu-card glass-card-hover min-h-[76px] p-3 rounded-2xl border border-purple-400/25 flex flex-col items-center justify-center gap-1.5 cursor-pointer text-center"
               >
-                <ImageIcon className="w-5 h-5 text-fuchsia-300" />
+                <ImageIcon className="w-5 h-5 text-indigo-300" />
                 <span className="text-xs font-bold text-white whitespace-nowrap">Share Images</span>
               </button>
             </div>
 
-            {/* Drag-and-Drop Zone */}
             <div
               onDragOver={(e) => {
                 e.preventDefault();
@@ -564,14 +1139,14 @@ export const TransferView: React.FC<TransferViewProps> = ({
                 processSelectedFiles(e.dataTransfer.files);
               }}
               onClick={() => anyFileInputRef.current?.click()}
-              className={`glass-card rounded-3xl p-6 sm:p-8 border-2 border-dashed text-center cursor-pointer transition-all space-y-2 ${
+              className={`v2-neu-card rounded-3xl p-6 sm:p-8 border-2 border-dashed text-center cursor-pointer transition-all space-y-2 ${
                 isDragging
-                  ? 'border-purple-400 bg-purple-900/30 scale-[1.01]'
-                  : 'border-purple-400/35 hover:border-purple-400/70'
+                  ? 'border-sky-400 bg-purple-900/30 scale-[1.01]'
+                  : 'border-purple-400/35 hover:border-sky-400/70'
               }`}
             >
-              <div className="w-12 h-12 rounded-2xl bg-purple-500/20 border border-purple-400/40 flex items-center justify-center mx-auto">
-                <Upload className="w-6 h-6 text-purple-300" />
+              <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-sky-500/25 to-purple-500/25 border border-sky-400/40 flex items-center justify-center mx-auto">
+                <Upload className="w-6 h-6 text-sky-300" />
               </div>
               <h2 className="text-sm sm:text-base font-bold text-white">
                 Drop files here or tap to browse
@@ -581,8 +1156,7 @@ export const TransferView: React.FC<TransferViewProps> = ({
               </p>
             </div>
 
-            {/* Transfer Progress Queue */}
-            <div className="glass-card rounded-3xl p-4 sm:p-5 border border-purple-400/25 space-y-3">
+            <div className="v2-neu-card rounded-3xl p-4 sm:p-5 border border-purple-400/25 space-y-3">
               <div className="flex items-center justify-between">
                 <h3 className="text-sm font-bold text-white">
                   Transfer Progress ({queuedFiles.length})
@@ -618,8 +1192,8 @@ export const TransferView: React.FC<TransferViewProps> = ({
                         onClick={() => setSelectedFileId(item.id)}
                         className={`p-3 rounded-2xl border transition-all cursor-pointer space-y-2 ${
                           isSelected
-                            ? 'bg-purple-900/35 border-purple-400/60'
-                            : 'bg-[#0b0818]/75 border-white/10 hover:border-purple-400/35'
+                            ? 'bg-purple-900/35 border-sky-400/60'
+                            : 'v2-neu-inset hover:border-purple-400/35'
                         }`}
                       >
                         <div className="flex items-center justify-between gap-2">
@@ -632,7 +1206,7 @@ export const TransferView: React.FC<TransferViewProps> = ({
                               />
                             ) : (
                               <div className="w-9 h-9 rounded-xl bg-purple-500/20 border border-purple-400/30 flex items-center justify-center shrink-0">
-                                <FileIcon className="w-4 h-4 text-purple-300" />
+                                <FileIcon className="w-4 h-4 text-sky-300" />
                               </div>
                             )}
                             <div className="min-w-0">
@@ -643,19 +1217,18 @@ export const TransferView: React.FC<TransferViewProps> = ({
                             </div>
                           </div>
 
-                          <span className="text-xs font-mono font-bold text-purple-300 tabular-nums shrink-0">
+                          <span className="text-xs font-mono font-bold text-sky-300 tabular-nums shrink-0">
                             {item.progress}%
                           </span>
                         </div>
 
-                        {/* Progress Bar */}
                         <div className="h-1.5 w-full rounded-full bg-white/10 overflow-hidden">
                           <div
                             style={{ width: `${item.progress}%` }}
                             className={`h-full rounded-full transition-all duration-200 ${
                               item.status === 'error'
                                 ? 'bg-rose-500'
-                                : 'bg-gradient-to-r from-purple-500 via-violet-400 to-fuchsia-400'
+                                : 'bg-gradient-to-r from-purple-500 via-indigo-400 to-sky-400'
                             }`}
                           />
                         </div>
@@ -667,17 +1240,16 @@ export const TransferView: React.FC<TransferViewProps> = ({
             </div>
           </div>
 
-          {/* Right: File Information & Honest Transfer Actions */}
           <div className="lg:col-span-5">
-            <div className="glass-card rounded-3xl p-5 border border-purple-400/30 space-y-4 sticky top-20">
+            <div className="v2-neu-card rounded-3xl p-5 border border-purple-400/30 space-y-4 sticky top-20">
               <div className="flex items-center gap-2 border-b border-white/10 pb-3">
-                <Info className="w-4 h-4 text-purple-300" />
+                <Info className="w-4 h-4 text-sky-300" />
                 <h3 className="text-sm font-bold text-white">File Information &amp; Actions</h3>
               </div>
 
               {!selectedItem ? (
                 <div className="py-10 text-center space-y-2 text-xs text-purple-200/65">
-                  <ShieldCheck className="w-8 h-8 text-purple-400/60 mx-auto" />
+                  <ShieldCheck className="w-8 h-8 text-sky-400/60 mx-auto" />
                   <p>Select any uploaded file to view detailed metadata, SHA-256 fingerprint, and transfer options.</p>
                 </div>
               ) : (
@@ -721,19 +1293,18 @@ export const TransferView: React.FC<TransferViewProps> = ({
                     </div>
                     <div className="py-1 space-y-1">
                       <dt className="text-purple-200/70">SHA-256 Checksum</dt>
-                      <dd className="font-mono text-[10px] text-purple-300 break-all bg-[#090614] p-2 rounded-xl border border-white/10">
+                      <dd className="font-mono text-[10px] text-sky-300 break-all bg-[#090614] p-2 rounded-xl border border-white/10">
                         {selectedItem.sha256 || 'Computing...'}
                       </dd>
                     </div>
                   </dl>
 
-                  {/* Real Actions */}
                   <div className="space-y-2 pt-2">
                     <button
                       type="button"
                       disabled={selectedItem.status !== 'ready' && selectedItem.status !== 'shared'}
                       onClick={() => handleWebShare(selectedItem)}
-                      className="purple-glow-btn w-full min-h-[44px] px-4 py-2.5 rounded-2xl text-white text-xs font-bold flex items-center justify-center gap-2 cursor-pointer disabled:opacity-45"
+                      className="electric-purple-btn w-full min-h-[44px] px-4 py-2.5 rounded-2xl text-white text-xs font-bold flex items-center justify-center gap-2 cursor-pointer disabled:opacity-45"
                     >
                       <Share2 className="w-4 h-4" />
                       <span>
@@ -747,7 +1318,7 @@ export const TransferView: React.FC<TransferViewProps> = ({
                       onClick={() => handleBroadcastSend(selectedItem)}
                       className="w-full min-h-[42px] px-4 py-2 rounded-2xl bg-purple-600/25 hover:bg-purple-600/45 border border-purple-400/40 text-purple-100 text-xs font-semibold flex items-center justify-center gap-2 cursor-pointer disabled:opacity-45"
                     >
-                      <Radio className="w-4 h-4 text-purple-300" />
+                      <Radio className="w-4 h-4 text-sky-300" />
                       <span>Send to Open Aadesh AI Tab</span>
                     </button>
 
@@ -765,7 +1336,7 @@ export const TransferView: React.FC<TransferViewProps> = ({
                         }
                         className="min-h-[40px] px-3 py-2 rounded-xl bg-white/5 hover:bg-white/10 border border-white/15 text-xs font-semibold text-white flex items-center justify-center gap-1.5 cursor-pointer"
                       >
-                        <Download className="w-3.5 h-3.5 text-purple-300" />
+                        <Download className="w-3.5 h-3.5 text-sky-300" />
                         <span>Save Copy</span>
                       </button>
 
@@ -789,11 +1360,11 @@ export const TransferView: React.FC<TransferViewProps> = ({
       )}
 
       {activeMode === 'receive' && (
-        <div className="glass-card rounded-3xl p-5 sm:p-6 border border-purple-400/30 space-y-4">
+        <div className="v2-neu-card rounded-3xl p-5 sm:p-6 border border-purple-400/30 space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-white/10 pb-4">
             <div>
               <h2 className="text-base sm:text-lg font-bold text-white flex items-center gap-2">
-                <Inbox className="w-5 h-5 text-purple-400" />
+                <Inbox className="w-5 h-5 text-sky-400" />
                 <span>Receive Files</span>
               </h2>
               <p className="text-xs text-purple-200/75 mt-0.5">
@@ -803,7 +1374,7 @@ export const TransferView: React.FC<TransferViewProps> = ({
             <button
               type="button"
               onClick={() => receiveInputRef.current?.click()}
-              className="purple-glow-btn min-h-[42px] px-4 py-2 rounded-xl text-xs font-bold text-white flex items-center gap-2 cursor-pointer whitespace-nowrap self-start"
+              className="electric-purple-btn min-h-[42px] px-4 py-2 rounded-xl text-xs font-bold text-white flex items-center gap-2 cursor-pointer whitespace-nowrap self-start"
             >
               <Upload className="w-4 h-4" />
               <span>Import File to Verify</span>
@@ -812,7 +1383,7 @@ export const TransferView: React.FC<TransferViewProps> = ({
 
           {incomingFiles.length === 0 ? (
             <div className="py-12 text-center space-y-2">
-              <Radio className="w-10 h-10 text-purple-400/60 mx-auto animate-pulse" />
+              <Radio className="w-10 h-10 text-sky-400/60 mx-auto animate-pulse" />
               <div className="text-sm font-bold text-white">Ready to Receive</div>
               <p className="text-xs text-purple-200/70 max-w-md mx-auto">
                 Open Aadesh AI in another tab/window and send a file via Cross-Tab Channel, or tap "Import File to Verify" above.
@@ -823,7 +1394,7 @@ export const TransferView: React.FC<TransferViewProps> = ({
               {incomingFiles.map((rx) => (
                 <div
                   key={rx.id}
-                  className="p-4 rounded-2xl bg-[#0b0818]/80 border border-purple-400/30 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                  className="p-4 rounded-2xl v2-neu-inset border border-purple-400/30 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
                 >
                   <div className="min-w-0 space-y-1">
                     <div className="text-sm font-bold text-white truncate">{rx.fileName}</div>
@@ -831,7 +1402,7 @@ export const TransferView: React.FC<TransferViewProps> = ({
                       From {rx.senderName} · {formatBytes(rx.fileSize)} · {new Date(rx.receivedAt).toLocaleTimeString()}
                     </div>
                     {rx.sha256 && (
-                      <div className="text-[10px] font-mono text-purple-300/80 truncate">
+                      <div className="text-[10px] font-mono text-sky-300/80 truncate">
                         SHA-256: {rx.sha256}
                       </div>
                     )}
@@ -841,7 +1412,7 @@ export const TransferView: React.FC<TransferViewProps> = ({
                     onClick={() =>
                       handleDownloadFile(rx.fileName, rx.mimeType, rx.buffer, rx.fileSize, rx.sha256)
                     }
-                    className="purple-glow-btn min-h-[40px] px-4 py-2 rounded-xl text-xs font-bold text-white flex items-center justify-center gap-1.5 cursor-pointer shrink-0"
+                    className="electric-purple-btn min-h-[40px] px-4 py-2 rounded-xl text-xs font-bold text-white flex items-center justify-center gap-1.5 cursor-pointer shrink-0"
                   >
                     <Download className="w-3.5 h-3.5" />
                     <span>Download File</span>
@@ -854,7 +1425,7 @@ export const TransferView: React.FC<TransferViewProps> = ({
       )}
 
       {activeMode === 'history' && (
-        <div className="glass-card rounded-3xl p-5 sm:p-6 border border-purple-400/30 space-y-4">
+        <div className="v2-neu-card rounded-3xl p-5 sm:p-6 border border-purple-400/30 space-y-4">
           <div className="flex items-center justify-between border-b border-white/10 pb-3">
             <div>
               <h2 className="text-base sm:text-lg font-bold text-white">Download &amp; Transfer History</h2>
@@ -884,7 +1455,7 @@ export const TransferView: React.FC<TransferViewProps> = ({
               {history.map((entry) => (
                 <div
                   key={entry.id}
-                  className="p-3.5 rounded-2xl bg-[#0b0818]/75 border border-white/10 flex flex-col sm:flex-row sm:items-center justify-between gap-2"
+                  className="p-3.5 rounded-2xl v2-neu-inset flex flex-col sm:flex-row sm:items-center justify-between gap-2"
                 >
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
@@ -902,7 +1473,7 @@ export const TransferView: React.FC<TransferViewProps> = ({
                   </div>
 
                   {entry.sha256 && (
-                    <span className="text-[10px] font-mono text-purple-300/80 shrink-0">
+                    <span className="text-[10px] font-mono text-sky-300/80 shrink-0">
                       #{entry.sha256.slice(0, 12)}
                     </span>
                   )}

@@ -24,9 +24,9 @@ service cloud.firestore {
       return isSignedIn() && request.auth.uid == userId;
     }
 
-    // Verified Platform Owner / Admin check (case-insensitive email check)
+    // Verified Platform Owner / Admin check (requires email_verified == true for both email and UID admin document paths)
     function isAdmin() {
-      return isSignedIn() && (
+      return isSignedIn() && request.auth.token.email_verified == true && (
         (request.auth.token.email is string && request.auth.token.email.lower() == 'aadeshjaisi6@gmail.com')
         || exists(/databases/$(database)/documents/admins/$(request.auth.uid))
       );
@@ -42,17 +42,34 @@ service cloud.firestore {
     function isValidUserCreateDoc(data, userId) {
       return data.keys().hasAll(['userId', 'displayName', 'createdAt'])
         && data.keys().hasOnly([
-          'userId', 'displayName', 'username', 'email', 'photoURL',
-          'preferredLanguage', 'status', 'role', 'provider',
+          'userId', 'displayName', 'nickname', 'age', 'onboardingCompleted', 'memoryConsent',
+          'username', 'email', 'photoURL',
+          'preferredLanguage', 'preferredTheme', 'termsAccepted', 'termsAcceptedAt',
+          'country', 'countryFlag', 'isManualCountry',
+          'streakDays', 'longestStreak', 'lastActiveDate',
+          'status', 'role', 'provider',
           'messageCount', 'conversationCount', 'createdAt', 'updatedAt', 'lastActiveAt'
         ])
         && data.userId == userId
         && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 100
         && data.createdAt is string && data.createdAt.size() <= 50
+        && (!('nickname' in data) || (data.nickname is string && data.nickname.size() <= 64))
+        && (!('age' in data) || (data.age is number && data.age >= 1 && data.age <= 130))
+        && (!('onboardingCompleted' in data) || data.onboardingCompleted is bool)
+        && (!('memoryConsent' in data) || data.memoryConsent in ['pending', 'agreed', 'disagreed'])
         && (!('username' in data) || (data.username is string && data.username.size() <= 64))
         && (!('email' in data) || (data.email is string && data.email.size() <= 160))
         && (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 1000))
         && (!('preferredLanguage' in data) || (data.preferredLanguage is string && data.preferredLanguage.size() <= 20))
+        && (!('preferredTheme' in data) || (data.preferredTheme is string && data.preferredTheme.size() <= 40))
+        && (!('termsAccepted' in data) || data.termsAccepted is bool)
+        && (!('termsAcceptedAt' in data) || (data.termsAcceptedAt is string && data.termsAcceptedAt.size() <= 50))
+        && (!('country' in data) || (data.country is string && data.country.size() <= 80))
+        && (!('countryFlag' in data) || (data.countryFlag is string && data.countryFlag.size() <= 16))
+        && (!('isManualCountry' in data) || data.isManualCountry is bool)
+        && (!('streakDays' in data) || (data.streakDays is number && data.streakDays >= 0 && data.streakDays <= 10000))
+        && (!('longestStreak' in data) || (data.longestStreak is number && data.longestStreak >= 0 && data.longestStreak <= 10000))
+        && (!('lastActiveDate' in data) || (data.lastActiveDate is string && data.lastActiveDate.size() <= 20))
         && (!('status' in data) || data.status in ['active', 'suspended'])
         && (!('role' in data) || data.role in ['user', 'admin'])
         && (!('provider' in data) || (data.provider is string && data.provider.size() <= 32))
@@ -65,17 +82,34 @@ service cloud.firestore {
     function isValidUserUpdateDoc(data, userId) {
       return data.keys().hasAll(['userId', 'displayName'])
         && data.keys().hasOnly([
-          'userId', 'displayName', 'username', 'email', 'photoURL',
-          'preferredLanguage', 'status', 'role', 'provider',
+          'userId', 'displayName', 'nickname', 'age', 'onboardingCompleted', 'memoryConsent',
+          'username', 'email', 'photoURL',
+          'preferredLanguage', 'preferredTheme', 'termsAccepted', 'termsAcceptedAt',
+          'country', 'countryFlag', 'isManualCountry',
+          'streakDays', 'longestStreak', 'lastActiveDate',
+          'status', 'role', 'provider',
           'messageCount', 'conversationCount', 'createdAt', 'updatedAt', 'lastActiveAt'
         ])
         && data.userId == userId
         && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 100
         && (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 50))
+        && (!('nickname' in data) || (data.nickname is string && data.nickname.size() <= 64))
+        && (!('age' in data) || (data.age is number && data.age >= 1 && data.age <= 130))
+        && (!('onboardingCompleted' in data) || data.onboardingCompleted is bool)
+        && (!('memoryConsent' in data) || data.memoryConsent in ['pending', 'agreed', 'disagreed'])
         && (!('username' in data) || (data.username is string && data.username.size() <= 64))
         && (!('email' in data) || (data.email is string && data.email.size() <= 160))
         && (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 1000))
         && (!('preferredLanguage' in data) || (data.preferredLanguage is string && data.preferredLanguage.size() <= 20))
+        && (!('preferredTheme' in data) || (data.preferredTheme is string && data.preferredTheme.size() <= 40))
+        && (!('termsAccepted' in data) || data.termsAccepted is bool)
+        && (!('termsAcceptedAt' in data) || (data.termsAcceptedAt is string && data.termsAcceptedAt.size() <= 50))
+        && (!('country' in data) || (data.country is string && data.country.size() <= 80))
+        && (!('countryFlag' in data) || (data.countryFlag is string && data.countryFlag.size() <= 16))
+        && (!('isManualCountry' in data) || data.isManualCountry is bool)
+        && (!('streakDays' in data) || (data.streakDays is number && data.streakDays >= 0 && data.streakDays <= 10000))
+        && (!('longestStreak' in data) || (data.longestStreak is number && data.longestStreak >= 0 && data.longestStreak <= 10000))
+        && (!('lastActiveDate' in data) || (data.lastActiveDate is string && data.lastActiveDate.size() <= 20))
         && (!('status' in data) || data.status in ['active', 'suspended'])
         && (!('role' in data) || data.role in ['user', 'admin'])
         && (!('provider' in data) || (data.provider is string && data.provider.size() <= 32))
@@ -309,9 +343,13 @@ service cloud.firestore {
           || (
             isOwner(userId)
             && incoming().diff(existing()).affectedKeys().hasOnly([
-              'displayName', 'username', 'email', 'photoURL',
-              'preferredLanguage', 'provider', 'messageCount',
-              'conversationCount', 'updatedAt', 'lastActiveAt', 'role', 'status'
+              'displayName', 'nickname', 'age', 'onboardingCompleted', 'memoryConsent',
+              'username', 'email', 'photoURL',
+              'preferredLanguage', 'preferredTheme', 'termsAccepted', 'termsAcceptedAt',
+              'country', 'countryFlag', 'isManualCountry',
+              'streakDays', 'longestStreak', 'lastActiveDate',
+              'provider', 'messageCount',
+              'conversationCount', 'updatedAt', 'lastActiveAt'
             ])
           )
         );

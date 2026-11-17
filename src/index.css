@@ -19,6 +19,9 @@
     --theme-accent-rgb: 139, 92, 246;
     --theme-accent-sec-rgb: 168, 85, 247;
     --theme-accent-light-rgb: 196, 181, 253;
+    --theme-electric-blue: #3b82f6;
+    --theme-electric-cyan: #06b6d4;
+    --theme-electric-rgb: 59, 130, 246;
   }
 
   html {
@@ -149,9 +152,24 @@ body.light-theme .glass-card pre,
 body.light-theme .glass-card pre *:not(mark),
 body.light-theme .purple-glow-btn,
 body.light-theme .purple-glow-btn *,
+body.light-theme .electric-purple-btn,
+body.light-theme .electric-purple-btn *,
 body.light-theme .glass-nav button[aria-current="page"],
 body.light-theme .glass-nav button[aria-current="page"] * {
   color: #ffffff !important;
+}
+
+body.light-theme .v2-neu-card {
+  background: linear-gradient(145deg, rgba(255, 255, 255, 0.96), rgba(243, 240, 255, 0.92)) !important;
+  border-color: rgba(124, 58, 237, 0.22) !important;
+  box-shadow: 8px 8px 24px rgba(109, 40, 217, 0.08), -4px -4px 14px rgba(255, 255, 255, 0.9), inset 0 1px 0 rgba(255, 255, 255, 0.95) !important;
+  color: #1e1b4b !important;
+}
+
+body.light-theme .v2-neu-inset {
+  background: rgba(237, 233, 254, 0.6) !important;
+  border-color: rgba(139, 92, 246, 0.22) !important;
+  box-shadow: inset 2px 2px 6px rgba(109, 40, 217, 0.08), inset -2px -2px 6px rgba(255, 255, 255, 0.85) !important;
 }
 
 body.light-theme .glass-card pre mark,
@@ -241,13 +259,13 @@ body.high-contrast span {
 }
 
 .purple-glow-btn {
-  background: linear-gradient(135deg, #7c3aed 0%, #8b5cf6 48%, #a855f7 100%);
-  box-shadow: 0 4px 22px rgba(var(--theme-accent-rgb), 0.48), inset 0 1px 0 rgba(255, 255, 255, 0.24);
+  background: linear-gradient(135deg, #6d28d9 0%, #8b5cf6 52%, #3b82f6 100%);
+  box-shadow: 0 4px 22px rgba(var(--theme-accent-rgb), 0.45), 0 0 18px rgba(var(--theme-electric-rgb), 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.26);
   transition: transform 0.2s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.25s ease, filter 0.25s ease;
 }
 
 .purple-glow-btn:hover {
-  box-shadow: 0 6px 32px rgba(var(--theme-accent-rgb), 0.72);
+  box-shadow: 0 6px 32px rgba(var(--theme-accent-rgb), 0.68), 0 0 24px rgba(var(--theme-electric-rgb), 0.42);
   filter: brightness(1.06);
   transform: translateY(-1px);
 }
@@ -256,8 +274,38 @@ body.high-contrast span {
   transform: scale(0.97);
 }
 
+.electric-purple-btn {
+  background: linear-gradient(135deg, #4f46e5 0%, #8b5cf6 52%, #0ea5e9 100%);
+  box-shadow: 0 6px 24px rgba(59, 130, 246, 0.35), 0 2px 14px rgba(139, 92, 246, 0.38), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+  transition: transform 0.2s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.25s ease, filter 0.25s ease;
+}
+
+.electric-purple-btn:hover:not(:disabled) {
+  box-shadow: 0 8px 30px rgba(59, 130, 246, 0.55), 0 4px 20px rgba(139, 92, 246, 0.52);
+  filter: brightness(1.07);
+  transform: translateY(-1px);
+}
+
+.electric-purple-btn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.v2-neu-card {
+  background: linear-gradient(145deg, rgba(22, 16, 44, 0.88), rgba(12, 9, 26, 0.92));
+  backdrop-filter: blur(22px);
+  -webkit-backdrop-filter: blur(22px);
+  border: 1px solid rgba(167, 139, 250, 0.24);
+  box-shadow: 8px 10px 28px rgba(2, 1, 10, 0.65), -4px -4px 16px rgba(139, 92, 246, 0.06), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.v2-neu-inset {
+  background: rgba(9, 7, 20, 0.72);
+  border: 1px solid rgba(139, 92, 246, 0.2);
+  box-shadow: inset 3px 3px 8px rgba(2, 1, 10, 0.75), inset -2px -2px 8px rgba(139, 92, 246, 0.08);
+}
+
 .text-gradient {
-  background: linear-gradient(135deg, #ffffff 22%, #ddd6fe 62%, #c084fc 100%);
+  background: linear-gradient(135deg, #ffffff 15%, #ddd6fe 52%, #7dd3fc 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
 }
@@ -425,6 +473,27 @@ body.high-contrast span {
   .particle-dot {
     animation: none !important;
   }
+}
+
+body.reduced-animations *,
+body.reduced-animations *::before,
+body.reduced-animations *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+}
+
+/* Focus Mode Subtle Ambient Filters */
+body.focus-mode-study {
+  --theme-accent: #3b82f6;
+  --theme-accent-rgb: 59, 130, 246;
+}
+body.focus-mode-night {
+  filter: saturate(0.88) brightness(0.94);
+}
+body.focus-mode-relax {
+  --theme-accent: #10b981;
+  --theme-accent-rgb: 16, 185, 129;
 }
 
 @keyframes marqueeRightToLeft {

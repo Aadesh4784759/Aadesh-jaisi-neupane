@@ -137,22 +137,42 @@ testFirestoreConnection();
 
 // Friendly human-readable error messages for Firebase Authentication
 export function formatAuthError(errorCodeOrMessage: string): string {
-  const code = errorCodeOrMessage.toLowerCase();
+  const raw = String(errorCodeOrMessage || '').trim();
+  const code = raw.toLowerCase();
   if (code.includes('auth/email-already-in-use')) {
     return 'This email address is already in use by another account. Please sign in or reset your password.';
   }
   if (
     code.includes('auth/invalid-credential') ||
+    code.includes('auth/invalid-login-credentials') ||
     code.includes('auth/wrong-password') ||
     code.includes('auth/user-not-found')
   ) {
     return 'Invalid email or password. Please verify your credentials and try again.';
+  }
+  if (code.includes('auth/missing-password')) {
+    return 'Please enter your password before signing in.';
+  }
+  if (code.includes('auth/missing-email')) {
+    return 'Please enter your email address.';
   }
   if (code.includes('auth/weak-password')) {
     return 'Password is too weak. Please use at least 6 characters with a combination of letters and numbers.';
   }
   if (code.includes('auth/invalid-email')) {
     return 'Please enter a valid email address.';
+  }
+  if (code.includes('auth/user-disabled')) {
+    return 'This account has been disabled. Please contact support for assistance.';
+  }
+  if (code.includes('auth/unauthorized-domain')) {
+    return 'Sign-in from this domain is not yet authorized in Firebase Authentication settings.';
+  }
+  if (code.includes('auth/requires-recent-login')) {
+    return 'For your security, please sign out and sign back in to complete this action.';
+  }
+  if (code.includes('auth/user-token-expired')) {
+    return 'Your authentication session expired. Please sign in again.';
   }
   if (code.includes('auth/popup-closed-by-user') || code.includes('auth/cancelled-popup-request')) {
     return 'Sign-in popup was closed before completion. Please try again.';
@@ -161,15 +181,16 @@ export function formatAuthError(errorCodeOrMessage: string): string {
     return 'Sign-in popup was blocked by your browser. Please allow popups for this site and retry.';
   }
   if (code.includes('auth/network-request-failed')) {
-    return 'Network connection error. Please check your internet connection.';
+    return 'Network connection error. Please check your internet connection and retry.';
   }
   if (code.includes('auth/too-many-requests')) {
-    return 'Too many unsuccessful attempts. Access temporarily disabled. Please reset your password or wait.';
+    return 'Too many unsuccessful attempts. Access temporarily paused. Please reset your password or wait a moment.';
   }
   if (code.includes('auth/operation-not-allowed')) {
     return 'This sign-in provider is not enabled yet in Firebase Console Authentication settings.';
   }
-  return errorCodeOrMessage || 'Authentication failed. Please try again.';
+  const cleaned = raw.replace(/^Firebase:\s*Error\s*\(([^)]+)\)\.?/i, '$1').replace(/^auth\//i, '').replace(/-/g, ' ').trim();
+  return cleaned && cleaned !== raw ? `Authentication error: ${cleaned}. Please try again.` : raw || 'Authentication failed. Please try again.';
 }
 
 export async function signInWithGoogle() {
@@ -190,6 +211,7 @@ export async function registerWithEmail(email: string, pass: string, displayName
       await sendEmailVerification(credential.user);
     } catch (err) {
       console.warn('Initial verification email dispatch notice:', err);
+      throw err;
     }
   }
   return credential.user;
@@ -266,10 +288,14 @@ function safeDocId(raw: string): string {
   return cleaned.slice(0, 128) || `id-${Date.now()}`;
 }
 
-export async function syncUserProfileToFirestore(profile: UserProfile): Promise<void> {
+export async function syncUserProfileToFirestore(
+  profile: UserProfile & {
+    preferredTheme?: string;
+    memoryConsent?: 'pending' | 'agreed' | 'disagreed';
+  }
+): Promise<void> {
   if (!db || !auth?.currentUser || auth.currentUser.uid !== profile.id) return;
   const uid = safeDocId(profile.id);
-  const path = `users/${uid}`;
   const docRef = doc(db, 'users', uid);
 
   try {
@@ -285,83 +311,121 @@ export async function syncUserProfileToFirestore(profile: UserProfile): Promise<
       (auth.currentUser.email || '').toLowerCase() === OWNER_ADMIN_EMAIL &&
       auth.currentUser.emailVerified;
 
+    const safeStreakDays = Math.max(0, Math.min(10000, Math.floor(Number(profile.streakDays) || 0)));
+    const safeLongestStreak = Math.max(
+      safeStreakDays,
+      Math.min(10000, Math.floor(Number(profile.longestStreak) || 0))
+    );
+    const safeLastActiveDate = (profile.lastActiveDate || '').slice(0, 20);
+
+    const coreCreatePayload = {
+      userId: uid,
+      displayName: (profile.name || 'User').slice(0, 100),
+      username: (profile.username || 'user').slice(0, 64),
+      email: (profile.email || '').slice(0, 160),
+      photoURL: (profile.avatarUrl || '').slice(0, 1000),
+      preferredLanguage: (profile.preferredLanguage || 'en').slice(0, 20),
+      status: 'active',
+      role: isVerifiedOwner ? 'admin' : 'user',
+      provider: (profile.provider || 'email').slice(0, 32),
+      messageCount: 0,
+      conversationCount: 1,
+      createdAt: creationTime,
+      updatedAt: nowIso,
+      lastActiveAt: nowIso,
+    };
+
+    const extendedFields = {
+      ...(profile.preferredTheme ? { preferredTheme: String(profile.preferredTheme).slice(0, 40) } : {}),
+      ...(profile.nickname ? { nickname: String(profile.nickname).slice(0, 64) } : {}),
+      ...(typeof profile.age === 'number' && Number.isFinite(profile.age) && profile.age > 0 && profile.age <= 130
+        ? { age: Math.floor(profile.age) }
+        : {}),
+      ...(typeof profile.onboardingCompleted === 'boolean'
+        ? { onboardingCompleted: profile.onboardingCompleted }
+        : {}),
+      ...(profile.memoryConsent ? { memoryConsent: profile.memoryConsent } : {}),
+      termsAccepted: profile.termsAccepted ?? true,
+      termsAcceptedAt: (profile.termsAcceptedAt || nowIso).slice(0, 50),
+      country: (profile.country || 'Global').slice(0, 80),
+      countryFlag: (profile.countryFlag || '🌐').slice(0, 16),
+      isManualCountry: Boolean(profile.isManualCountry),
+      streakDays: safeStreakDays,
+      longestStreak: safeLongestStreak,
+      ...(safeLastActiveDate ? { lastActiveDate: safeLastActiveDate } : {}),
+    };
+
     if (!existingSnap.exists()) {
-      await setDoc(docRef, {
-        userId: uid,
-        displayName: (profile.name || 'User').slice(0, 100),
-        username: (profile.username || 'user').slice(0, 64),
-        email: (profile.email || '').slice(0, 160),
-        photoURL: (profile.avatarUrl || '').slice(0, 1000),
-        preferredLanguage: (profile.preferredLanguage || 'en').slice(0, 20),
-        preferredTheme: ((profile as any).preferredTheme || '').slice(0, 40),
-        termsAccepted: profile.termsAccepted ?? true,
-        termsAcceptedAt: profile.termsAcceptedAt || nowIso,
-        country: (profile.country || 'Global').slice(0, 80),
-        countryFlag: (profile.countryFlag || '🌐').slice(0, 16),
-        status: 'active',
-        role: isVerifiedOwner ? 'admin' : 'user',
-        provider: profile.provider.slice(0, 32),
-        messageCount: 0,
-        conversationCount: 1,
-        createdAt: creationTime,
-        updatedAt: nowIso,
-        lastActiveAt: nowIso,
-      });
+      try {
+        await setDoc(docRef, { ...coreCreatePayload, ...extendedFields });
+      } catch (writeErr: any) {
+        if (String(writeErr?.code || writeErr?.message || '').toLowerCase().includes('permission')) {
+          await setDoc(docRef, coreCreatePayload).catch(() => {});
+        }
+      }
     } else {
-      await updateDoc(docRef, {
+      const coreUpdatePayload = {
         displayName: (profile.name || 'User').slice(0, 100),
         username: (profile.username || 'user').slice(0, 64),
         email: (profile.email || '').slice(0, 160),
         photoURL: (profile.avatarUrl || '').slice(0, 1000),
         preferredLanguage: (profile.preferredLanguage || 'en').slice(0, 20),
-        preferredTheme: ((profile as any).preferredTheme || '').slice(0, 40),
-        termsAccepted: profile.termsAccepted ?? true,
-        termsAcceptedAt: profile.termsAcceptedAt || nowIso,
-        country: (profile.country || 'Global').slice(0, 80),
-        countryFlag: (profile.countryFlag || '🌐').slice(0, 16),
-        provider: profile.provider.slice(0, 32),
-        ...(isVerifiedOwner ? { role: 'admin', status: 'active' } : {}),
+        provider: (profile.provider || 'email').slice(0, 32),
         updatedAt: nowIso,
         lastActiveAt: nowIso,
-      });
+      };
+      try {
+        await updateDoc(docRef, { ...coreUpdatePayload, ...extendedFields });
+      } catch (updateErr: any) {
+        if (String(updateErr?.code || updateErr?.message || '').toLowerCase().includes('permission')) {
+          await updateDoc(docRef, coreUpdatePayload).catch(() => {});
+        }
+      }
     }
   } catch (err) {
     console.warn('Firestore user profile sync warning:', err);
-    if (err instanceof Error && err.message.toLowerCase().includes('permission')) {
-      handleFirestoreError(err, OperationType.WRITE, path);
-    }
   }
 }
 
-export async function loadUserProfileFromFirestore(uid: string): Promise<Partial<UserProfile> | null> {
+export async function loadUserProfileFromFirestore(
+  uid: string
+): Promise<(Partial<UserProfile> & { preferredTheme?: string; memoryConsent?: 'pending' | 'agreed' | 'disagreed' }) | null> {
   if (!db || !auth?.currentUser) return null;
   const safeUid = safeDocId(uid);
-  const path = `users/${safeUid}`;
   try {
     const snap = await getDoc(doc(db, 'users', safeUid));
     if (!snap.exists()) return null;
     const data = snap.data();
     return {
       name: data.displayName,
+      nickname: typeof data.nickname === 'string' ? data.nickname : undefined,
+      age: typeof data.age === 'number' ? data.age : undefined,
+      onboardingCompleted:
+        typeof data.onboardingCompleted === 'boolean' ? data.onboardingCompleted : undefined,
+      memoryConsent:
+        data.memoryConsent === 'agreed' || data.memoryConsent === 'disagreed' || data.memoryConsent === 'pending'
+          ? data.memoryConsent
+          : undefined,
       username: data.username,
       email: data.email,
       avatarUrl: data.photoURL,
       preferredLanguage: data.preferredLanguage,
       country: data.country,
       countryFlag: data.countryFlag,
+      isManualCountry: typeof data.isManualCountry === 'boolean' ? data.isManualCountry : undefined,
       termsAccepted: data.termsAccepted,
       termsAcceptedAt: data.termsAcceptedAt,
-      ...(data.preferredTheme ? { preferredTheme: data.preferredTheme } : {}),
+      preferredTheme: data.preferredTheme,
+      streakDays: typeof data.streakDays === 'number' ? data.streakDays : undefined,
+      longestStreak: typeof data.longestStreak === 'number' ? data.longestStreak : undefined,
+      lastActiveDate: typeof data.lastActiveDate === 'string' ? data.lastActiveDate : undefined,
       status: data.status || 'active',
       role: data.role || 'user',
       createdAt: data.createdAt ? new Date(data.createdAt).getTime() : undefined,
       lastActiveAt: data.lastActiveAt ? new Date(data.lastActiveAt).getTime() : undefined,
-    } as any;
+    };
   } catch (err) {
     console.warn('Load user profile warning:', err);
-    if (err instanceof Error && err.message.toLowerCase().includes('permission')) {
-      handleFirestoreError(err, OperationType.GET, path);
-    }
     return null;
   }
 }
@@ -477,11 +541,9 @@ export async function saveConversationAndMessagesToFirestore(
       });
     }
 
-    // Persist the most recent 4 messages cleanly to avoid oversized batch bursts
+    // Persist the most recent 4 messages concurrently to avoid unnecessary serialization
     const recentMsgs = session.messages.slice(-4);
-    for (const msg of recentMsgs) {
-      await saveSingleMessageToFirestore(uid, convId, msg);
-    }
+    await Promise.all(recentMsgs.map((msg) => saveSingleMessageToFirestore(uid, convId, msg)));
   } catch (err) {
     console.warn('Firestore conversation sync warning:', err);
     if (err instanceof Error && err.message.toLowerCase().includes('permission')) {

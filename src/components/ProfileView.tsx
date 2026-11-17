@@ -131,7 +131,11 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                 )}
               </div>
 
-              <p className="text-xs text-purple-300 font-semibold">@{user.username || 'guest'}</p>
+              {user.nickname && (
+                <p className="text-xs text-purple-300 font-semibold">
+                  Nickname: {user.nickname}
+                </p>
+              )}
 
               <div className="flex flex-wrap items-center gap-4 text-xs text-gray-400 pt-0.5">
                 <span className="flex items-center gap-1.5">

@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { motion, AnimatePresence } from 'motion/react';
 import {
   X,
   Mail,
@@ -100,8 +101,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         role: userEmail.toLowerCase() === OWNER_ADMIN_EMAIL && fbUser.emailVerified ? 'admin' : 'user',
         createdAt: createdAtMs,
         lastActiveAt: Date.now(),
-        streakDays: currentUser.streakDays || 1,
-        xp: currentUser.xp || 200,
+        streakDays: currentUser.streakDays || 0,
+        xp: currentUser.xp || 0,
       };
 
       onUpdateUser(updatedUser);
@@ -118,17 +119,22 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   // 2. Email & Password Login
   const handleEmailLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!email || !password) {
+    const cleanEmail = email.trim();
+    if (!cleanEmail || !password) {
       setErrorMessage('Please provide both email and password.');
+      return;
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      setErrorMessage('Please enter a valid email address.');
       return;
     }
     setIsLoading(true);
     setErrorMessage(null);
 
     try {
-      const fbUser = await loginWithEmail(email, password);
-      const emailUser = email.split('@')[0];
-      const userEmail = fbUser.email || email;
+      const fbUser = await loginWithEmail(cleanEmail, password);
+      const emailUser = cleanEmail.split('@')[0];
+      const userEmail = fbUser.email || cleanEmail;
       const createdAtMs = fbUser.metadata.creationTime
         ? new Date(fbUser.metadata.creationTime).getTime()
         : Date.now();
@@ -146,8 +152,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         role: userEmail.toLowerCase() === OWNER_ADMIN_EMAIL && fbUser.emailVerified ? 'admin' : 'user',
         createdAt: createdAtMs,
         lastActiveAt: Date.now(),
-        streakDays: currentUser.streakDays || 1,
-        xp: currentUser.xp || 150,
+        streakDays: currentUser.streakDays || 0,
+        xp: currentUser.xp || 0,
       };
       onUpdateUser(updatedUser);
       showToast(`Welcome back, ${updatedUser.name}!`);
@@ -162,8 +168,13 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   // 3. Email & Password Registration
   const handleEmailRegister = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!email || !password) {
+    const cleanEmail = email.trim();
+    if (!cleanEmail || !password) {
       setErrorMessage('Please enter email and password.');
+      return;
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      setErrorMessage('Please enter a valid email address.');
       return;
     }
     if (password.length < 6) {
@@ -196,8 +207,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         role: 'user',
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
-        streakDays: 1,
-        xp: 150,
+        streakDays: 0,
+        xp: 0,
       };
       onUpdateUser(updatedUser);
       showToast(`Account created! Welcome, ${cleanName}.`);
@@ -212,8 +223,13 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   // 4. Password Reset
   const handleForgotPassword = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!email) {
+    const cleanEmail = email.trim();
+    if (!cleanEmail) {
       setErrorMessage('Please enter your email to receive a password reset link.');
+      return;
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      setErrorMessage('Please enter a valid email address.');
       return;
     }
     setIsLoading(true);
@@ -373,8 +389,16 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             </div>
           )}
 
+          <AnimatePresence mode="wait" initial={false}>
+            <motion.div
+              key={authMode}
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -6 }}
+              transition={{ duration: 0.16, ease: 'easeOut' }}
+            >
           {authMode === 'profile' && (
-            <form onSubmit={handleUpdateProfile} className="space-y-3 p-4 rounded-2xl bg-[#090a0f] border border-[#232738]">
+            <form onSubmit={handleUpdateProfile} noValidate className="space-y-3 p-4 rounded-2xl bg-[#090a0f] border border-[#232738]">
               <div className="space-y-1">
                 <label className="text-[11px] text-gray-400">Display Name</label>
                 <input
@@ -454,6 +478,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               </div>
 
               <form
+                noValidate
                 onSubmit={
                   authMode === 'signin'
                     ? handleEmailLogin
@@ -569,7 +594,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
                 <button
                   type="submit"
-                  disabled={isLoading || (authMode === 'register' && !agreedToTerms)}
+                  disabled={isLoading}
                   className="purple-glow-btn w-full py-2.5 px-4 rounded-xl font-bold text-xs text-white flex items-center justify-center gap-2 cursor-pointer transition-all shadow-md disabled:opacity-50"
                 >
                   {isLoading && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
@@ -623,6 +648,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               </form>
             </div>
           )}
+            </motion.div>
+          </AnimatePresence>
         </div>
 
         <div className="px-5 py-3 border-t border-white/10 bg-[#090a0f]/90 flex items-center justify-between text-[11px] text-gray-400">

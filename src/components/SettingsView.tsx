@@ -1,9 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react';
+import type { User as FirebaseUser } from 'firebase/auth';
 import {
   User,
   Settings as SettingsIcon,
-  Sun,
-  Moon,
   Globe,
   Mic,
   Volume2,
@@ -25,12 +24,34 @@ import {
   Palette,
   Play,
   MapPin,
+  Cpu,
+  Lock,
+  Fingerprint,
+  Activity,
+  Eye,
+  Zap,
+  Sliders,
+  Database,
 } from 'lucide-react';
-import { AppSettings, ChatSession, GeotaggedMedia, UserProfile, VoicePersona } from '../types';
+import {
+  AIConnectionHealth,
+  AppSettings,
+  ChatSession,
+  EngagementMetrics,
+  GeotaggedMedia,
+  LoginActivityEntry,
+  UserProfile,
+  VoicePersona,
+} from '../types';
 import { SUPPORTED_LANGUAGES, VOICE_PERSONAS } from '../data/languages';
-import { COUNTRY_OPTIONS, detectUserCountry, detectCountryViaGPS } from '../utils/country';
+import {
+  COUNTRY_OPTIONS,
+  detectUserCountry,
+  detectCountryApproxViaIP,
+  detectCountryViaGPSDetailed,
+} from '../utils/country';
 import { updateUserProfile } from '../utils/firebase';
-import { saveUserLocalExtras } from '../utils/storage';
+import { getStoredLoginActivity, saveUserLocalExtras } from '../utils/storage';
 import { voiceAssistant } from '../utils/speech';
 import {
   AVATAR_COLOR_PRESETS,
@@ -46,6 +67,9 @@ interface SettingsViewProps {
   settings: AppSettings;
   sessions: ChatSession[];
   mediaItems: GeotaggedMedia[];
+  metrics?: EngagementMetrics;
+  aiHealth?: AIConnectionHealth;
+  fbAuthUser?: FirebaseUser | null;
   isOnline: boolean;
   isOwnerAdmin: boolean;
   onUpdateUser: (updated: UserProfile) => void;
@@ -58,11 +82,41 @@ interface SettingsViewProps {
   onOpenFullBackup: () => void;
 }
 
+const PillSwitch: React.FC<{
+  checked: boolean;
+  onChange: () => void;
+  label: string;
+  description?: string;
+}> = ({ checked, onChange, label, description }) => (
+  <button
+    type="button"
+    role="switch"
+    aria-checked={checked}
+    onClick={onChange}
+    className="w-full flex items-center justify-between gap-3 p-3.5 rounded-2xl v2-neu-inset border border-white/10 hover:border-sky-400/35 text-left transition-all cursor-pointer"
+  >
+    <div className="min-w-0">
+      <div className="text-xs font-bold text-white">{label}</div>
+      {description && <div className="text-[11px] text-purple-200/65 mt-0.5">{description}</div>}
+    </div>
+    <span
+      className={`w-11 h-6 rounded-full p-0.5 transition-colors flex items-center shrink-0 ${
+        checked ? 'bg-gradient-to-r from-sky-500 to-purple-500 justify-end' : 'bg-white/15 justify-start'
+      }`}
+    >
+      <span className="w-5 h-5 rounded-full bg-white shadow-md" />
+    </span>
+  </button>
+);
+
 export const SettingsView: React.FC<SettingsViewProps> = ({
   initialSection = 'settings',
   user,
   settings,
   sessions,
+  metrics,
+  aiHealth,
+  fbAuthUser,
   isOnline,
   isOwnerAdmin,
   onUpdateUser,
@@ -77,7 +131,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [section, setSection] = useState<'profile' | 'settings'>(initialSection);
   const [isEditingProfile, setIsEditingProfile] = useState(false);
   const [editName, setEditName] = useState(user.name || '');
-  const [editUsername, setEditUsername] = useState(user.username || '');
+  const [editNickname, setEditNickname] = useState(user.nickname || '');
+  const [editAge, setEditAge] = useState(user.age ? String(user.age) : '');
   const [editCountry, setEditCountry] = useState(user.country || 'Global');
   const [editFlag, setEditFlag] = useState(user.countryFlag || '🌐');
   const [editAvatar, setEditAvatar] = useState(user.avatarUrl || '');
@@ -90,6 +145,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [notifPermission, setNotifPermission] = useState<string>(() =>
     typeof Notification !== 'undefined' ? Notification.permission : 'unsupported'
   );
+  const [biometricHardwareAvailable, setBiometricHardwareAvailable] = useState<boolean | null>(null);
+  const [loginActivity, setLoginActivity] = useState<LoginActivityEntry[]>(() =>
+    getStoredLoginActivity(user.id)
+  );
   const [isTermsModalOpen, setIsTermsModalOpen] = useState(false);
   const [termsModalTab, setTermsModalTab] = useState<'terms' | 'privacy'>('terms');
 
@@ -101,11 +160,34 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
   useEffect(() => {
     setEditName(user.name || '');
-    setEditUsername(user.username || '');
+    setEditNickname(user.nickname || '');
+    setEditAge(user.age ? String(user.age) : '');
     setEditCountry(user.country || 'Global');
     setEditFlag(user.countryFlag || '🌐');
     setEditAvatar(user.avatarUrl || '');
+    setLoginActivity(getStoredLoginActivity(user.id));
   }, [user]);
+
+  useEffect(() => {
+    let active = true;
+    const checkHardware = async () => {
+      try {
+        const fn = (window.PublicKeyCredential as any)?.isUserVerifyingPlatformAuthenticatorAvailable;
+        if (typeof fn === 'function') {
+          const ok = await fn();
+          if (active) setBiometricHardwareAvailable(Boolean(ok));
+        } else if (active) {
+          setBiometricHardwareAvailable(false);
+        }
+      } catch {
+        if (active) setBiometricHardwareAvailable(false);
+      }
+    };
+    void checkHardware();
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const showToast = (msg: string) => {
     setToast(msg);
@@ -147,16 +229,26 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const handleSaveProfile = async (e: React.FormEvent) => {
     e.preventDefault();
     const cleanName = editName.trim() || user.name || 'User';
-    const cleanHandle =
-      editUsername.trim().toLowerCase().replace(/[^a-z0-9_]/g, '') || user.username || 'user';
+    const cleanNickname = editNickname.trim() || undefined;
+    const parsedAgeNum = editAge.trim() ? Number(editAge.trim()) : undefined;
+    const validAge =
+      typeof parsedAgeNum === 'number' &&
+      Number.isFinite(parsedAgeNum) &&
+      parsedAgeNum >= 1 &&
+      parsedAgeNum <= 130
+        ? Math.floor(parsedAgeNum)
+        : undefined;
 
     setSavingProfile(true);
     try {
       saveUserLocalExtras(user.id, {
+        nickname: cleanNickname,
+        age: validAge,
+        onboardingCompleted: true,
         country: editCountry,
         countryFlag: editFlag,
         isManualCountry: true,
-        customAvatarDataUrl: editAvatar.startsWith('data:') ? editAvatar : undefined,
+        ...(editAvatar.startsWith('data:') ? { customAvatarDataUrl: editAvatar } : {}),
       });
 
       if (user.isLoggedIn) {
@@ -170,7 +262,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       onUpdateUser({
         ...user,
         name: cleanName,
-        username: cleanHandle,
+        nickname: cleanNickname,
+        age: validAge,
+        onboardingCompleted: true,
         country: editCountry,
         countryFlag: editFlag,
         isManualCountry: true,
@@ -217,34 +311,37 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       })
     : 'Active Session';
 
+  const mfaEnrolled = Boolean((fbAuthUser as any)?.multiFactor?.enrolledFactors?.length);
+  const emailVerified = Boolean(fbAuthUser?.emailVerified);
+
   return (
     <div className="max-w-4xl mx-auto w-full px-3 sm:px-6 py-5 pb-32 space-y-5">
       {toast && (
-        <div className="fixed top-18 right-4 z-50 glass-card rounded-2xl px-4 py-2.5 border border-purple-400/50 text-xs font-semibold text-white flex items-center gap-2 shadow-xl">
+        <div className="fixed top-18 right-4 z-50 v2-neu-card rounded-2xl px-4 py-2.5 border border-sky-400/50 text-xs font-semibold text-white flex items-center gap-2 shadow-xl">
           <Check className="w-4 h-4 text-emerald-400" />
           <span>{toast}</span>
         </div>
       )}
 
       {/* Top Section Switcher: Profile vs Settings */}
-      <div className="glass-card rounded-3xl p-4 sm:p-5 border border-purple-400/30 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+      <div className="v2-neu-card rounded-3xl p-4 sm:p-5 border border-sky-400/25 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-xl sm:text-2xl font-black text-white">
-            {section === 'profile' ? 'User Profile' : 'Settings & Preferences'}
+            {section === 'profile' ? 'Identity & Profile' : 'Aadesh AI Control Center'}
           </h1>
           <p className="text-xs text-purple-200/75">
             {section === 'profile'
-              ? 'Manage your identity, country flag, profile photo, and streak overview.'
-              : 'Theme, language, voice, notifications, privacy, security, and account controls.'}
+              ? 'Manage your verified identity, country flag, profile photo, and engagement streak.'
+              : 'General, privacy & security, appearance, AI & voice modes, and connected services.'}
           </p>
         </div>
 
-        <div className="inline-flex p-1 rounded-2xl bg-[#0b0818] border border-purple-400/25 self-start sm:self-center">
+        <div className="inline-flex p-1 rounded-2xl v2-neu-inset border border-white/10 self-start sm:self-center">
           <button
             type="button"
             onClick={() => setSection('profile')}
             className={`min-h-[40px] px-4 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer whitespace-nowrap ${
-              section === 'profile' ? 'purple-glow-btn text-white' : 'text-purple-200/75 hover:text-white'
+              section === 'profile' ? 'electric-purple-btn text-white' : 'text-purple-200/75 hover:text-white'
             }`}
           >
             <User className="w-3.5 h-3.5" />
@@ -254,7 +351,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             type="button"
             onClick={() => setSection('settings')}
             className={`min-h-[40px] px-4 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer whitespace-nowrap ${
-              section === 'settings' ? 'purple-glow-btn text-white' : 'text-purple-200/75 hover:text-white'
+              section === 'settings' ? 'electric-purple-btn text-white' : 'text-purple-200/75 hover:text-white'
             }`}
           >
             <SettingsIcon className="w-3.5 h-3.5" />
@@ -266,18 +363,18 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       {section === 'profile' ? (
         <div className="space-y-5">
           {/* Profile Identity Card */}
-          <div className="glass-card rounded-3xl p-5 sm:p-7 border border-purple-400/35 space-y-6">
+          <div className="v2-neu-card rounded-3xl p-5 sm:p-7 border border-sky-400/30 space-y-6">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
               <div className="flex items-center gap-4 min-w-0">
                 <div className="relative shrink-0">
                   <div
                     className="w-18 h-18 sm:w-20 sm:h-20 rounded-full p-[2.5px]"
                     style={{
-                      background: `linear-gradient(135deg, ${avatarTokens.primaryHex}, ${avatarTokens.lightHex})`,
-                      boxShadow: `0 8px 24px rgba(${avatarTokens.primaryRgb}, 0.4)`,
+                      background: `linear-gradient(135deg, ${avatarTokens.primaryHex}, #38bdf8)`,
+                      boxShadow: `0 8px 26px rgba(${avatarTokens.primaryRgb}, 0.45)`,
                     }}
                   >
-                    {(editAvatar || user.avatarUrl) ? (
+                    {editAvatar || user.avatarUrl ? (
                       <img
                         src={editAvatar || user.avatarUrl}
                         alt={user.name}
@@ -308,7 +405,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     onClick={() => avatarFileInputRef.current?.click()}
                     title="Upload profile picture"
                     aria-label="Upload profile picture"
-                    className="absolute -bottom-1 -right-1 w-8 h-8 rounded-full purple-glow-btn text-white flex items-center justify-center border border-white/30 cursor-pointer"
+                    className="absolute -bottom-1 -right-1 w-8 h-8 rounded-full electric-purple-btn text-white flex items-center justify-center border border-white/30 cursor-pointer"
                   >
                     <Camera className="w-3.5 h-3.5" />
                   </button>
@@ -318,16 +415,22 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="text-xl leading-none">{user.countryFlag || '🌐'}</span>
                     <h2 className="text-lg sm:text-xl font-black text-white truncate">
-                      {user.name || user.username}
+                      {user.name || 'Member'}
                     </h2>
                     {isOwnerAdmin && (
                       <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded-full bg-amber-950/80 text-amber-300 border border-amber-400/40">
-                        Owner Admin
+                        Owner
                       </span>
                     )}
                   </div>
 
-                  <p className="text-xs font-semibold text-purple-300">@{user.username || 'member'}</p>
+                  {(user.nickname || user.age) && (
+                    <p className="text-xs font-semibold text-sky-300">
+                      {user.nickname ? `Nickname: ${user.nickname}` : ''}
+                      {user.nickname && user.age ? ' · ' : ''}
+                      {user.age ? `Age ${user.age}` : ''}
+                    </p>
+                  )}
 
                   <div className="flex flex-wrap items-center gap-3 text-[11px] text-purple-200/75">
                     <span className="inline-flex items-center gap-1">
@@ -335,7 +438,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                       <span>{user.email || 'No email'}</span>
                     </span>
                     <span className="inline-flex items-center gap-1">
-                      <MapPin className="w-3.5 h-3.5 text-purple-400" />
+                      <MapPin className="w-3.5 h-3.5 text-sky-400" />
                       <span>{user.country || 'Global'}</span>
                     </span>
                   </div>
@@ -345,54 +448,79 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <button
                 type="button"
                 onClick={() => setIsEditingProfile((prev) => !prev)}
-                className="min-h-[42px] px-4 py-2 rounded-2xl bg-purple-600/30 hover:bg-purple-600/50 border border-purple-400/45 text-purple-100 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap self-start sm:self-center"
+                className="min-h-[42px] px-4 py-2 rounded-2xl electric-purple-btn text-white text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap self-start sm:self-center"
               >
                 <Edit3 className="w-3.5 h-3.5" />
-                <span>{isEditingProfile ? 'Cancel Edit' : 'Edit Profile'}</span>
+                <span>{isEditingProfile ? 'Cancel Edit' : 'Edit Profile & Country'}</span>
               </button>
             </div>
 
-            {/* Edit Profile Form */}
             {isEditingProfile && (
               <form
                 onSubmit={handleSaveProfile}
-                className="p-4 sm:p-5 rounded-2xl bg-[#0b0818]/85 border border-purple-400/35 space-y-4"
+                className="p-4 sm:p-5 rounded-2xl v2-neu-inset border border-sky-400/30 space-y-4"
               >
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <label className="space-y-1 text-xs">
-                    <span className="text-purple-200/80 font-semibold block">Display Name</span>
+                    <span className="text-purple-200/80 font-semibold block">Full Name</span>
                     <input
                       type="text"
                       value={editName}
                       onChange={(e) => setEditName(e.target.value)}
                       required
-                      className="w-full min-h-[42px] px-3 py-2 rounded-xl bg-[#140e2a] border border-purple-400/30 focus:border-purple-400 text-white outline-none"
+                      className="w-full min-h-[42px] px-3 py-2 rounded-xl bg-[#140e2a] border border-purple-400/30 focus:border-sky-400 text-white outline-none"
                     />
                   </label>
 
                   <label className="space-y-1 text-xs">
-                    <span className="text-purple-200/80 font-semibold block">Username</span>
+                    <span className="text-purple-200/80 font-semibold block">Nickname</span>
                     <input
                       type="text"
-                      value={editUsername}
-                      onChange={(e) => setEditUsername(e.target.value)}
-                      required
-                      className="w-full min-h-[42px] px-3 py-2 rounded-xl bg-[#140e2a] border border-purple-400/30 focus:border-purple-400 text-white outline-none"
+                      value={editNickname}
+                      onChange={(e) => setEditNickname(e.target.value)}
+                      placeholder="Optional"
+                      className="w-full min-h-[42px] px-3 py-2 rounded-xl bg-[#140e2a] border border-purple-400/30 focus:border-sky-400 text-white outline-none"
+                    />
+                  </label>
+
+                  <label className="space-y-1 text-xs">
+                    <span className="text-purple-200/80 font-semibold block">Age (Optional)</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={130}
+                      value={editAge}
+                      onChange={(e) => setEditAge(e.target.value)}
+                      placeholder="Optional"
+                      className="w-full min-h-[42px] px-3 py-2 rounded-xl bg-[#140e2a] border border-purple-400/30 focus:border-sky-400 text-white outline-none"
                     />
                   </label>
                 </div>
 
                 <div className="space-y-2 text-xs">
-                  <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
                     <span className="text-purple-200/80 font-semibold">Country &amp; Flag (Manual or Auto)</span>
                     <div className="flex items-center gap-2">
                       <button
                         type="button"
-                        onClick={() => {
+                        onClick={async () => {
                           const detected = detectUserCountry();
-                          setEditCountry(detected.country);
-                          setEditFlag(detected.flag);
-                          showToast(`Auto-detected: ${detected.country} ${detected.flag}`);
+                          if (detected.country !== 'Global') {
+                            setEditCountry(detected.country);
+                            setEditFlag(detected.flag);
+                            showToast(`Auto-detected: ${detected.country} ${detected.flag}`);
+                            return;
+                          }
+                          const ipMatch = await detectCountryApproxViaIP();
+                          if (ipMatch) {
+                            setEditCountry(ipMatch.country);
+                            setEditFlag(ipMatch.flag);
+                            showToast(`Auto-detected: ${ipMatch.country} ${ipMatch.flag}`);
+                          } else {
+                            setEditCountry(detected.country);
+                            setEditFlag(detected.flag);
+                            showToast('Using Global default. Choose manually or try GPS.');
+                          }
                         }}
                         className="text-[11px] text-purple-300 hover:text-white underline cursor-pointer"
                       >
@@ -404,33 +532,40 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                         disabled={isDetectingGps}
                         onClick={async () => {
                           setIsDetectingGps(true);
-                          const gpsResult = await detectCountryViaGPS();
+                          const gpsResult = await detectCountryViaGPSDetailed();
                           setIsDetectingGps(false);
-                          if (gpsResult) {
-                            setEditCountry(gpsResult.country);
-                            setEditFlag(gpsResult.flag);
-                            showToast(`GPS Detected: ${gpsResult.country} ${gpsResult.flag}`);
+                          if (gpsResult.option) {
+                            setEditCountry(gpsResult.option.country);
+                            setEditFlag(gpsResult.option.flag);
+                            const label =
+                              gpsResult.source === 'gps'
+                                ? 'GPS Detected'
+                                : gpsResult.source === 'ip-approximate'
+                                ? 'Approximate Region Detected'
+                                : 'Timezone Detected';
+                            showToast(`${label}: ${gpsResult.option.country} ${gpsResult.option.flag}`);
                           } else {
-                            showToast('GPS permission denied or unavailable. Please select manually.');
+                            showToast(
+                              gpsResult.error ||
+                                'GPS unavailable. Please select your country manually below.'
+                            );
                           }
                         }}
-                        className="text-[11px] text-cyan-300 hover:text-white underline cursor-pointer disabled:opacity-50"
+                        className="text-[11px] text-sky-300 hover:text-white underline cursor-pointer disabled:opacity-50"
                       >
                         {isDetectingGps ? 'Detecting GPS...' : 'Detect via GPS'}
                       </button>
                     </div>
                   </div>
 
-                  {/* Searchable country filter input */}
                   <input
                     type="text"
                     value={countrySearchQuery}
                     onChange={(e) => setCountrySearchQuery(e.target.value)}
                     placeholder="Search country name or code (e.g., US, Nepal, Japan)..."
-                    className="w-full min-h-[38px] px-3 py-1.5 rounded-xl bg-[#140e2a] border border-purple-400/30 focus:border-purple-400 text-white outline-none text-xs"
+                    className="w-full min-h-[38px] px-3 py-1.5 rounded-xl bg-[#140e2a] border border-purple-400/30 focus:border-sky-400 text-white outline-none text-xs"
                   />
 
-                  {/* Searchable Country Selector */}
                   <select
                     value={editCountry}
                     onChange={(e) => {
@@ -444,7 +579,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                       }
                     }}
                     size={5}
-                    className="w-full px-2 py-1.5 rounded-xl bg-[#140e2a] border border-purple-400/30 focus:border-purple-400 text-white outline-none font-medium cursor-pointer"
+                    className="w-full px-2 py-1.5 rounded-xl bg-[#140e2a] border border-purple-400/30 focus:border-sky-400 text-white outline-none font-medium cursor-pointer"
                   >
                     <option value="Global">🌐 Global (International)</option>
                     {COUNTRY_OPTIONS.filter((c) => {
@@ -473,7 +608,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   <button
                     type="submit"
                     disabled={savingProfile}
-                    className="purple-glow-btn min-h-[40px] px-5 py-2 rounded-xl text-xs font-bold text-white cursor-pointer"
+                    className="electric-purple-btn min-h-[40px] px-5 py-2 rounded-xl text-xs font-bold text-white cursor-pointer"
                   >
                     {savingProfile ? 'Saving...' : 'Save Changes'}
                   </button>
@@ -483,7 +618,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
             {/* Account Information & Stats Grid */}
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 border-t border-white/10">
-              <div className="p-3.5 rounded-2xl bg-[#0b0818]/75 border border-white/10 space-y-1">
+              <div className="p-3.5 rounded-2xl v2-neu-inset border border-white/10 space-y-1">
                 <div className="text-[11px] text-purple-300/80">Unique User ID</div>
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-xs font-mono text-white truncate tabular-nums">{user.id}</span>
@@ -495,44 +630,46 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                       setTimeout(() => setCopiedId(false), 1800);
                     }}
                     aria-label="Copy User ID"
-                    className="text-purple-300 hover:text-white cursor-pointer shrink-0"
+                    className="text-sky-300 hover:text-white cursor-pointer shrink-0"
                   >
                     {copiedId ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
                   </button>
                 </div>
               </div>
 
-              <div className="p-3.5 rounded-2xl bg-[#0b0818]/75 border border-white/10 space-y-1">
+              <div className="p-3.5 rounded-2xl v2-neu-inset border border-white/10 space-y-1">
                 <div className="text-[11px] text-purple-300/80 flex items-center gap-1">
                   <Flame className="w-3.5 h-3.5 text-amber-400" />
-                  <span>Daily Streak</span>
+                  <span>Streak &amp; XP</span>
                 </div>
                 <div className="text-sm font-black text-white tabular-nums">
-                  🔥 {user.streakDays || 1} Days · {(user.xp || 0).toLocaleString()} XP
+                  {user.streakDays || 0} Days · {(user.xp || 0).toLocaleString()} XP
                 </div>
               </div>
 
-              <div className="p-3.5 rounded-2xl bg-[#0b0818]/75 border border-white/10 space-y-1">
+              <div className="p-3.5 rounded-2xl v2-neu-inset border border-white/10 space-y-1">
                 <div className="text-[11px] text-purple-300/80 flex items-center gap-1">
-                  <Calendar className="w-3.5 h-3.5 text-purple-400" />
-                  <span>Account Info</span>
+                  <Calendar className="w-3.5 h-3.5 text-sky-400" />
+                  <span>Account Summary</span>
                 </div>
                 <div className="text-xs font-bold text-white capitalize">
-                  {user.provider} · Joined {createdDateStr}
+                  {user.provider} · {createdDateStr}
+                  {metrics ? ` · ${metrics.totalQueries} queries` : ''}
                 </div>
               </div>
             </div>
           </div>
 
           {/* Dynamic Avatar Accent Color */}
-          <div className="glass-card rounded-3xl p-5 border border-purple-400/25 space-y-3">
+          <div className="v2-neu-card rounded-3xl p-5 border border-purple-400/25 space-y-3">
             <div className="flex items-center gap-2 text-sm font-bold text-white">
-              <Palette className="w-4 h-4 text-purple-400" />
+              <Palette className="w-4 h-4 text-sky-400" />
               <span>Accent Glow Color</span>
             </div>
             <div className="flex flex-wrap gap-2">
               {AVATAR_COLOR_PRESETS.map((preset) => {
-                const selected = (user.avatarColor || DEFAULT_AVATAR_COLOR).toLowerCase() === preset.hex.toLowerCase();
+                const selected =
+                  (user.avatarColor || DEFAULT_AVATAR_COLOR).toLowerCase() === preset.hex.toLowerCase();
                 return (
                   <button
                     key={preset.id}
@@ -540,8 +677,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     onClick={() => onUpdateUser({ ...user, avatarColor: preset.hex })}
                     className={`px-3 py-2 rounded-xl border text-xs font-semibold flex items-center gap-2 cursor-pointer transition-all ${
                       selected
-                        ? 'bg-purple-600/35 border-purple-300 text-white'
-                        : 'bg-[#0b0818]/75 border-white/10 text-purple-200/80 hover:border-purple-400/40'
+                        ? 'bg-sky-500/25 border-sky-300 text-white'
+                        : 'v2-neu-inset border-white/10 text-purple-200/80 hover:border-sky-400/40'
                     }`}
                   >
                     <span
@@ -556,32 +693,315 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
         </div>
       ) : (
-        /* SETTINGS SECTION */
-        <div className="space-y-4">
-          {/* 1. Theme & Appearance Selection */}
-          <div className="glass-card rounded-3xl p-5 border border-purple-400/25 space-y-4">
+        /* SETTINGS SECTION: 5 Structured Controls Groups */
+        <div className="space-y-5">
+          {/* 1. GENERAL SETTINGS */}
+          <section className="v2-neu-card rounded-3xl p-5 border border-sky-400/25 space-y-4">
             <div className="flex items-center justify-between border-b border-white/10 pb-3">
               <div className="flex items-center gap-2">
-                <Palette className="w-4 h-4 text-purple-300" />
-                <h2 className="text-sm font-bold text-white">App Theme &amp; Visual Style</h2>
+                <Bell className="w-4 h-4 text-sky-400" />
+                <h2 className="text-sm font-bold text-white">1. General Settings</h2>
               </div>
-              <span className="text-[11px] font-semibold text-purple-300/80">
-                Active: {settings.theme === 'light' ? 'Pure Light' : COLOR_THEME_PRESETS.find((p) => p.id === settings.colorTheme)?.name || 'Dark Galaxy'}
+              <span className="text-[11px] text-purple-300/75 capitalize">
+                Browser Permission: {notifPermission}
               </span>
             </div>
 
-            <p className="text-xs text-purple-200/75">
-              Select your preferred appearance. Your chosen theme is persisted across browser refreshes and synced to your cloud account.
-            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <PillSwitch
+                checked={settings.notificationsEnabled ?? true}
+                onChange={handleToggleNotifications}
+                label="Notifications"
+                description="Show live alerts when responses or schedules complete."
+              />
+              <PillSwitch
+                checked={Boolean(settings.emailUpdatesEnabled)}
+                onChange={() =>
+                  onUpdateSettings({ emailUpdatesEnabled: !settings.emailUpdatesEnabled })
+                }
+                label="Email Updates"
+                description="Receive account summaries and milestone recaps."
+              />
+              <PillSwitch
+                checked={settings.soundEffects ?? true}
+                onChange={() => onUpdateSettings({ soundEffects: !(settings.soundEffects ?? true) })}
+                label="App Sound Effects"
+                description="Soft tactile chimes for completed replies."
+              />
+              <PillSwitch
+                checked={Boolean(settings.privateAccount)}
+                onChange={() => onUpdateSettings({ privateAccount: !settings.privateAccount })}
+                label="Private Account"
+                description="Hide public activity badges across shared surfaces."
+              />
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs pt-1">
+              <label className="space-y-1.5">
+                <span className="text-purple-200/80 font-semibold block">Interface Language</span>
+                <select
+                  value={settings.uiLanguage}
+                  onChange={(e) => onUpdateSettings({ uiLanguage: e.target.value })}
+                  className="w-full min-h-[42px] px-3 py-2 rounded-xl v2-neu-inset border border-purple-400/30 text-white outline-none"
+                >
+                  {SUPPORTED_LANGUAGES.map((l) => (
+                    <option key={l.code} value={l.code}>
+                      {l.flag} {l.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="space-y-1.5">
+                <span className="text-purple-200/80 font-semibold block">Default Target Language</span>
+                <select
+                  value={settings.defaultTargetLanguage}
+                  onChange={(e) => onUpdateSettings({ defaultTargetLanguage: e.target.value })}
+                  className="w-full min-h-[42px] px-3 py-2 rounded-xl v2-neu-inset border border-purple-400/30 text-white outline-none"
+                >
+                  {SUPPORTED_LANGUAGES.map((l) => (
+                    <option key={l.code} value={l.code}>
+                      {l.flag} {l.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <div className="space-y-1.5">
+                <span className="text-purple-200/80 font-semibold block">Active Country</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSection('profile');
+                    setIsEditingProfile(true);
+                  }}
+                  className="w-full min-h-[42px] px-3 py-2 rounded-xl v2-neu-inset border border-sky-400/30 hover:border-sky-400/60 text-white flex items-center justify-between gap-2 cursor-pointer"
+                >
+                  <span className="truncate font-semibold">
+                    {user.countryFlag || '🌐'} {user.country || 'Global'}
+                  </span>
+                  <span className="text-[11px] text-sky-300 font-bold">Change</span>
+                </button>
+              </div>
+            </div>
+          </section>
+
+          {/* 2. PRIVACY & SECURITY */}
+          <section className="v2-neu-card rounded-3xl p-5 border border-purple-400/25 space-y-4">
+            <div className="flex items-center justify-between border-b border-white/10 pb-3">
+              <div className="flex items-center gap-2">
+                <Shield className="w-4 h-4 text-purple-300" />
+                <h2 className="text-sm font-bold text-white">2. Privacy &amp; Security</h2>
+              </div>
+              <span className="text-[11px] font-semibold px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-400/35">
+                TLS Encrypted
+              </span>
+            </div>
+
+            {/* Shield Overview Banner */}
+            <div className="p-4 rounded-2xl v2-neu-inset border border-sky-400/25 grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+              <div className="flex items-center gap-2.5">
+                <span className="w-9 h-9 rounded-xl bg-emerald-500/15 border border-emerald-400/30 flex items-center justify-center text-emerald-300 shrink-0">
+                  <ShieldCheck className="w-4 h-4" />
+                </span>
+                <div>
+                  <div className="text-[11px] text-purple-200/70">Email Verification</div>
+                  <div className="font-bold text-white">
+                    {emailVerified ? 'Verified Account' : user.provider === 'google' ? 'Google Verified' : 'Unverified'}
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2.5">
+                <span className="w-9 h-9 rounded-xl bg-purple-500/15 border border-purple-400/30 flex items-center justify-center text-purple-300 shrink-0">
+                  <Lock className="w-4 h-4" />
+                </span>
+                <div>
+                  <div className="text-[11px] text-purple-200/70">Two-Factor Auth (MFA)</div>
+                  <div className="font-bold text-white">
+                    {mfaEnrolled ? 'Enrolled (Firebase MFA)' : 'Managed via Google / Auth'}
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2.5">
+                <span className="w-9 h-9 rounded-xl bg-sky-500/15 border border-sky-400/30 flex items-center justify-center text-sky-300 shrink-0">
+                  <Fingerprint className="w-4 h-4" />
+                </span>
+                <div>
+                  <div className="text-[11px] text-purple-200/70">Biometric Capability</div>
+                  <div className="font-bold text-white">
+                    {biometricHardwareAvailable === null
+                      ? 'Checking device...'
+                      : biometricHardwareAvailable
+                      ? 'Hardware Supported'
+                      : 'Passkey Not Detected'}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <PillSwitch
+                checked={Boolean(settings.biometricLockEnabled)}
+                onChange={() =>
+                  onUpdateSettings({ biometricLockEnabled: !settings.biometricLockEnabled })
+                }
+                label="Biometric / Device Lock Preference"
+                description={
+                  biometricHardwareAvailable
+                    ? 'Platform authenticator available on this device.'
+                    : 'Stores lock preference for compatible passkey browsers.'
+                }
+              />
+              <PillSwitch
+                checked={settings.streamingResponses !== false}
+                onChange={() =>
+                  onUpdateSettings({ streamingResponses: settings.streamingResponses === false })
+                }
+                label="Streaming AI Responses"
+                description="Render Gemini output progressively word by word."
+              />
+              <PillSwitch
+                checked={settings.memoryConsent === 'agreed' && settings.aiMemoryEnabled !== false}
+                onChange={() => {
+                  const nextEnabled = !(
+                    settings.memoryConsent === 'agreed' && settings.aiMemoryEnabled !== false
+                  );
+                  onUpdateSettings({
+                    aiMemoryEnabled: nextEnabled,
+                    memoryConsent: nextEnabled ? 'agreed' : 'disagreed',
+                  });
+                }}
+                label="Personal Memory Permission"
+                description="Allow approved preferences from More > Personal Memory in chats."
+              />
+              <PillSwitch
+                checked={settings.streakReminders ?? true}
+                onChange={() =>
+                  onUpdateSettings({ streakReminders: !(settings.streakReminders ?? true) })
+                }
+                label="Streak Reminders"
+                description="Keep daily productivity & learning streak active."
+              />
+            </div>
+
+            {/* Real Login Activity Panel */}
+            <div className="p-3.5 rounded-2xl v2-neu-inset border border-white/10 space-y-2.5">
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-bold text-white flex items-center gap-1.5">
+                  <Activity className="w-3.5 h-3.5 text-sky-400" />
+                  <span>Recent Login Activity</span>
+                </span>
+                {fbAuthUser?.metadata?.lastSignInTime && (
+                  <span className="text-[11px] text-purple-200/70 tabular-nums">
+                    Last Sign-In: {new Date(fbAuthUser.metadata.lastSignInTime).toLocaleString()}
+                  </span>
+                )}
+              </div>
+
+              {loginActivity.length === 0 ? (
+                <div className="text-[11px] text-purple-200/65">
+                  Current verified session active ({user.provider}).
+                </div>
+              ) : (
+                <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
+                  {loginActivity.slice(0, 5).map((item) => (
+                    <div
+                      key={item.id}
+                      className="flex items-center justify-between gap-2 text-[11px] py-1 border-b border-white/5 last:border-none"
+                    >
+                      <span className="text-white font-semibold capitalize">
+                        {item.provider} · {item.deviceSummary}
+                      </span>
+                      <span className="text-purple-200/65 tabular-nums">
+                        {new Date(item.timestamp).toLocaleString()}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2.5 pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setTermsModalTab('terms');
+                  setIsTermsModalOpen(true);
+                }}
+                className="min-h-[40px] px-4 py-2 rounded-2xl bg-purple-600/25 hover:bg-purple-600/40 border border-purple-400/35 text-xs font-semibold text-purple-100 flex items-center gap-2 cursor-pointer"
+              >
+                <Shield className="w-4 h-4 text-purple-300" />
+                <span>Terms &amp; Privacy Policy</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={onOpenFullBackup}
+                className="min-h-[40px] px-4 py-2 rounded-2xl bg-white/5 hover:bg-white/10 border border-white/15 text-xs font-semibold text-purple-100 flex items-center gap-2 cursor-pointer"
+              >
+                <Download className="w-4 h-4 text-sky-300" />
+                <span>Backup &amp; Custom API Key ({sessions.length} chats)</span>
+              </button>
+
+              {confirmClear ? (
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onClearAllData();
+                      setConfirmClear(false);
+                      showToast('Local cache cleared.');
+                    }}
+                    className="min-h-[40px] px-4 py-2 rounded-2xl bg-rose-600 text-white text-xs font-bold cursor-pointer"
+                  >
+                    Confirm Clear Cache
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmClear(false)}
+                    className="min-h-[40px] px-3 py-2 rounded-2xl bg-white/10 text-xs text-gray-200 cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setConfirmClear(true)}
+                  className="min-h-[40px] px-4 py-2 rounded-2xl bg-white/5 hover:bg-rose-950/50 border border-white/10 hover:border-rose-400/35 text-xs font-semibold text-purple-200 hover:text-rose-200 flex items-center gap-2 cursor-pointer"
+                >
+                  <Trash2 className="w-4 h-4" />
+                  <span>Clear Local Cache</span>
+                </button>
+              )}
+            </div>
+          </section>
+
+          {/* 3. APPEARANCE */}
+          <section className="v2-neu-card rounded-3xl p-5 border border-purple-400/25 space-y-4">
+            <div className="flex items-center justify-between border-b border-white/10 pb-3">
+              <div className="flex items-center gap-2">
+                <Palette className="w-4 h-4 text-sky-400" />
+                <h2 className="text-sm font-bold text-white">3. Appearance &amp; Theme</h2>
+              </div>
+              <span className="text-[11px] font-semibold text-sky-300">
+                Active:{' '}
+                {settings.theme === 'light'
+                  ? 'Pure Light'
+                  : COLOR_THEME_PRESETS.find((p) => p.id === settings.colorTheme)?.name || 'Dark Galaxy'}
+              </span>
+            </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
               {COLOR_THEME_PRESETS.filter((p) => p.id !== 'purple-galaxy').map((preset) => {
                 const isSelected =
                   (preset.id === 'pure-light' && settings.theme === 'light') ||
-                  (settings.theme !== 'light' && (
-                    settings.colorTheme === preset.id ||
-                    (preset.id === 'dark-galaxy' && (!settings.colorTheme || settings.colorTheme === 'purple-galaxy'))
-                  ));
+                  (settings.theme !== 'light' &&
+                    (settings.colorTheme === preset.id ||
+                      (preset.id === 'dark-galaxy' &&
+                        (!settings.colorTheme || settings.colorTheme === 'purple-galaxy'))));
 
                 return (
                   <button
@@ -602,16 +1022,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                       }
                       showToast(`Applied ${preset.name} theme.`);
                     }}
-                    className={`p-3.5 rounded-2xl border text-left transition-all cursor-pointer relative flex flex-col justify-between gap-3 ${
+                    className={`p-3.5 rounded-2xl border text-left transition-all cursor-pointer flex flex-col justify-between gap-2.5 ${
                       isSelected
-                        ? 'bg-purple-600/30 border-purple-300 text-white shadow-[0_0_22px_rgba(139,92,246,0.35)] ring-1 ring-purple-400'
-                        : 'bg-[#0b0818]/75 border-white/10 text-purple-200/80 hover:border-purple-400/40 hover:bg-[#120e24]'
+                        ? 'bg-sky-500/15 border-sky-400 text-white shadow-[0_0_20px_rgba(56,189,248,0.28)]'
+                        : 'v2-neu-inset border-white/10 text-purple-200/80 hover:border-sky-400/40'
                     }`}
                   >
                     <div className="flex items-center justify-between gap-2">
                       <div className="flex items-center gap-2">
                         <span
-                          className="w-4 h-4 rounded-full border border-white/30 shadow-sm shrink-0"
+                          className="w-4 h-4 rounded-full border border-white/30 shrink-0"
                           style={{ backgroundColor: preset.hex }}
                         />
                         <span className="text-xs font-bold text-white">{preset.name}</span>
@@ -621,82 +1041,129 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                           <Check className="w-3 h-3" />
                         </span>
                       ) : (
-                        <span className="text-[10px] uppercase font-bold text-gray-500">
+                        <span className="text-[10px] uppercase font-bold text-gray-400">
                           {preset.themeMode === 'light' ? 'Light' : 'Dark'}
                         </span>
                       )}
                     </div>
-
                     <div
                       className={`h-2 w-full rounded-full bg-gradient-to-r ${preset.gradientClass} opacity-85`}
                     />
-
                     <p className="text-[11px] text-purple-200/65 line-clamp-2">
-                      {preset.description || `${preset.name} ambient coloring.`}
+                      {preset.description}
                     </p>
                   </button>
                 );
               })}
             </div>
-          </div>
 
-          {/* 2. Language Preferences */}
-          <div className="glass-card rounded-3xl p-5 border border-purple-400/25 space-y-4">
-            <div className="flex items-center gap-2 border-b border-white/10 pb-3">
-              <Globe className="w-4 h-4 text-purple-300" />
-              <h2 className="text-sm font-bold text-white">Language Preferences</h2>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs pt-1">
+              <div className="p-3.5 rounded-2xl v2-neu-inset border border-white/10 space-y-2">
+                <div className="font-bold text-white">Chat Density</div>
+                <div className="grid grid-cols-2 gap-2">
+                  {(['spacious', 'compact'] as const).map((mode) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      onClick={() => onUpdateSettings({ chatAppearance: mode })}
+                      className={`py-2 px-3 rounded-xl text-xs font-bold capitalize cursor-pointer ${
+                        (settings.chatAppearance || 'spacious') === mode
+                          ? 'electric-purple-btn text-white'
+                          : 'bg-white/5 text-purple-200/75 hover:text-white'
+                      }`}
+                    >
+                      {mode}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="p-3.5 rounded-2xl v2-neu-inset border border-white/10 space-y-2">
+                <div className="font-bold text-white">Font Size</div>
+                <div className="grid grid-cols-3 gap-2">
+                  {(['normal', 'large', 'xlarge'] as const).map((sz) => (
+                    <button
+                      key={sz}
+                      type="button"
+                      onClick={() => onUpdateSettings({ fontSize: sz })}
+                      className={`py-2 px-2 rounded-xl text-xs font-bold uppercase cursor-pointer ${
+                        (settings.fontSize || 'normal') === sz
+                          ? 'electric-purple-btn text-white'
+                          : 'bg-white/5 text-purple-200/75 hover:text-white'
+                      }`}
+                    >
+                      {sz}
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-              <label className="space-y-1.5">
-                <span className="text-purple-200/80 font-semibold block">Interface Language</span>
-                <select
-                  value={settings.uiLanguage}
-                  onChange={(e) => onUpdateSettings({ uiLanguage: e.target.value })}
-                  className="w-full min-h-[42px] px-3 py-2 rounded-xl bg-[#0b0818] border border-purple-400/30 text-white outline-none"
-                >
-                  {SUPPORTED_LANGUAGES.map((l) => (
-                    <option key={l.code} value={l.code}>
-                      {l.flag} {l.name} ({l.nativeName})
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label className="space-y-1.5">
-                <span className="text-purple-200/80 font-semibold block">Default Translation Target</span>
-                <select
-                  value={settings.defaultTargetLanguage}
-                  onChange={(e) => onUpdateSettings({ defaultTargetLanguage: e.target.value })}
-                  className="w-full min-h-[42px] px-3 py-2 rounded-xl bg-[#0b0818] border border-purple-400/30 text-white outline-none"
-                >
-                  {SUPPORTED_LANGUAGES.map((l) => (
-                    <option key={l.code} value={l.code}>
-                      {l.flag} {l.name} ({l.nativeName})
-                    </option>
-                  ))}
-                </select>
-              </label>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <PillSwitch
+                checked={Boolean(settings.reducedAnimations)}
+                onChange={() => onUpdateSettings({ reducedAnimations: !settings.reducedAnimations })}
+                label="Reduced Animations"
+                description="Minimize background shimmer and motion transitions."
+              />
+              <PillSwitch
+                checked={Boolean(settings.highContrast)}
+                onChange={() => onUpdateSettings({ highContrast: !settings.highContrast })}
+                label="High Contrast Mode"
+                description="Boost text borders and focus outline visibility."
+              />
             </div>
-          </div>
+          </section>
 
-          {/* 3. Voice Settings */}
-          <div className="glass-card rounded-3xl p-5 border border-purple-400/25 space-y-4">
+          {/* 4. AI & VOICE CONTROLS */}
+          <section className="v2-neu-card rounded-3xl p-5 border border-purple-400/25 space-y-4">
             <div className="flex items-center justify-between border-b border-white/10 pb-3">
               <div className="flex items-center gap-2">
-                <Mic className="w-4 h-4 text-purple-300" />
-                <h2 className="text-sm font-bold text-white">Voice Settings</h2>
+                <Sliders className="w-4 h-4 text-sky-400" />
+                <h2 className="text-sm font-bold text-white">4. AI &amp; Voice Controls</h2>
               </div>
               <button
                 type="button"
                 onClick={handleTestVoice}
-                className="px-3 py-1.5 rounded-xl bg-purple-600/30 hover:bg-purple-600/50 border border-purple-400/40 text-xs font-semibold text-purple-100 flex items-center gap-1.5 cursor-pointer"
+                className="px-3 py-1.5 rounded-xl electric-purple-btn text-xs font-bold text-white flex items-center gap-1.5 cursor-pointer"
               >
                 <Play className="w-3 h-3" />
                 <span>Test Voice</span>
               </button>
             </div>
 
+            {/* AI Response Mode */}
+            <div className="space-y-2">
+              <div className="text-xs font-bold text-purple-200/85 flex items-center gap-1.5">
+                <Zap className="w-3.5 h-3.5 text-amber-400" />
+                <span>AI Response Style</span>
+              </div>
+              <div className="grid grid-cols-3 gap-2">
+                {(
+                  [
+                    { id: 'fast', label: 'Fast', desc: 'Concise & direct' },
+                    { id: 'balanced', label: 'Balanced', desc: 'Clear & helpful' },
+                    { id: 'detailed', label: 'Detailed', desc: 'Deep & thorough' },
+                  ] as const
+                ).map((mode) => (
+                  <button
+                    key={mode.id}
+                    type="button"
+                    onClick={() => onUpdateSettings({ aiResponseMode: mode.id })}
+                    className={`p-3 rounded-2xl border text-left cursor-pointer transition-all ${
+                      (settings.aiResponseMode || 'balanced') === mode.id
+                        ? 'bg-sky-500/20 border-sky-400 text-white'
+                        : 'v2-neu-inset border-white/10 text-purple-200/80'
+                    }`}
+                  >
+                    <div className="text-xs font-bold">{mode.label}</div>
+                    <div className="text-[10px] opacity-75">{mode.desc}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Voice Persona */}
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
               {VOICE_PERSONAS.map((persona) => {
                 const active = (settings.voicePersona || 'friendly') === persona.id;
@@ -712,8 +1179,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     }
                     className={`p-2.5 rounded-xl border text-left text-xs cursor-pointer transition-all ${
                       active
-                        ? 'bg-purple-600/35 border-purple-300 text-white font-bold'
-                        : 'bg-[#0b0818]/75 border-white/10 text-purple-200/80'
+                        ? 'bg-purple-600/35 border-sky-400 text-white font-bold'
+                        : 'v2-neu-inset border-white/10 text-purple-200/80'
                     }`}
                   >
                     <div className="truncate">{persona.name}</div>
@@ -726,7 +1193,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
               <label className="space-y-1.5">
                 <div className="flex justify-between text-purple-200/80">
-                  <span>Speech Speed</span>
+                  <span className="flex items-center gap-1">
+                    <Mic className="w-3.5 h-3.5" />
+                    <span>Speech Speed</span>
+                  </span>
                   <span className="font-mono tabular-nums">{(settings.voiceSpeed ?? 1).toFixed(2)}x</span>
                 </div>
                 <input
@@ -736,7 +1206,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   step={0.05}
                   value={settings.voiceSpeed ?? 1.0}
                   onChange={(e) => onUpdateSettings({ voiceSpeed: Number(e.target.value) })}
-                  className="w-full accent-purple-500 cursor-pointer"
+                  className="w-full accent-sky-400 cursor-pointer"
                 />
               </label>
 
@@ -757,122 +1227,114 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   step={0.05}
                   value={settings.voiceVolume ?? 1.0}
                   onChange={(e) => onUpdateSettings({ voiceVolume: Number(e.target.value) })}
-                  className="w-full accent-purple-500 cursor-pointer"
+                  className="w-full accent-sky-400 cursor-pointer"
                 />
               </label>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-              <label className="flex items-center justify-between p-3 rounded-2xl bg-[#0b0818]/75 border border-white/10 text-xs cursor-pointer">
-                <span className="text-purple-100 font-semibold">Auto-Speak AI Replies</span>
-                <input
-                  type="checkbox"
-                  checked={settings.autoSpeakAIResponses}
-                  onChange={(e) => onUpdateSettings({ autoSpeakAIResponses: e.target.checked })}
-                  className="w-4 h-4 accent-purple-500"
-                />
-              </label>
-
-              <label className="flex items-center justify-between p-3 rounded-2xl bg-[#0b0818]/75 border border-white/10 text-xs cursor-pointer">
-                <span className="text-purple-100 font-semibold">Hands-Free Voice Mode</span>
-                <input
-                  type="checkbox"
-                  checked={settings.handsFreeMode}
-                  onChange={(e) => onUpdateSettings({ handsFreeMode: e.target.checked })}
-                  className="w-4 h-4 accent-purple-500"
-                />
-              </label>
+              <PillSwitch
+                checked={settings.autoSpeakAIResponses}
+                onChange={() => {
+                  const nextVal = !settings.autoSpeakAIResponses;
+                  if (!nextVal) {
+                    voiceAssistant.stopSpeaking();
+                  }
+                  onUpdateSettings({ autoSpeakAIResponses: nextVal });
+                }}
+                label="Voice Reader (Auto-Speak Replies)"
+                description="Automatically speak AI answers aloud when enabled."
+              />
+              <PillSwitch
+                checked={settings.handsFreeMode}
+                onChange={() => onUpdateSettings({ handsFreeMode: !settings.handsFreeMode })}
+                label="Hands-Free Voice Mode"
+                description="Automatically re-listen after an assistant reply finishes."
+              />
             </div>
-          </div>
 
-          {/* 4. Notification Preferences */}
-          <div className="glass-card rounded-3xl p-5 border border-purple-400/25 space-y-3">
-            <div className="flex items-center justify-between border-b border-white/10 pb-3">
-              <div className="flex items-center gap-2">
-                <Bell className="w-4 h-4 text-purple-300" />
-                <h2 className="text-sm font-bold text-white">Notification Preferences</h2>
+            {/* Focus Modes */}
+            <div className="space-y-2">
+              <div className="text-xs font-bold text-purple-200/85 flex items-center gap-1.5">
+                <Eye className="w-3.5 h-3.5 text-purple-400" />
+                <span>Ambient Focus Mode</span>
               </div>
-              <span className="text-[11px] text-purple-300/75 capitalize">
-                Browser: {notifPermission}
-              </span>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                {(['normal', 'study', 'night', 'relax'] as const).map((fm) => (
+                  <button
+                    key={fm}
+                    type="button"
+                    onClick={() => onUpdateSettings({ focusMode: fm })}
+                    className={`py-2 px-3 rounded-xl border text-xs font-bold capitalize cursor-pointer ${
+                      (settings.focusMode || 'normal') === fm
+                        ? 'electric-purple-btn text-white border-sky-400/50'
+                        : 'v2-neu-inset border-white/10 text-purple-200/75'
+                    }`}
+                  >
+                    {fm}
+                  </button>
+                ))}
+              </div>
             </div>
+          </section>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs">
-              <button
-                type="button"
-                onClick={handleToggleNotifications}
-                className="flex items-center justify-between p-3 rounded-2xl bg-[#0b0818]/75 border border-white/10 cursor-pointer"
-              >
-                <span className="text-purple-100 font-semibold">Push Alerts</span>
-                <span
-                  className={`text-[11px] font-bold px-2 py-0.5 rounded-full ${
-                    settings.notificationsEnabled ?? true
-                      ? 'bg-emerald-500/25 text-emerald-300'
-                      : 'bg-white/10 text-gray-400'
-                  }`}
-                >
-                  {settings.notificationsEnabled ?? true ? 'ON' : 'OFF'}
-                </span>
-              </button>
-
-              <label className="flex items-center justify-between p-3 rounded-2xl bg-[#0b0818]/75 border border-white/10 cursor-pointer">
-                <span className="text-purple-100 font-semibold">Sound Effects</span>
-                <input
-                  type="checkbox"
-                  checked={settings.soundEffects ?? true}
-                  onChange={(e) => onUpdateSettings({ soundEffects: e.target.checked })}
-                  className="w-4 h-4 accent-purple-500"
-                />
-              </label>
-
-              <label className="flex items-center justify-between p-3 rounded-2xl bg-[#0b0818]/75 border border-white/10 cursor-pointer">
-                <span className="text-purple-100 font-semibold">Streak Reminders</span>
-                <input
-                  type="checkbox"
-                  checked={settings.streakReminders ?? true}
-                  onChange={(e) => onUpdateSettings({ streakReminders: e.target.checked })}
-                  className="w-4 h-4 accent-purple-500"
-                />
-              </label>
-            </div>
-          </div>
-
-          {/* 5. Account, Privacy & Security */}
-          <div className="glass-card rounded-3xl p-5 border border-purple-400/25 space-y-4">
+          {/* 5. CONNECTED SERVICES */}
+          <section className="v2-neu-card rounded-3xl p-5 border border-purple-400/25 space-y-4">
             <div className="flex items-center gap-2 border-b border-white/10 pb-3">
-              <Shield className="w-4 h-4 text-purple-300" />
-              <h2 className="text-sm font-bold text-white">Account, Privacy &amp; Security</h2>
+              <Database className="w-4 h-4 text-sky-400" />
+              <h2 className="text-sm font-bold text-white">5. Connected Services &amp; Session</h2>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
-              <label className="flex items-center justify-between p-3 rounded-2xl bg-[#0b0818]/75 border border-white/10 cursor-pointer">
-                <span className="text-purple-100 font-semibold">Streaming AI Responses</span>
-                <input
-                  type="checkbox"
-                  checked={settings.streamingResponses !== false}
-                  onChange={(e) => onUpdateSettings({ streamingResponses: e.target.checked })}
-                  className="w-4 h-4 accent-purple-500"
-                />
-              </label>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+              <div className="p-3.5 rounded-2xl v2-neu-inset border border-white/10 space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-white flex items-center gap-1.5">
+                    <Cpu className="w-4 h-4 text-sky-400" />
+                    <span>Google Gemini Engine</span>
+                  </span>
+                  <span
+                    className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                      aiHealth?.state === 'connected'
+                        ? 'bg-emerald-500/20 text-emerald-300'
+                        : aiHealth?.state === 'offline'
+                        ? 'bg-amber-500/20 text-amber-300'
+                        : 'bg-purple-500/20 text-purple-200'
+                    }`}
+                  >
+                    {aiHealth?.state || (isOnline ? 'Ready' : 'Offline')}
+                  </span>
+                </div>
+                <div className="text-[11px] text-purple-200/75 tabular-nums">
+                  Model: {aiHealth?.model || settings.geminiModel || 'gemini-4-hydrogen'}
+                  {aiHealth?.latencyMs ? ` · ${aiHealth.latencyMs} ms` : ''}
+                </div>
+              </div>
 
-              <label className="flex items-center justify-between p-3 rounded-2xl bg-[#0b0818]/75 border border-white/10 cursor-pointer">
-                <span className="text-purple-100 font-semibold">AI Personalization Memory</span>
-                <input
-                  type="checkbox"
-                  checked={settings.aiMemoryEnabled !== false}
-                  onChange={(e) => onUpdateSettings({ aiMemoryEnabled: e.target.checked })}
-                  className="w-4 h-4 accent-purple-500"
-                />
-              </label>
+              <div className="p-3.5 rounded-2xl v2-neu-inset border border-white/10 space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-white flex items-center gap-1.5">
+                    <Globe className="w-4 h-4 text-amber-400" />
+                    <span>Firebase Auth &amp; Firestore</span>
+                  </span>
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-emerald-500/20 text-emerald-300">
+                    {fbAuthUser ? 'Connected' : 'Local Session'}
+                  </span>
+                </div>
+                <div className="text-[11px] text-purple-200/75 truncate">
+                  {fbAuthUser?.email || user.email || user.id} · UID {user.id.slice(0, 10)}
+                </div>
+              </div>
+            </div>
 
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
               <button
                 type="button"
                 onClick={onToggleForceOffline}
-                className="flex items-center justify-between p-3 rounded-2xl bg-[#0b0818]/75 border border-white/10 cursor-pointer"
+                className="flex items-center justify-between p-3.5 rounded-2xl v2-neu-inset border border-white/10 cursor-pointer text-xs"
               >
-                <span className="text-purple-100 font-semibold">Offline Local Mode</span>
+                <span className="text-white font-bold">Offline Local Mode</span>
                 <span
-                  className={`text-[11px] font-bold px-2 py-0.5 rounded-full ${
+                  className={`text-[11px] font-bold px-2.5 py-0.5 rounded-full ${
                     !isOnline ? 'bg-amber-500/25 text-amber-300' : 'bg-emerald-500/25 text-emerald-300'
                   }`}
                 >
@@ -883,39 +1345,18 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <button
                 type="button"
                 onClick={onOpenInstall}
-                className="flex items-center justify-between p-3 rounded-2xl bg-[#0b0818]/75 hover:bg-purple-900/30 border border-white/10 cursor-pointer"
+                className="flex items-center justify-between p-3.5 rounded-2xl v2-neu-inset hover:border-sky-400/40 border border-white/10 cursor-pointer text-xs"
               >
-                <span className="text-purple-100 font-semibold flex items-center gap-2">
+                <span className="text-white font-bold flex items-center gap-2">
                   <Smartphone className="w-4 h-4 text-emerald-400" />
                   <span>Install App (PWA)</span>
                 </span>
-                <Sparkles className="w-3.5 h-3.5 text-purple-300" />
+                <Sparkles className="w-3.5 h-3.5 text-sky-300" />
               </button>
             </div>
 
-            <div className="flex flex-wrap items-center gap-2.5 pt-2">
-              <button
-                type="button"
-                onClick={() => {
-                  setTermsModalTab('terms');
-                  setIsTermsModalOpen(true);
-                }}
-                className="min-h-[42px] px-4 py-2 rounded-2xl bg-purple-600/25 hover:bg-purple-600/40 border border-purple-400/35 text-xs font-semibold text-purple-100 flex items-center gap-2 cursor-pointer"
-              >
-                <Shield className="w-4 h-4 text-purple-300" />
-                <span>Terms of Service &amp; Privacy Policy</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={onOpenFullBackup}
-                className="min-h-[42px] px-4 py-2 rounded-2xl bg-white/5 hover:bg-white/10 border border-white/15 text-xs font-semibold text-purple-100 flex items-center gap-2 cursor-pointer"
-              >
-                <Download className="w-4 h-4 text-purple-300" />
-                <span>Advanced Backup &amp; API Settings ({sessions.length} chats)</span>
-              </button>
-
-              {isOwnerAdmin && (
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-white/10">
+              {isOwnerAdmin ? (
                 <button
                   type="button"
                   onClick={onOpenAdmin}
@@ -924,59 +1365,22 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   <ShieldCheck className="w-4 h-4 text-amber-400" />
                   <span>Owner Admin Dashboard</span>
                 </button>
-              )}
-
-              {confirmClear ? (
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onClearAllData();
-                      setConfirmClear(false);
-                      showToast('Local cache cleared.');
-                    }}
-                    className="min-h-[42px] px-4 py-2 rounded-2xl bg-rose-600 text-white text-xs font-bold cursor-pointer"
-                  >
-                    Confirm Clear Cache
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setConfirmClear(false)}
-                    className="min-h-[42px] px-3 py-2 rounded-2xl bg-white/10 text-xs text-gray-200 cursor-pointer"
-                  >
-                    Cancel
-                  </button>
-                </div>
               ) : (
-                <button
-                  type="button"
-                  onClick={() => setConfirmClear(true)}
-                  className="min-h-[42px] px-4 py-2 rounded-2xl bg-white/5 hover:bg-rose-950/50 border border-white/10 hover:border-rose-400/35 text-xs font-semibold text-purple-200 hover:text-rose-200 flex items-center gap-2 cursor-pointer"
-                >
-                  <Trash2 className="w-4 h-4" />
-                  <span>Clear Local Cache</span>
-                </button>
+                <div className="text-xs text-purple-200/70">
+                  Signed in as {user.email || user.name}
+                </div>
               )}
-            </div>
-          </div>
 
-          {/* 6. Sign Out */}
-          <div className="glass-card rounded-3xl p-4 border border-rose-400/30 flex items-center justify-between gap-3">
-            <div>
-              <div className="text-sm font-bold text-white">Session Control</div>
-              <div className="text-xs text-purple-200/70">
-                Signed in as {user.email || user.name}
-              </div>
+              <button
+                type="button"
+                onClick={onSignOut}
+                className="min-h-[44px] px-5 py-2.5 rounded-2xl bg-rose-600/85 hover:bg-rose-500 text-white text-xs sm:text-sm font-bold flex items-center gap-2 cursor-pointer shadow-lg shrink-0"
+              >
+                <LogOut className="w-4 h-4" />
+                <span>Sign Out</span>
+              </button>
             </div>
-            <button
-              type="button"
-              onClick={onSignOut}
-              className="min-h-[44px] px-5 py-2.5 rounded-2xl bg-rose-600/85 hover:bg-rose-500 text-white text-xs sm:text-sm font-bold flex items-center gap-2 cursor-pointer shadow-lg shrink-0"
-            >
-              <LogOut className="w-4 h-4" />
-              <span>Sign Out</span>
-            </button>
-          </div>
+          </section>
         </div>
       )}
 

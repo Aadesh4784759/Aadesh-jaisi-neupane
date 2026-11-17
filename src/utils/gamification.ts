@@ -6,8 +6,7 @@ export const INITIAL_BADGES: AchievementBadge[] = [
     name: 'First Spark',
     icon: '🌟',
     description: 'Sent your first message to Aadesh AI Global Hub',
-    unlocked: true,
-    unlockedAt: Date.now() - 86400000 * 7,
+    unlocked: false,
     category: 'xp',
   },
   {
@@ -15,8 +14,7 @@ export const INITIAL_BADGES: AchievementBadge[] = [
     name: 'Voice Pioneer',
     icon: '🎙️',
     description: 'Engaged with hands-free natural voice speech recognition',
-    unlocked: true,
-    unlockedAt: Date.now() - 86400000 * 5,
+    unlocked: false,
     category: 'voice',
   },
   {
@@ -24,8 +22,7 @@ export const INITIAL_BADGES: AchievementBadge[] = [
     name: 'Vision Analyst',
     icon: '📸',
     description: 'Uploaded and analyzed visual photo context with AI',
-    unlocked: true,
-    unlockedAt: Date.now() - 86400000 * 3,
+    unlocked: false,
     category: 'vision',
   },
   {
@@ -33,17 +30,15 @@ export const INITIAL_BADGES: AchievementBadge[] = [
     name: 'Consistent Explorer',
     icon: '🔥',
     description: 'Maintained a 7-day consecutive activity streak',
-    unlocked: true,
-    unlockedAt: Date.now() - 86400000 * 1,
+    unlocked: false,
     category: 'streak',
   },
   {
     id: 'polyglot',
     name: 'Global Polyglot',
     icon: '🌐',
-    description: 'Learned or translated across 3+ languages',
-    unlocked: true,
-    unlockedAt: Date.now() - 86400000 * 2,
+    description: 'Translated or practiced across multiple languages',
+    unlocked: false,
     category: 'multilingual',
   },
   {
@@ -51,56 +46,121 @@ export const INITIAL_BADGES: AchievementBadge[] = [
     name: 'AI Grand Scholar',
     icon: '⚡',
     description: 'Surpassed 2,000 XP in learning and reasoning',
-    unlocked: true,
-    unlockedAt: Date.now() - 86400000 * 1,
+    unlocked: false,
     category: 'xp',
   },
 ];
 
-export function generateStreakHistory(streakDays: number): DailyStreakDay[] {
+function toIsoDateKey(d: Date): string {
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+export function generateStreakHistory(
+  streakDays: number,
+  dateCounts?: Record<string, number>
+): DailyStreakDay[] {
   const result: DailyStreakDay[] = [];
   const daysOfWeek = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   const today = new Date();
+  const safeStreak = Math.max(0, Math.floor(streakDays || 0));
 
   for (let i = 6; i >= 0; i--) {
-    const d = new Date();
+    const d = new Date(today);
     d.setDate(today.getDate() - i);
-    const dateStr = d.toISOString().slice(0, 10);
+    const dateStr = toIsoDateKey(d);
     const dayLabel = daysOfWeek[d.getDay()];
-    // Mark as completed if within current streak window
-    const completed = i < streakDays;
+    const recordedCount = dateCounts?.[dateStr] || 0;
+    const completed = recordedCount > 0 || (safeStreak > 0 && i < safeStreak);
     result.push({
       date: dateStr,
       dayLabel,
       completed,
-      activityCount: completed ? Math.floor(Math.random() * 3) + 2 : 0,
+      activityCount: recordedCount > 0 ? recordedCount : completed ? 1 : 0,
     });
   }
 
   return result;
 }
 
-export function computeLevelInfo(xp: number): { level: number; levelTitle: string; nextLevelXp: number; progressPercent: number } {
+export function computeLevelInfo(xp: number): {
+  level: number;
+  levelTitle: string;
+  nextLevelXp: number;
+  progressPercent: number;
+} {
   if (xp >= 5000) {
-    return { level: 5, levelTitle: 'Global AI Luminary', nextLevelXp: 10000, progressPercent: Math.min(100, Math.round(((xp - 5000) / 5000) * 100)) };
+    return {
+      level: 5,
+      levelTitle: 'Global AI Luminary',
+      nextLevelXp: 10000,
+      progressPercent: Math.min(100, Math.round(((xp - 5000) / 5000) * 100)),
+    };
   }
   if (xp >= 2500) {
-    return { level: 4, levelTitle: 'Grand AI Scholar', nextLevelXp: 5000, progressPercent: Math.min(100, Math.round(((xp - 2500) / 2500) * 100)) };
+    return {
+      level: 4,
+      levelTitle: 'Grand AI Scholar',
+      nextLevelXp: 5000,
+      progressPercent: Math.min(100, Math.round(((xp - 2500) / 2500) * 100)),
+    };
   }
   if (xp >= 1000) {
-    return { level: 3, levelTitle: 'Multilingual Master', nextLevelXp: 2500, progressPercent: Math.min(100, Math.round(((xp - 1000) / 1500) * 100)) };
+    return {
+      level: 3,
+      levelTitle: 'Multilingual Master',
+      nextLevelXp: 2500,
+      progressPercent: Math.min(100, Math.round(((xp - 1000) / 1500) * 100)),
+    };
   }
   if (xp >= 400) {
-    return { level: 2, levelTitle: 'Knowledge Seeker', nextLevelXp: 1000, progressPercent: Math.min(100, Math.round(((xp - 400) / 600) * 100)) };
+    return {
+      level: 2,
+      levelTitle: 'Knowledge Seeker',
+      nextLevelXp: 1000,
+      progressPercent: Math.min(100, Math.round(((xp - 400) / 600) * 100)),
+    };
   }
-  return { level: 1, levelTitle: 'Curious Novice', nextLevelXp: 400, progressPercent: Math.min(100, Math.round((xp / 400) * 100)) };
+  return {
+    level: 1,
+    levelTitle: 'Curious Novice',
+    nextLevelXp: 400,
+    progressPercent: Math.min(100, Math.round((xp / 400) * 100)),
+  };
+}
+
+export function evaluateCurrentStreakOnLoad(
+  savedStreakDays: number,
+  lastActiveDate?: string
+): number {
+  const cleanSaved = Math.max(0, Math.floor(savedStreakDays || 0));
+  if (!lastActiveDate || !/^\d{4}-\d{2}-\d{2}$/.test(lastActiveDate)) {
+    return cleanSaved;
+  }
+  const todayStr = toIsoDateKey(new Date());
+  if (lastActiveDate === todayStr) return Math.max(1, cleanSaved);
+
+  const lastTime = new Date(`${lastActiveDate}T00:00:00`).getTime();
+  const todayTime = new Date(`${todayStr}T00:00:00`).getTime();
+  const diffDays = Math.round((todayTime - lastTime) / (1000 * 60 * 60 * 24));
+
+  // If user was active yesterday, streak is still alive today awaiting next activity; if >1 day missed, streak resets to 0
+  if (diffDays <= 1) return cleanSaved;
+  return 0;
 }
 
 export function recordGamificationActivity(
   user: UserProfile,
   activityType: 'chat' | 'voice' | 'image' | 'translation'
-): { updatedUser: UserProfile; xpEarned: number; streakIncreased: boolean; newBadgeUnlocked?: AchievementBadge } {
-  const todayStr = new Date().toISOString().slice(0, 10);
+): {
+  updatedUser: UserProfile;
+  xpEarned: number;
+  streakIncreased: boolean;
+  newBadgeUnlocked?: AchievementBadge;
+} {
+  const todayStr = toIsoDateKey(new Date());
   const xpValues: Record<string, number> = {
     chat: 25,
     voice: 50,
@@ -109,44 +169,69 @@ export function recordGamificationActivity(
   };
   const xpEarned = xpValues[activityType] || 25;
 
-  let streakDays = user.streakDays || 1;
+  let streakDays = Math.max(0, Math.floor(user.streakDays || 0));
   let streakIncreased = false;
   let dailyGoalCurrent = user.dailyGoalCurrent || 0;
 
   if (user.lastActiveDate !== todayStr) {
-    // Check if yesterday was last active date
-    if (user.lastActiveDate) {
-      const last = new Date(user.lastActiveDate).getTime();
-      const now = new Date(todayStr).getTime();
+    if (user.lastActiveDate && /^\d{4}-\d{2}-\d{2}$/.test(user.lastActiveDate)) {
+      const last = new Date(`${user.lastActiveDate}T00:00:00`).getTime();
+      const now = new Date(`${todayStr}T00:00:00`).getTime();
       const diffDays = Math.round((now - last) / (1000 * 60 * 60 * 24));
       if (diffDays === 1) {
-        streakDays += 1;
+        streakDays = Math.max(1, streakDays) + 1;
         streakIncreased = true;
-      } else if (diffDays > 1) {
+      } else {
+        // Missed more than 1 day or first tracked day: reset/start at 1
         streakDays = 1;
+        streakIncreased = true;
       }
+    } else {
+      streakDays = 1;
+      streakIncreased = true;
     }
     dailyGoalCurrent = 1;
   } else {
+    if (streakDays === 0) {
+      streakDays = 1;
+      streakIncreased = true;
+    }
     dailyGoalCurrent = Math.min(user.dailyGoalTarget || 5, dailyGoalCurrent + 1);
   }
 
   const newXp = (user.xp || 0) + xpEarned;
   const levelData = computeLevelInfo(newXp);
-  const longestStreak = Math.max(user.longestStreak || 7, streakDays);
+  const longestStreak = Math.max(user.longestStreak || 0, streakDays);
 
-  // Update streak history for today
-  const history = generateStreakHistory(streakDays);
+  const prevCounts: Record<string, number> = {};
+  (user.streakHistory || []).forEach((h) => {
+    if (h.completed && h.date) prevCounts[h.date] = Math.max(1, h.activityCount || 1);
+  });
+  prevCounts[todayStr] = (prevCounts[todayStr] || 0) + 1;
 
-  // Check badges
+  const history = generateStreakHistory(streakDays, prevCounts);
+
+  const baseBadges = Array.isArray(user.badges) && user.badges.length > 0 ? user.badges : INITIAL_BADGES;
   let newBadgeUnlocked: AchievementBadge | undefined = undefined;
-  const updatedBadges = user.badges.map((b) => {
+  const updatedBadges = baseBadges.map((b) => {
     if (b.unlocked) return b;
+    if (b.id === 'first_query') {
+      newBadgeUnlocked = { ...b, unlocked: true, unlockedAt: Date.now() };
+      return newBadgeUnlocked;
+    }
     if (b.id === 'voice_explorer' && activityType === 'voice') {
       newBadgeUnlocked = { ...b, unlocked: true, unlockedAt: Date.now() };
       return newBadgeUnlocked;
     }
     if (b.id === 'vision_analyst' && activityType === 'image') {
+      newBadgeUnlocked = { ...b, unlocked: true, unlockedAt: Date.now() };
+      return newBadgeUnlocked;
+    }
+    if (b.id === 'polyglot' && activityType === 'translation') {
+      newBadgeUnlocked = { ...b, unlocked: true, unlockedAt: Date.now() };
+      return newBadgeUnlocked;
+    }
+    if (b.id === 'streak_master' && streakDays >= 7) {
       newBadgeUnlocked = { ...b, unlocked: true, unlockedAt: Date.now() };
       return newBadgeUnlocked;
     }
@@ -192,17 +277,10 @@ export interface CalculatedStreakSummary {
   calendarGrid: StreakCalendarCell[];
 }
 
-function toIsoDateKey(d: Date): string {
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
-}
-
 export function calculateConsecutiveStreakFromDates(
   dateCounts: Record<string, number>,
-  fallbackStreakDays: number = 1,
-  fallbackLongestStreak: number = 1,
+  fallbackStreakDays: number = 0,
+  fallbackLongestStreak: number = 0,
   daysToShow: number = 14
 ): CalculatedStreakSummary {
   const now = new Date();
@@ -214,7 +292,6 @@ export function calculateConsecutiveStreakFromDates(
   const yesterdayLocalKey = toIsoDateKey(yesterday);
   const yesterdayUtcKey = yesterday.toISOString().slice(0, 10);
 
-  // Merge UTC/local keys cleanly so logs written with toISOString().slice(0, 10) match today seamlessly
   const normalizedCounts: Record<string, number> = { ...dateCounts };
   if (normalizedCounts[todayUtcKey] && !normalizedCounts[todayLocalKey]) {
     normalizedCounts[todayLocalKey] = normalizedCounts[todayUtcKey];
@@ -227,14 +304,14 @@ export function calculateConsecutiveStreakFromDates(
     .filter((k) => (normalizedCounts[k] || 0) > 0 && /^\d{4}-\d{2}-\d{2}$/.test(k))
     .sort();
 
-  // Compute current consecutive streak walking backwards from today (or yesterday if not interacted yet today)
+  // Compute current consecutive streak walking backwards from today (or yesterday if awaiting today's interaction)
   let consecutiveDays = 0;
   if (activeKeys.length > 0) {
     const startDate = new Date(now);
     if (!normalizedCounts[todayLocalKey] && normalizedCounts[yesterdayLocalKey]) {
       startDate.setDate(now.getDate() - 1);
     }
-    if (normalizedCounts[toIsoDateKey(startDate)]) {
+    if (normalizedCounts[toIsoDateKey(startDate)] > 0) {
       const cursor = new Date(startDate);
       while (normalizedCounts[toIsoDateKey(cursor)] > 0) {
         consecutiveDays += 1;
@@ -243,10 +320,10 @@ export function calculateConsecutiveStreakFromDates(
     }
   }
 
-  // Fallback gracefully if no Firestore logs exist yet (e.g. guest or brand new user)
-  const effectiveConsecutive = activeKeys.length > 0 ? Math.max(consecutiveDays, fallbackStreakDays > 0 ? 1 : 0) : fallbackStreakDays;
+  // Only fall back to saved streak when there are genuinely no logged date keys yet;
+  // when logs exist and yesterday+today were missed, consecutiveDays legitimately resets to 0.
+  const effectiveConsecutive = activeKeys.length > 0 ? consecutiveDays : Math.max(0, fallbackStreakDays);
 
-  // Compute longest streak across all active date keys
   let computedLongest = consecutiveDays;
   let run = 0;
   let prevTime: number | null = null;
@@ -261,9 +338,8 @@ export function calculateConsecutiveStreakFromDates(
     prevTime = t;
   }
 
-  const longestStreak = Math.max(computedLongest, effectiveConsecutive, fallbackLongestStreak || 1);
+  const longestStreak = Math.max(computedLongest, effectiveConsecutive, Math.max(0, fallbackLongestStreak));
 
-  // Build 14-day calendar grid
   const daysOfWeek = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   const calendarGrid: StreakCalendarCell[] = [];
   for (let i = daysToShow - 1; i >= 0; i--) {
@@ -272,7 +348,7 @@ export function calculateConsecutiveStreakFromDates(
     const localKey = toIsoDateKey(d);
     const utcKey = d.toISOString().slice(0, 10);
     const count = normalizedCounts[localKey] || normalizedCounts[utcKey] || 0;
-    const completed = count > 0 || (activeKeys.length === 0 && i < effectiveConsecutive);
+    const completed = count > 0 || (activeKeys.length === 0 && effectiveConsecutive > 0 && i < effectiveConsecutive);
     calendarGrid.push({
       date: localKey,
       dayLabel: daysOfWeek[d.getDay()],

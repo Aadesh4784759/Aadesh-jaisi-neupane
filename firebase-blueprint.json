@@ -15,6 +15,24 @@
           "description": "User display name",
           "maxLength": 100
         },
+        "nickname": {
+          "type": "string",
+          "description": "Preferred user nickname for personalized greetings",
+          "maxLength": 64
+        },
+        "age": {
+          "type": "number",
+          "description": "Optional user age"
+        },
+        "onboardingCompleted": {
+          "type": "boolean",
+          "description": "Whether the user completed initial onboarding"
+        },
+        "memoryConsent": {
+          "type": "string",
+          "description": "Personal memory consent state (pending, agreed, disagreed)",
+          "maxLength": 20
+        },
         "username": {
           "type": "string",
           "description": "User handle",
@@ -33,6 +51,47 @@
         "preferredLanguage": {
           "type": "string",
           "description": "Preferred UI/conversation language code",
+          "maxLength": 20
+        },
+        "preferredTheme": {
+          "type": "string",
+          "description": "Preferred application visual theme ID",
+          "maxLength": 40
+        },
+        "termsAccepted": {
+          "type": "boolean",
+          "description": "Whether the user explicitly accepted Terms of Service and Privacy Policy"
+        },
+        "termsAcceptedAt": {
+          "type": "string",
+          "description": "ISO timestamp when Terms of Service and Privacy Policy were accepted",
+          "maxLength": 50
+        },
+        "country": {
+          "type": "string",
+          "description": "User selected or detected country name",
+          "maxLength": 80
+        },
+        "countryFlag": {
+          "type": "string",
+          "description": "Emoji flag for user country",
+          "maxLength": 16
+        },
+        "isManualCountry": {
+          "type": "boolean",
+          "description": "Whether country was manually selected to override automatic detection"
+        },
+        "streakDays": {
+          "type": "number",
+          "description": "Current consecutive active streak days"
+        },
+        "longestStreak": {
+          "type": "number",
+          "description": "Highest achieved consecutive active streak days"
+        },
+        "lastActiveDate": {
+          "type": "string",
+          "description": "Last active YYYY-MM-DD date string",
           "maxLength": 20
         },
         "status": {

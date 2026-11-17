@@ -44,6 +44,7 @@ import {
   PinOff,
   ChevronUp,
   Bot,
+  BadgeCheck,
   SmilePlus,
   Maximize2,
   Clock,
@@ -102,6 +103,7 @@ interface ChatViewProps {
     isVoice?: boolean;
     targetLanguage: string;
   }) => Promise<void>;
+  onStopGeneration?: () => void;
   onUpdateSessionTargetLang: (lang: string) => void;
   onTranslateMessage?: (messageId: string, targetLangCode: string) => Promise<string>;
   onFeedbackMessage?: (messageId: string, feedback: 'up' | 'down') => void;
@@ -188,6 +190,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   onDeleteSession,
   onClearCurrentSession,
   onSendMessage,
+  onStopGeneration,
   onUpdateSessionTargetLang,
   onTranslateMessage,
   onFeedbackMessage,
@@ -240,6 +243,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const [speakingId, setSpeakingId] = useState<string | null>(null);
   const [playbackState, setPlaybackState] = useState<VoicePlaybackState>(() => voiceAssistant.getPlaybackState());
   const [voiceError, setVoiceError] = useState<string | null>(null);
+  const [chatError, setChatError] = useState<string | null>(null);
   const [translatingMsgId, setTranslatingMsgId] = useState<string | null>(null);
   const [sharePopoverMsgId, setSharePopoverMsgId] = useState<string | null>(null);
   const [reactionPickerMsgId, setReactionPickerMsgId] = useState<string | null>(null);
@@ -827,6 +831,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
     const textToSend = (customText !== undefined ? customText : inputText).trim();
     if (!textToSend && !selectedImage && !selectedFile && !selectedVideo) return;
 
+    setChatError(null);
     const payload = {
       text: textToSend || (selectedVideo ? `Analyze uploaded video "${selectedVideo.name}"` : ''),
       imageData: selectedImage?.base64,
@@ -838,6 +843,12 @@ export const ChatView: React.FC<ChatViewProps> = ({
       targetLanguage: currentSession.targetLanguage,
     };
 
+    const prevInput = inputText;
+    const prevImage = selectedImage;
+    const prevFile = selectedFile;
+    const prevVideo = selectedVideo;
+    const prevLoc = attachedLocation;
+
     setInputText('');
     setSelectedImage(null);
     setSelectedFile(null);
@@ -846,7 +857,19 @@ export const ChatView: React.FC<ChatViewProps> = ({
     setPlusMenuOpen(false);
     setVoiceInterimTranscript('');
 
-    await onSendMessage(payload);
+    try {
+      await onSendMessage(payload);
+    } catch (err: any) {
+      const msg = err?.message || 'Unable to send message. Please check your connection and try again.';
+      setChatError(msg);
+      if (/authentication|verified|already in progress/i.test(msg)) {
+        if (customText === undefined) setInputText(prevInput);
+        setSelectedImage(prevImage);
+        setSelectedFile(prevFile);
+        setSelectedVideo(prevVideo);
+        setAttachedLocation(prevLoc);
+      }
+    }
   };
 
   // Resolve best BCP-47 speech code for a message based on explicit language or script
@@ -969,13 +992,18 @@ export const ChatView: React.FC<ChatViewProps> = ({
       .find((m) => m.role === 'user');
 
     if (!userMsg) return;
-    await onSendMessage({
-      text: userMsg.content,
-      imageData: userMsg.imageUrl,
-      location: userMsg.location,
-      targetLanguage: currentSession.targetLanguage,
-      isVoice: userMsg.isVoiceInput,
-    });
+    setChatError(null);
+    try {
+      await onSendMessage({
+        text: userMsg.content,
+        imageData: userMsg.imageUrl,
+        location: userMsg.location,
+        targetLanguage: currentSession.targetLanguage,
+        isVoice: userMsg.isVoiceInput,
+      });
+    } catch (err: any) {
+      setChatError(err?.message || 'Retry failed. Please check your connection and try again.');
+    }
   };
 
   // Save renamed session title
@@ -2684,7 +2712,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 className="space-y-2"
               >
                 <div className="text-sm sm:text-base font-bold text-purple-300">
-                  Hello, {user?.name?.trim() || (user?.username ? `@${user.username}` : 'Member')}!
+                  Hello, {user?.nickname?.trim() || user?.name?.trim() || 'Friend'}!
                 </div>
                 <h1 className="text-2xl sm:text-4xl font-black text-white tracking-tight leading-tight">
                   How can I assist you today?
@@ -2840,11 +2868,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   {/* Distinct Role Avatar (AI, Other Group Participant, or Current User) */}
                   {isAI ? (
                     <div
-                      className="w-8 h-8 sm:w-9 sm:h-9 rounded-full purple-glow-btn border border-purple-400/50 flex items-center justify-center shrink-0 shadow-lg mt-0.5 relative"
-                      title="Aadesh AI Assistant"
+                      className="w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center shrink-0 mt-0.5 relative"
+                      title="Aadesh AI"
                       aria-label="Aadesh AI Avatar"
                     >
-                      <Bot className="w-4 h-4 sm:w-4.5 sm:h-4.5 text-white" />
+                      <BrandLogo size="sm" animated={false} />
                       <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-emerald-400 border-2 border-[#0b0e1a]" />
                     </div>
                   ) : isOtherParticipant ? (
@@ -2916,16 +2944,20 @@ export const ChatView: React.FC<ChatViewProps> = ({
                       }
                     }}
                     aria-haspopup={isAI ? 'menu' : undefined}
-                    className={`min-w-0 flex-1 max-w-[88%] sm:max-w-[82%] rounded-2xl p-4 sm:p-5 relative space-y-3.5 shadow-xl transition-all ${
+                    className={`min-w-0 flex-1 max-w-[88%] sm:max-w-[82%] rounded-2xl relative shadow-xl transition-all ${
+                      settings.chatAppearance === 'compact'
+                        ? 'p-3 sm:p-3.5 space-y-2'
+                        : 'p-4 sm:p-5 space-y-3.5'
+                    } ${
                       isUser
-                        ? 'bg-gradient-to-r from-purple-700/85 via-purple-600/85 to-indigo-700/85 text-white rounded-tr-xs border border-purple-400/40 shadow-purple-900/30'
+                        ? 'bg-gradient-to-br from-indigo-600/90 via-purple-600/90 to-sky-600/85 text-white rounded-tr-xs border border-sky-300/40 shadow-[0_8px_24px_rgba(59,130,246,0.26)]'
                         : isOtherParticipant
                         ? 'glass-card text-gray-100 rounded-tl-xs border border-emerald-500/40 bg-emerald-950/20'
                         : msg.isError
                         ? 'glass-card text-rose-100 rounded-tl-xs border border-rose-500/50 bg-rose-950/25'
                         : hasGeotagContext
                         ? 'glass-card text-gray-100 rounded-tl-xs border border-emerald-400/50 shadow-[0_0_24px_rgba(16,185,129,0.12)]'
-                        : 'glass-card text-gray-100 rounded-tl-xs border border-purple-500/30'
+                        : 'v2-neu-card text-gray-100 rounded-tl-xs border border-purple-400/30'
                     } ${
                       hasGeotagContext && isUser ? 'ring-1 ring-emerald-400/55 border-emerald-300/60' : ''
                     } ${
@@ -2969,8 +3001,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
                           <span className="text-xs font-bold text-white tracking-wide flex items-center gap-1.5 truncate">
                             {senderDisplayName}
                             {isAI ? (
-                              <span className="text-[10px] text-purple-300 bg-purple-950 px-1.5 py-0.2 rounded font-normal border border-purple-500/30">
-                                Assistant
+                              <span title="Verified Aadesh AI" className="inline-flex items-center shrink-0">
+                                <BadgeCheck className="w-4 h-4 text-sky-400" aria-label="Verified Aadesh AI" />
                               </span>
                             ) : (
                               <span className="text-[10px] text-emerald-300 bg-emerald-950/80 px-1.5 py-0.2 rounded font-normal border border-emerald-500/30">
@@ -3595,10 +3627,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
           {isLoading && !currentSession.messages.some((m) => m.isStreaming) && (
             <div className="flex items-start gap-2.5 sm:gap-3 max-w-3xl mx-auto w-full">
               <div
-                className="w-8 h-8 sm:w-9 sm:h-9 rounded-full purple-glow-btn border border-purple-400/50 flex items-center justify-center shrink-0 shadow-lg mt-0.5"
+                className="w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center shrink-0 mt-0.5"
                 aria-hidden="true"
               >
-                <Bot className="w-4 h-4 text-white animate-pulse" />
+                <BrandLogo size="sm" animated={true} />
               </div>
               <div className="glass-card rounded-2xl rounded-tl-xs p-4 border border-purple-500/30 flex items-center gap-3">
                 <div className="w-4 h-4 border-2 border-purple-400 border-t-transparent rounded-full animate-spin" />
@@ -3747,7 +3779,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
           className={`shrink-0 z-20 w-full px-2.5 sm:px-6 pt-2 bg-gradient-to-t from-[#070510]/95 via-[#070510]/70 to-transparent transition-[padding] duration-150 ${
             isKeyboardOpen
               ? 'pb-[max(0.5rem,env(safe-area-inset-bottom))]'
-              : 'pb-[calc(5.2rem+env(safe-area-inset-bottom))]'
+              : 'pb-[calc(5.5rem+env(safe-area-inset-bottom))]'
           }`}
         >
           <div className="max-w-3xl mx-auto w-full space-y-2 relative" ref={composerAreaRef}>
@@ -3868,6 +3900,65 @@ export const ChatView: React.FC<ChatViewProps> = ({
               )}
             </AnimatePresence>
 
+            {/* VISIBLE CHAT SEND / API ERROR BANNER */}
+            {chatError && (
+              <div
+                role="alert"
+                className="rounded-2xl bg-rose-950/90 border border-rose-500/55 text-rose-100 px-3.5 py-2.5 text-xs shadow-xl flex items-center justify-between gap-2 animate-in fade-in duration-150"
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+                  <span className="break-words font-medium">{chatError}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setChatError(null)}
+                  className="p-1 text-rose-300 hover:text-white shrink-0 cursor-pointer"
+                  aria-label="Dismiss error alert"
+                  title="Dismiss error alert"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+
+            {/* EXPLICIT PERSONAL MEMORY CONSENT PROMPT (Shown once until user picks Agree or Disagree) */}
+            {(settings.memoryConsent === undefined || settings.memoryConsent === 'pending') &&
+              onUpdateSettings && (
+                <div
+                  role="region"
+                  aria-label="Personal Memory Permission"
+                  className="rounded-2xl glass-card border border-violet-400/40 px-3.5 py-2.5 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 shadow-lg"
+                >
+                  <div className="flex items-center gap-2 min-w-0 text-purple-100">
+                    <Sparkles className="w-4 h-4 text-sky-400 shrink-0" />
+                    <span className="leading-snug">
+                      Allow Aadesh AI to remember your approved preferences across chats?
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onUpdateSettings({ memoryConsent: 'agreed', aiMemoryEnabled: true })
+                      }
+                      className="px-3 py-1.5 rounded-xl electric-purple-btn text-white text-[11px] font-bold cursor-pointer"
+                    >
+                      Agree
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onUpdateSettings({ memoryConsent: 'disagreed', aiMemoryEnabled: false })
+                      }
+                      className="px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white/15 border border-white/15 text-purple-200 text-[11px] font-semibold cursor-pointer"
+                    >
+                      Disagree
+                    </button>
+                  </div>
+                </div>
+              )}
+
             {/* COMPACT VOICE READER ON/OFF MINI CONTROL (Separate from Microphone Button) */}
             <div className="flex items-center justify-between gap-2 px-1">
               <div className="flex items-center gap-1.5 flex-wrap">
@@ -3880,8 +3971,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
                       onUpdateSettings?.({ autoSpeakAIResponses: false });
                       return;
                     }
-                    if (!nextOn && playbackState.isSpeaking) {
+                    if (!nextOn) {
                       voiceAssistant.stopSpeaking();
+                      setSpeakingId(null);
                     }
                     onUpdateSettings?.({ autoSpeakAIResponses: nextOn });
                   }}
@@ -4125,26 +4217,39 @@ export const ChatView: React.FC<ChatViewProps> = ({
                       <Mic className="w-4 h-4" />
                     </button>
 
-                    {/* 4. Send Button */}
-                    <button
-                      type="button"
-                      onClick={() => handleSend()}
-                      disabled={
-                        isLoading ||
-                        (!inputText.trim() && !selectedImage && !selectedFile && !selectedVideo)
-                      }
-                      aria-label="Send message"
-                      className="purple-glow-btn text-white font-semibold min-w-[44px] min-h-[42px] px-3 sm:px-4 rounded-2xl flex items-center justify-center gap-1.5 text-xs sm:text-sm disabled:opacity-40 disabled:cursor-not-allowed transition-all cursor-pointer shrink-0"
-                    >
-                      {isLoading ? (
-                        <RefreshCw className="w-4 h-4 animate-spin" />
-                      ) : (
-                        <>
-                          <span className="hidden sm:inline">Send</span>
-                          <Send className="w-4 h-4" />
-                        </>
-                      )}
-                    </button>
+                    {/* 4. Send or Stop Generation Button */}
+                    {isLoading && onStopGeneration ? (
+                      <button
+                        type="button"
+                        onClick={onStopGeneration}
+                        aria-label="Stop AI generation"
+                        title="Stop generating response"
+                        className="bg-gradient-to-r from-rose-600 to-pink-600 hover:from-rose-500 hover:to-pink-500 text-white font-bold min-w-[44px] min-h-[42px] px-3 sm:px-4 rounded-2xl flex items-center justify-center gap-1.5 text-xs sm:text-sm shadow-lg shadow-rose-600/35 transition-all cursor-pointer shrink-0"
+                      >
+                        <Square className="w-3.5 h-3.5 fill-white" />
+                        <span className="hidden sm:inline">Stop</span>
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => handleSend()}
+                        disabled={
+                          isLoading ||
+                          (!inputText.trim() && !selectedImage && !selectedFile && !selectedVideo)
+                        }
+                        aria-label="Send message"
+                        className="electric-purple-btn text-white font-semibold min-w-[44px] min-h-[42px] px-3 sm:px-4 rounded-2xl flex items-center justify-center gap-1.5 text-xs sm:text-sm disabled:opacity-40 disabled:cursor-not-allowed transition-all cursor-pointer shrink-0"
+                      >
+                        {isLoading ? (
+                          <RefreshCw className="w-4 h-4 animate-spin" />
+                        ) : (
+                          <>
+                            <span className="hidden sm:inline">Send</span>
+                            <Send className="w-4 h-4" />
+                          </>
+                        )}
+                      </button>
+                    )}
                   </>
                 )}
               </div>
@@ -4199,6 +4304,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
           void onSendMessage({
             text: `Tell me about ${countryName} (${city}), where the current live local time is ${formattedTime}.`,
             targetLanguage: currentSession.targetLanguage || settings.defaultTargetLanguage,
+          }).catch((err: any) => {
+            setChatError(err?.message || 'Unable to send message right now.');
           });
         }}
         onImageGenerated={onImageGenerated}

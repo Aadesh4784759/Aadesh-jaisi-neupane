@@ -147,6 +147,9 @@ export interface DailyStreakDay {
 export interface UserProfile {
   id: string;
   name: string;
+  nickname?: string;
+  age?: number;
+  onboardingCompleted?: boolean;
   username: string;
   email?: string;
   phone?: string;
@@ -229,6 +232,27 @@ export interface VoiceHistoryEntry {
   targetTranslation?: string;
 }
 
+export interface TranslationHistoryEntry {
+  id: string;
+  sourceText: string;
+  translatedText: string;
+  sourceLang: string;
+  detectedSourceLang?: string;
+  targetLang: string;
+  pronunciation?: string;
+  culturalNote?: string;
+  timestamp: number;
+  isVoice?: boolean;
+}
+
+export interface LoginActivityEntry {
+  id: string;
+  timestamp: number;
+  provider: string;
+  email?: string;
+  deviceSummary: string;
+}
+
 export interface AppSettings {
   uiLanguage: string;
   defaultTargetLanguage: string;
@@ -250,9 +274,17 @@ export interface AppSettings {
   screenReaderAnnounce: boolean;
   streamingResponses?: boolean;
   aiMemoryEnabled?: boolean;
+  memoryConsent?: 'pending' | 'agreed' | 'disagreed';
   notificationsEnabled?: boolean;
   soundEffects?: boolean;
   streakReminders?: boolean;
+  emailUpdatesEnabled?: boolean;
+  privateAccount?: boolean;
+  aiResponseMode?: 'fast' | 'balanced' | 'detailed';
+  focusMode?: 'normal' | 'study' | 'night' | 'relax';
+  chatAppearance?: 'spacious' | 'compact';
+  reducedAnimations?: boolean;
+  biometricLockEnabled?: boolean;
 }
 
 export type MemoryCategory = 'preference' | 'instruction' | 'fact' | 'goal';

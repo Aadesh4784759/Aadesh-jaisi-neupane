@@ -63,8 +63,8 @@ export const DailyStreakTracker: React.FC<DailyStreakTrackerProps> = ({
     }
     return calculateConsecutiveStreakFromDates(
       merged,
-      user.streakDays || 1,
-      user.longestStreak || 1,
+      user.streakDays || 0,
+      user.longestStreak || 0,
       30
     );
   }, [firestoreDateCounts, user.streakHistory, user.lastActiveDate, user.streakDays, user.longestStreak]);

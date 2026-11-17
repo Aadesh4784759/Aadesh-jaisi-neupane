@@ -361,19 +361,31 @@ export const VoicePage: React.FC<VoicePageProps> = ({
       };
       setTurns((prev) => [...prev, aiTurn]);
 
-      speakTextWithConfig(spokenReply, replyLangObj.speechCode, () => {
-        if (
-          activeToolRef.current === 'voice-chat' &&
-          sessionActiveRef.current &&
-          handsFreeRef.current
-        ) {
-          window.setTimeout(() => {
-            if (activeToolRef.current === 'voice-chat' && sessionActiveRef.current) {
-              void beginListening();
-            }
-          }, 350);
-        }
-      });
+      if (settings.autoSpeakAIResponses) {
+        speakTextWithConfig(spokenReply, replyLangObj.speechCode, () => {
+          if (
+            activeToolRef.current === 'voice-chat' &&
+            sessionActiveRef.current &&
+            handsFreeRef.current
+          ) {
+            window.setTimeout(() => {
+              if (activeToolRef.current === 'voice-chat' && sessionActiveRef.current) {
+                void beginListening();
+              }
+            }, 350);
+          }
+        });
+      } else if (
+        activeToolRef.current === 'voice-chat' &&
+        sessionActiveRef.current &&
+        handsFreeRef.current
+      ) {
+        window.setTimeout(() => {
+          if (activeToolRef.current === 'voice-chat' && sessionActiveRef.current) {
+            void beginListening();
+          }
+        }, 450);
+      }
     } catch (err: any) {
       setErrorMsg(err?.message || 'Unable to process voice request.');
     } finally {
@@ -609,23 +621,61 @@ export const VoicePage: React.FC<VoicePageProps> = ({
     window.setTimeout(() => setCopiedId(null), 1800);
   };
 
+  const voiceStatusBadge = isProcessing
+    ? { label: 'Processing', dot: 'bg-sky-400 animate-ping', cls: 'bg-sky-500/20 border-sky-400/45 text-sky-200' }
+    : isListening || isRecordingAudio
+    ? { label: 'Listening', dot: 'bg-rose-400 animate-pulse', cls: 'bg-rose-500/20 border-rose-400/45 text-rose-200' }
+    : playback.isSpeaking
+    ? {
+        label: playback.isPaused ? 'Paused' : 'Speaking',
+        dot: 'bg-purple-400 animate-pulse',
+        cls: 'bg-purple-500/25 border-purple-400/45 text-purple-100',
+      }
+    : { label: 'Ready', dot: 'bg-emerald-400', cls: 'bg-emerald-500/15 border-emerald-400/35 text-emerald-200' };
+
   return (
     <div className="max-w-5xl mx-auto w-full px-3 sm:px-6 py-5 pb-32 space-y-5">
       {/* Header Banner */}
-      <div className="glass-card rounded-3xl p-5 sm:p-6 border border-purple-400/35 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+      <div className="v2-neu-card rounded-3xl p-5 sm:p-6 border border-purple-400/35 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div className="space-y-1">
-          <div className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-purple-300">
-            <Radio className="w-4 h-4 text-purple-400" />
-            <span>Aadesh AI Voice Suite</span>
+          <div className="inline-flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-sky-300">
+            <Radio className="w-4 h-4 text-sky-400" />
+            <span>Aadesh AI · Voice Studio</span>
+            <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border text-[10px] font-extrabold ${voiceStatusBadge.cls}`}>
+              <span className={`w-1.5 h-1.5 rounded-full ${voiceStatusBadge.dot}`} />
+              <span>{voiceStatusBadge.label}</span>
+            </span>
           </div>
-          <h1 className="text-xl sm:text-2xl font-black text-white">Voice Studio &amp; Speech Tools</h1>
+          <h1 className="text-xl sm:text-2xl font-black text-white">Voice Assistant &amp; Speech Hub</h1>
           <p className="text-xs sm:text-sm text-purple-200/75">
-            Speak, translate, transcribe, listen, and generate AI speech across global languages.
+            Speak, translate, transcribe, listen, and generate downloadable AI speech across global languages.
           </p>
         </div>
 
-        {/* Microphone Permission Status + Request Button */}
+        {/* Voice Reader Toggle + Microphone Permission Button */}
         <div className="flex flex-wrap items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={() => {
+              const next = !settings.autoSpeakAIResponses;
+              if (!next) voiceAssistant.stopSpeaking();
+              onUpdateSettings({ autoSpeakAIResponses: next });
+            }}
+            aria-pressed={Boolean(settings.autoSpeakAIResponses)}
+            className={`min-h-[40px] px-3.5 py-2 rounded-2xl border text-xs font-bold flex items-center gap-2 cursor-pointer transition-all ${
+              settings.autoSpeakAIResponses
+                ? 'bg-sky-500/20 border-sky-400/50 text-sky-100'
+                : 'v2-neu-inset text-purple-200/80 hover:text-white'
+            }`}
+          >
+            {settings.autoSpeakAIResponses ? (
+              <Volume2 className="w-4 h-4 text-sky-300 shrink-0" />
+            ) : (
+              <VolumeX className="w-4 h-4 text-purple-300/70 shrink-0" />
+            )}
+            <span>Voice Reader: {settings.autoSpeakAIResponses ? 'ON' : 'OFF'}</span>
+          </button>
+
           <button
             type="button"
             onClick={() => void requestMicrophoneAccess()}
@@ -640,12 +690,12 @@ export const VoicePage: React.FC<VoicePageProps> = ({
             <ShieldCheck className="w-4 h-4 shrink-0" />
             <span>
               {micPermission === 'granted'
-                ? 'Microphone Allowed'
+                ? 'Mic Allowed'
                 : micPermission === 'denied'
-                ? 'Microphone Blocked (Retry)'
+                ? 'Mic Blocked (Retry)'
                 : micPermission === 'unsupported'
                 ? 'Mic Unavailable'
-                : 'Enable Microphone'}
+                : 'Allow Mic'}
             </span>
           </button>
         </div>
@@ -667,11 +717,11 @@ export const VoicePage: React.FC<VoicePageProps> = ({
               }}
               className={`min-h-[82px] p-3 rounded-2xl border text-left flex flex-col justify-between gap-2 transition-all cursor-pointer ${
                 isSelected
-                  ? 'purple-glow-btn text-white border-purple-300/60 shadow-lg'
-                  : 'glass-card border-purple-400/25 hover:border-purple-400/55 text-purple-100'
+                  ? 'electric-purple-btn text-white border-sky-300/60 shadow-lg'
+                  : 'v2-neu-card border-purple-400/25 hover:border-sky-400/55 text-purple-100'
               }`}
             >
-              <ToolIcon className={`w-4 h-4 ${isSelected ? 'text-white' : 'text-purple-300'}`} />
+              <ToolIcon className={`w-4 h-4 ${isSelected ? 'text-white' : 'text-sky-300'}`} />
               <div>
                 <div className="text-xs font-bold leading-tight">{tool.title}</div>
                 <div
@@ -705,7 +755,7 @@ export const VoicePage: React.FC<VoicePageProps> = ({
       )}
 
       {/* Main Voice Stage */}
-      <div className="glass-card rounded-3xl p-5 sm:p-7 border border-purple-400/35 space-y-6">
+      <div className="v2-neu-card rounded-3xl p-5 sm:p-7 border border-purple-400/35 space-y-6">
         {/* Language, Voice, Speed & Volume Controls */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
           <div className="space-y-1">
@@ -827,11 +877,43 @@ export const VoicePage: React.FC<VoicePageProps> = ({
           </div>
         </div>
 
-        {/* Center Large Animated Microphone & Sound-Wave Visualizer */}
+        {/* Voice Persona Selector Pills */}
+        <div className="flex flex-wrap items-center gap-1.5 pt-1">
+          <span className="text-[11px] font-bold text-purple-200/80 mr-1">Persona:</span>
+          {VOICE_PERSONAS.map((persona) => {
+            const active = (settings.voicePersona || 'friendly') === persona.id;
+            return (
+              <button
+                key={persona.id}
+                type="button"
+                onClick={() =>
+                  onUpdateSettings({
+                    voicePersona: persona.id,
+                    voicePitch: persona.pitch,
+                  })
+                }
+                className={`px-3 py-1 rounded-full text-[11px] font-bold transition-all cursor-pointer border ${
+                  active
+                    ? 'bg-gradient-to-r from-indigo-600/80 to-sky-500/80 border-sky-300/60 text-white shadow-sm'
+                    : 'bg-white/5 hover:bg-white/10 border-white/10 text-purple-200/80'
+                }`}
+              >
+                {persona.name}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Center Large Animated Electric-Blue + Soft-Purple Voice Orb & Sound-Wave Visualizer */}
         <div className="py-3 flex flex-col items-center space-y-5">
           <div className="relative flex items-center justify-center">
+            <span
+              className={`absolute w-40 h-40 rounded-full border border-sky-400/20 ${
+                isListening || isRecordingAudio || playback.isSpeaking ? 'animate-pulse' : ''
+              }`}
+            />
             {(isListening || isRecordingAudio || playback.isSpeaking) && (
-              <span className="absolute w-36 h-36 rounded-full bg-purple-500/25 animate-ping" />
+              <span className="absolute w-36 h-36 rounded-full bg-gradient-to-tr from-sky-500/25 to-purple-500/25 animate-ping" />
             )}
             <button
               type="button"
@@ -840,10 +922,10 @@ export const VoicePage: React.FC<VoicePageProps> = ({
               aria-label={isListening ? 'Stop listening' : 'Activate voice tool'}
               className={`relative w-28 h-28 rounded-full flex items-center justify-center transition-all shadow-2xl cursor-pointer border-2 ${
                 isListening || isRecordingAudio
-                  ? 'bg-gradient-to-tr from-rose-600 to-purple-600 border-rose-300 scale-105 shadow-[0_0_45px_rgba(244,63,94,0.5)]'
+                  ? 'bg-gradient-to-tr from-rose-600 via-purple-600 to-sky-500 border-rose-300 scale-105 shadow-[0_0_50px_rgba(244,63,94,0.5)]'
                   : playback.isSpeaking
-                  ? 'bg-gradient-to-tr from-indigo-600 to-purple-600 border-purple-300 shadow-[0_0_45px_rgba(139,92,246,0.55)]'
-                  : 'purple-glow-btn border-purple-300/60'
+                  ? 'bg-gradient-to-tr from-sky-500 via-indigo-600 to-purple-600 border-sky-300 shadow-[0_0_50px_rgba(59,130,246,0.55)]'
+                  : 'electric-purple-btn border-sky-300/60'
               } disabled:opacity-50`}
             >
               {isProcessing ? (
@@ -859,7 +941,7 @@ export const VoicePage: React.FC<VoicePageProps> = ({
           </div>
 
           {/* Sound-Wave Visualization */}
-          <div className="flex items-center justify-center gap-1.5 h-12 px-5 rounded-2xl bg-[#0b0718]/90 border border-purple-400/30">
+          <div className="flex items-center justify-center gap-1.5 h-12 px-5 rounded-2xl v2-neu-inset border border-sky-400/25">
             {[0.45, 0.85, 0.6, 1.0, 0.72, 0.95, 0.55, 0.9, 0.75, 1.0, 0.62, 0.88, 0.5, 0.8].map(
               (w, i) => {
                 const active = isListening || isRecordingAudio;

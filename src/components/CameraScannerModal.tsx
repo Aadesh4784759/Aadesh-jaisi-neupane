@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Camera, ScanText, X, RefreshCw, Upload, Check, AlertCircle } from 'lucide-react';
+import { Camera, ScanText, X, RefreshCw, Upload, Check, AlertCircle, ShieldCheck } from 'lucide-react';
 
 interface CameraScannerModalProps {
   isOpen: boolean;
@@ -20,6 +20,8 @@ export const CameraScannerModal: React.FC<CameraScannerModalProps> = ({
   const uploadInputRef = useRef<HTMLInputElement>(null);
 
   const [facingMode, setFacingMode] = useState<'environment' | 'user'>('environment');
+  const [cameraConsentGranted, setCameraConsentGranted] = useState(false);
+  const [isRequestingCamera, setIsRequestingCamera] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [capturedUrl, setCapturedUrl] = useState<string | null>(null);
 
@@ -30,51 +32,63 @@ export const CameraScannerModal: React.FC<CameraScannerModalProps> = ({
     }
   };
 
+  const requestAndStartCamera = async (targetFacing: 'environment' | 'user' = facingMode) => {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setCameraError(
+        'Live camera preview is unavailable in this browser. Upload a photo or capture natively below.'
+      );
+      return;
+    }
+    setIsRequestingCamera(true);
+    setCameraError(null);
+    try {
+      stopCamera();
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: targetFacing },
+        audio: false,
+      });
+      streamRef.current = stream;
+      setCameraConsentGranted(true);
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+      }
+    } catch (err: any) {
+      setCameraConsentGranted(false);
+      const errName = err?.name || '';
+      if (errName === 'NotAllowedError' || errName === 'PermissionDeniedError') {
+        setCameraError(
+          'Camera permission was denied. You can allow camera access in browser settings or upload an image file below.'
+        );
+      } else if (errName === 'NotFoundError' || errName === 'DevicesNotFoundError') {
+        setCameraError('No camera device was detected. You can still upload an image file below.');
+      } else {
+        setCameraError(
+          err?.message || 'Camera unavailable right now. Upload a photo or capture natively below.'
+        );
+      }
+    } finally {
+      setIsRequestingCamera(false);
+    }
+  };
+
   useEffect(() => {
     if (!isOpen) {
       stopCamera();
       setCapturedUrl(null);
       setCameraError(null);
+      setCameraConsentGranted(false);
+      setIsRequestingCamera(false);
       return;
     }
 
-    let cancelled = false;
-    setCameraError(null);
-
-    const startCamera = async () => {
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        setCameraError('Live camera preview is unavailable in this browser. Upload a photo or capture natively below.');
-        return;
-      }
-      try {
-        stopCamera();
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode },
-          audio: false,
-        });
-        if (cancelled) {
-          stream.getTracks().forEach((t) => t.stop());
-          return;
-        }
-        streamRef.current = stream;
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-        }
-      } catch (err: any) {
-        setCameraError(
-          err?.message || 'Camera permission denied or no camera device detected. You can upload a file below.'
-        );
-      }
-    };
-
-    if (!capturedUrl) {
-      void startCamera();
+    if (cameraConsentGranted && !capturedUrl) {
+      void requestAndStartCamera(facingMode);
     }
 
     return () => {
-      cancelled = true;
       stopCamera();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, facingMode, capturedUrl]);
 
   if (!isOpen) return null;
@@ -169,6 +183,34 @@ export const CameraScannerModal: React.FC<CameraScannerModalProps> = ({
               <div className="p-6 text-center space-y-3">
                 <AlertCircle className="w-8 h-8 text-amber-400 mx-auto" />
                 <p className="text-xs text-purple-100/85 leading-relaxed">{cameraError}</p>
+                <button
+                  type="button"
+                  onClick={() => void requestAndStartCamera(facingMode)}
+                  className="px-4 py-2 rounded-xl bg-purple-600/35 hover:bg-purple-600/50 border border-purple-400/40 text-xs font-bold text-white cursor-pointer"
+                >
+                  Try Camera Again
+                </button>
+              </div>
+            ) : !cameraConsentGranted ? (
+              <div className="p-6 text-center space-y-3 max-w-sm">
+                <div className="w-12 h-12 rounded-2xl bg-purple-600/25 border border-purple-400/40 flex items-center justify-center mx-auto text-purple-200">
+                  <ShieldCheck className="w-6 h-6" />
+                </div>
+                <div className="space-y-1">
+                  <h4 className="text-sm font-bold text-white">Camera Access Needed</h4>
+                  <p className="text-xs text-purple-200/75 leading-relaxed">
+                    Aadesh AI only activates your camera when you choose to take a live photo or scan a document.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  disabled={isRequestingCamera}
+                  onClick={() => void requestAndStartCamera(facingMode)}
+                  className="purple-glow-btn px-5 py-2.5 rounded-xl text-xs font-bold text-white inline-flex items-center gap-2 cursor-pointer disabled:opacity-60"
+                >
+                  <Camera className="w-4 h-4" />
+                  <span>{isRequestingCamera ? 'Requesting Camera...' : 'Enable Live Camera'}</span>
+                </button>
               </div>
             ) : (
               <>
@@ -219,7 +261,7 @@ export const CameraScannerModal: React.FC<CameraScannerModalProps> = ({
                   <span>{mode === 'scanner' ? 'Upload Page' : 'Choose / Native Cam'}</span>
                 </button>
 
-                {!cameraError && (
+                {cameraConsentGranted && !cameraError && (
                   <div className="flex items-center gap-2">
                     <button
                       type="button"

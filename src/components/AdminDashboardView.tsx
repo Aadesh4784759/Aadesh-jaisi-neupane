@@ -15,6 +15,7 @@ import {
   Cpu,
   Megaphone,
   Check,
+  Server,
 } from 'lucide-react';
 import {
   AdminConversationSummary,
@@ -38,12 +39,22 @@ interface AdminDashboardViewProps {
   onOpenAuth: () => void;
 }
 
+interface ServerErrorRecord {
+  timestamp: string;
+  route: string;
+  message: string;
+}
+
 interface ServerStatusPayload {
   aiConfigured: boolean;
   primaryModel: string;
   fallbackModels: string[];
   supportedLanguagesCount: number;
   uptimeSeconds: number;
+  nodeEnv?: string;
+  totalApiRequests?: number;
+  failedApiRequests?: number;
+  recentErrors?: ServerErrorRecord[];
 }
 
 export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
@@ -83,7 +94,6 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
         return;
       }
 
-      // Server-side cryptographic Firebase token verification against OWNER_ADMIN_EMAIL
       const res = await fetch('/api/admin/overview', {
         headers: { Authorization: `Bearer ${idToken}` },
       });
@@ -185,7 +195,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   if (verifying) {
     return (
       <div className="max-w-4xl mx-auto px-4 py-16 text-center space-y-3">
-        <RefreshCw className="w-8 h-8 text-purple-400 animate-spin mx-auto" />
+        <RefreshCw className="w-8 h-8 text-sky-400 animate-spin mx-auto" />
         <p className="text-sm text-gray-300 font-semibold">
           Verifying server-side owner credentials...
         </p>
@@ -196,7 +206,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   if (!authorized) {
     return (
       <div className="max-w-xl mx-auto px-4 py-12 pb-32">
-        <div className="glass-card rounded-3xl p-6 sm:p-8 border border-rose-500/40 text-center space-y-4 shadow-2xl">
+        <div className="v2-neu-card rounded-3xl p-6 sm:p-8 border border-rose-500/40 text-center space-y-4 shadow-2xl">
           <div className="w-14 h-14 rounded-2xl bg-rose-950/60 border border-rose-500/40 flex items-center justify-center mx-auto text-rose-400">
             <Lock className="w-7 h-7" />
           </div>
@@ -207,13 +217,13 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
           <div className="flex flex-wrap items-center justify-center gap-2 pt-2">
             <button
               onClick={onOpenAuth}
-              className="purple-glow-btn px-5 py-2.5 rounded-xl text-xs font-bold text-white cursor-pointer"
+              className="electric-purple-btn px-5 py-2.5 rounded-xl text-xs font-bold text-white cursor-pointer"
             >
               Sign In as Owner
             </button>
             <button
               onClick={loadOwnerDashboard}
-              className="px-4 py-2.5 rounded-xl bg-[#131520] border border-[#232738] text-xs font-semibold text-gray-300 hover:text-white cursor-pointer"
+              className="px-4 py-2.5 rounded-xl v2-neu-inset border border-white/10 text-xs font-semibold text-gray-300 hover:text-white cursor-pointer"
             >
               Re-verify Session
             </button>
@@ -223,13 +233,11 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     );
   }
 
-  // Compute Stats
   const totalUsers = users.length;
   const activeUsers = users.filter((u) => u.status !== 'suspended').length;
   const totalConversations = users.reduce((sum, u) => sum + (u.conversationCount || 0), 0);
   const totalMessages = users.reduce((sum, u) => sum + (u.messageCount || 0), 0) + analyticsEvents.length;
 
-  // Daily Registrations (last 7 days)
   const dailyMap: Record<string, number> = {};
   for (let i = 6; i >= 0; i--) {
     const d = new Date();
@@ -252,24 +260,28 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
       u.userId.toLowerCase().includes(searchTerm.toLowerCase())
   );
 
+  const uptimeMins = serverStatus?.uptimeSeconds
+    ? `${Math.floor(serverStatus.uptimeSeconds / 60)}m ${serverStatus.uptimeSeconds % 60}s`
+    : '0m';
+
   return (
-    <div className="max-w-7xl mx-auto px-3 sm:px-6 py-4 space-y-6 pb-32 w-full">
+    <div className="max-w-7xl mx-auto px-3 sm:px-6 py-4 space-y-6 pb-32 md:pb-12 w-full">
       {/* Header Banner */}
-      <div className="glass-card rounded-2xl p-4 sm:p-6 border border-amber-500/40 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-xl">
+      <div className="v2-neu-card rounded-3xl p-4 sm:p-6 border border-amber-500/40 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-xl">
         <div>
           <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-950/70 border border-amber-500/40 text-amber-300 text-xs font-bold mb-1">
             <ShieldCheck className="w-3.5 h-3.5 text-amber-400" />
             <span>Verified Owner Admin Control · {OWNER_ADMIN_EMAIL}</span>
           </div>
-          <h2 className="text-xl sm:text-2xl font-black text-white">Platform Admin & User Operations</h2>
-          <p className="text-xs text-gray-400">
-            Real-time Firestore accounts, daily registrations, usage telemetry, and server health.
+          <h2 className="text-xl sm:text-2xl font-black text-white">Platform Admin &amp; Telemetry Console</h2>
+          <p className="text-xs text-purple-200/75">
+            Real-time Firestore accounts, daily registrations, usage metrics, and live Express API telemetry.
           </p>
         </div>
 
         <button
           onClick={loadOwnerDashboard}
-          className="px-4 py-2 rounded-xl bg-[#131520] hover:bg-purple-900/40 border border-[#232738] text-purple-200 text-xs font-semibold flex items-center gap-2 cursor-pointer"
+          className="electric-purple-btn px-4 py-2.5 rounded-xl text-white text-xs font-bold flex items-center gap-2 cursor-pointer self-start sm:self-center"
         >
           <RefreshCw className="w-3.5 h-3.5" />
           <span>Refresh Live Data</span>
@@ -292,37 +304,37 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
 
       {/* KPI Cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-5">
-        <div className="glass-card rounded-2xl p-4 sm:p-5 border border-purple-500/30 space-y-1.5">
-          <div className="flex items-center justify-between text-xs text-gray-400">
+        <div className="v2-neu-card rounded-2xl p-4 sm:p-5 border border-purple-500/30 space-y-1.5">
+          <div className="flex items-center justify-between text-xs text-purple-200/75">
             <span>Total Registered Users</span>
             <Users className="w-4 h-4 text-purple-400" />
           </div>
-          <div className="text-2xl sm:text-3xl font-black text-white">{totalUsers}</div>
+          <div className="text-2xl sm:text-3xl font-black text-white tabular-nums">{totalUsers}</div>
           <div className="text-[11px] text-purple-300">Firestore authenticated profiles</div>
         </div>
 
-        <div className="glass-card rounded-2xl p-4 sm:p-5 border border-emerald-500/30 space-y-1.5">
-          <div className="flex items-center justify-between text-xs text-gray-400">
+        <div className="v2-neu-card rounded-2xl p-4 sm:p-5 border border-emerald-500/30 space-y-1.5">
+          <div className="flex items-center justify-between text-xs text-purple-200/75">
             <span>Active Users</span>
             <UserCheck className="w-4 h-4 text-emerald-400" />
           </div>
-          <div className="text-2xl sm:text-3xl font-black text-white">{activeUsers}</div>
-          <div className="text-[11px] text-emerald-300">
+          <div className="text-2xl sm:text-3xl font-black text-white tabular-nums">{activeUsers}</div>
+          <div className="text-[11px] text-emerald-300 tabular-nums">
             {totalUsers > 0 ? `${Math.round((activeUsers / totalUsers) * 100)}% active standing` : 'Ready'}
           </div>
         </div>
 
-        <div className="glass-card rounded-2xl p-4 sm:p-5 border border-indigo-500/30 space-y-1.5">
-          <div className="flex items-center justify-between text-xs text-gray-400">
+        <div className="v2-neu-card rounded-2xl p-4 sm:p-5 border border-sky-500/30 space-y-1.5">
+          <div className="flex items-center justify-between text-xs text-purple-200/75">
             <span>Conversations Tracked</span>
-            <MessageSquare className="w-4 h-4 text-indigo-400" />
+            <MessageSquare className="w-4 h-4 text-sky-400" />
           </div>
-          <div className="text-2xl sm:text-3xl font-black text-white">{totalConversations}</div>
-          <div className="text-[11px] text-indigo-300">{totalMessages} total messages & events</div>
+          <div className="text-2xl sm:text-3xl font-black text-white tabular-nums">{totalConversations}</div>
+          <div className="text-[11px] text-sky-300 tabular-nums">{totalMessages} total messages &amp; events</div>
         </div>
 
-        <div className="glass-card rounded-2xl p-4 sm:p-5 border border-amber-500/30 space-y-1.5">
-          <div className="flex items-center justify-between text-xs text-gray-400">
+        <div className="v2-neu-card rounded-2xl p-4 sm:p-5 border border-amber-500/30 space-y-1.5">
+          <div className="flex items-center justify-between text-xs text-purple-200/75">
             <span>Gemini Engine Status</span>
             <Cpu className="w-4 h-4 text-amber-400" />
           </div>
@@ -335,15 +347,77 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
         </div>
       </div>
 
+      {/* Server Telemetry & Error Monitor */}
+      <div className="v2-neu-card rounded-3xl p-5 border border-sky-400/30 space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-3">
+          <h3 className="text-sm font-bold text-white flex items-center gap-2">
+            <Server className="w-4 h-4 text-sky-400" />
+            <span>Runtime Server Telemetry &amp; Error Monitor</span>
+          </h3>
+          <span className="text-[11px] text-sky-300 font-semibold tabular-nums">
+            Env: {serverStatus?.nodeEnv || 'development'} · Uptime: {uptimeMins}
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+          <div className="p-3.5 rounded-2xl v2-neu-inset border border-white/10 space-y-1">
+            <div className="text-purple-300/75">Total API Requests</div>
+            <div className="text-xl font-black text-white tabular-nums">
+              {serverStatus?.totalApiRequests ?? 0}
+            </div>
+          </div>
+          <div className="p-3.5 rounded-2xl v2-neu-inset border border-white/10 space-y-1">
+            <div className="text-purple-300/75">Failed API Responses</div>
+            <div
+              className={`text-xl font-black tabular-nums ${
+                (serverStatus?.failedApiRequests ?? 0) > 0 ? 'text-rose-400' : 'text-emerald-400'
+              }`}
+            >
+              {serverStatus?.failedApiRequests ?? 0}
+            </div>
+          </div>
+          <div className="p-3.5 rounded-2xl v2-neu-inset border border-white/10 space-y-1">
+            <div className="text-purple-300/75">Fallback Models</div>
+            <div className="text-xs font-bold text-white truncate">
+              {serverStatus?.fallbackModels?.join(', ') || 'gemini-2.5-flash'}
+            </div>
+          </div>
+        </div>
+
+        {serverStatus?.recentErrors && serverStatus.recentErrors.length > 0 ? (
+          <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
+            {serverStatus.recentErrors.map((errItem, idx) => (
+              <div
+                key={`${errItem.timestamp}-${idx}`}
+                className="p-2.5 rounded-xl bg-rose-950/40 border border-rose-500/30 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-2"
+              >
+                <div className="min-w-0">
+                  <span className="font-mono font-bold text-rose-300 mr-2">{errItem.route}</span>
+                  <span className="text-rose-100 break-words">{errItem.message}</span>
+                </div>
+                <span className="text-[10px] text-rose-300/75 shrink-0 tabular-nums">
+                  {new Date(errItem.timestamp).toLocaleTimeString()}
+                </span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="p-3 rounded-xl v2-neu-inset text-xs text-emerald-300 flex items-center gap-2">
+            <Check className="w-4 h-4 shrink-0" />
+            <span>Zero server errors logged during current uptime.</span>
+          </div>
+        )}
+      </div>
+
       {/* Daily Registrations + Owner Broadcast Banner */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="glass-card rounded-2xl p-5 border border-purple-500/30 space-y-4">
+        <div className="v2-neu-card rounded-3xl p-5 border border-purple-500/30 space-y-4">
           <div className="flex items-center justify-between border-b border-white/10 pb-2.5">
             <h3 className="text-sm font-bold text-white flex items-center gap-2">
               <Calendar className="w-4 h-4 text-purple-400" />
               <span>Daily User Registrations (7 Days)</span>
             </h3>
-            <span className="text-xs text-gray-400">Firestore Timeline</span>
+            <span className="text-xs text-purple-200/70">Firestore Timeline</span>
           </div>
 
           <div className="h-36 flex items-end justify-between gap-2 pt-4">
@@ -351,12 +425,12 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
               const pct = Math.max(10, Math.round((count / maxDailyReg) * 100));
               return (
                 <div key={dateKey} className="flex-1 flex flex-col items-center gap-1.5 h-full justify-end">
-                  <span className="text-[10px] font-bold text-purple-300">{count}</span>
+                  <span className="text-[10px] font-bold text-sky-300 tabular-nums">{count}</span>
                   <div
                     style={{ height: `${pct}%` }}
-                    className="w-full max-w-[36px] rounded-t-lg bg-gradient-to-t from-purple-600 to-indigo-400"
+                    className="w-full max-w-[36px] rounded-t-lg bg-gradient-to-t from-sky-500 to-purple-500"
                   />
-                  <span className="text-[10px] text-gray-400">{dateKey.slice(5)}</span>
+                  <span className="text-[10px] text-purple-200/70 tabular-nums">{dateKey.slice(5)}</span>
                 </div>
               );
             })}
@@ -365,19 +439,19 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
 
         <form
           onSubmit={handleSaveGlobalBanner}
-          className="glass-card rounded-2xl p-5 border border-purple-500/30 space-y-3"
+          className="v2-neu-card rounded-3xl p-5 border border-purple-500/30 space-y-3"
         >
           <div className="flex items-center justify-between border-b border-white/10 pb-2.5">
             <h3 className="text-sm font-bold text-white flex items-center gap-2">
               <Megaphone className="w-4 h-4 text-amber-400" />
-              <span>Global Announcement & Controls</span>
+              <span>Global Announcement &amp; Controls</span>
             </h3>
             <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer">
               <input
                 type="checkbox"
                 checked={maintenanceMode}
                 onChange={(e) => setMaintenanceMode(e.target.checked)}
-                className="accent-purple-500"
+                className="accent-sky-400"
               />
               <span>Maintenance Notice</span>
             </label>
@@ -388,13 +462,13 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
             value={announcement}
             onChange={(e) => setAnnouncement(e.target.value)}
             placeholder="Optional notice banner shown to active platform visitors..."
-            className="w-full bg-[#090a0f] border border-[#232738] focus:border-purple-500 rounded-xl p-3 text-xs text-white outline-none resize-none"
+            className="w-full v2-neu-inset border border-white/10 focus:border-sky-400 rounded-xl p-3 text-xs text-white outline-none resize-none"
           />
 
           <button
             type="submit"
             disabled={savingAnnouncement}
-            className="purple-glow-btn px-4 py-2 rounded-xl text-xs font-bold text-white cursor-pointer disabled:opacity-50"
+            className="electric-purple-btn px-4 py-2.5 rounded-xl text-xs font-bold text-white cursor-pointer disabled:opacity-50"
           >
             {savingAnnouncement ? 'Publishing...' : 'Publish Platform Notice'}
           </button>
@@ -403,11 +477,10 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
 
       {/* User Management & Authorized Conversation Audit */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Users Table */}
-        <div className="lg:col-span-7 glass-card rounded-2xl p-5 border border-purple-500/30 space-y-4">
+        <div className="lg:col-span-7 v2-neu-card rounded-3xl p-5 border border-purple-500/30 space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-white/10 pb-3">
             <h3 className="text-sm font-bold text-white flex items-center gap-2">
-              <Activity className="w-4 h-4 text-purple-400" />
+              <Activity className="w-4 h-4 text-sky-400" />
               <span>Registered Accounts ({filteredUsers.length})</span>
             </h3>
 
@@ -418,14 +491,14 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
                 placeholder="Search name, email, UID..."
-                className="w-full bg-[#090a0f] border border-[#232738] rounded-xl pl-8 pr-3 py-1.5 text-xs text-white outline-none focus:border-purple-500"
+                className="w-full v2-neu-inset border border-white/10 rounded-xl pl-8 pr-3 py-1.5 text-xs text-white outline-none focus:border-sky-400"
               />
             </div>
           </div>
 
           <div className="overflow-x-auto max-h-96 overflow-y-auto">
             <table className="w-full text-left text-xs border-collapse">
-              <thead className="text-gray-400 border-b border-white/10">
+              <thead className="text-purple-200/75 border-b border-white/10">
                 <tr>
                   <th className="py-2 pr-3">User</th>
                   <th className="py-2 pr-3">Registered</th>
@@ -438,7 +511,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                   <tr
                     key={u.userId}
                     className={`hover:bg-white/5 ${
-                      selectedUser?.userId === u.userId ? 'bg-purple-950/35' : ''
+                      selectedUser?.userId === u.userId ? 'bg-sky-500/10' : ''
                     }`}
                   >
                     <td className="py-2.5 pr-3">
@@ -458,7 +531,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                         </div>
                       </div>
                     </td>
-                    <td className="py-2.5 pr-3 text-gray-400 whitespace-nowrap">
+                    <td className="py-2.5 pr-3 text-gray-400 whitespace-nowrap tabular-nums">
                       {new Date(u.createdAt).toLocaleDateString()}
                     </td>
                     <td className="py-2.5 pr-3">
@@ -475,7 +548,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                     <td className="py-2.5 text-right space-x-1.5 whitespace-nowrap">
                       <button
                         onClick={() => handleSelectUserForAudit(u)}
-                        className="px-2 py-1 rounded-lg bg-[#131520] hover:bg-purple-900/50 border border-purple-500/30 text-purple-200 cursor-pointer"
+                        className="px-2 py-1 rounded-lg v2-neu-inset hover:border-sky-400/40 border border-white/10 text-sky-200 cursor-pointer"
                         title="Inspect user conversations"
                       >
                         <Eye className="w-3.5 h-3.5 inline" />
@@ -508,11 +581,10 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
           </div>
         </div>
 
-        {/* Authorized Conversation & Message Overview */}
-        <div className="lg:col-span-5 glass-card rounded-2xl p-5 border border-purple-500/30 space-y-4">
+        <div className="lg:col-span-5 v2-neu-card rounded-3xl p-5 border border-purple-500/30 space-y-4">
           <div className="border-b border-white/10 pb-2.5">
             <h3 className="text-sm font-bold text-white">Authorized Conversation Audit</h3>
-            <p className="text-[11px] text-gray-400">
+            <p className="text-[11px] text-purple-200/70">
               {selectedUser
                 ? `Inspecting ${selectedUser.displayName} (${selectedUser.email || selectedUser.userId})`
                 : 'Select a user from the table to inspect conversation logs.'}
@@ -520,7 +592,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
           </div>
 
           {loadingSubData && (
-            <div className="py-6 text-center text-xs text-purple-300 flex items-center justify-center gap-2">
+            <div className="py-6 text-center text-xs text-sky-300 flex items-center justify-center gap-2">
               <RefreshCw className="w-4 h-4 animate-spin" />
               <span>Loading encrypted records...</span>
             </div>
@@ -538,12 +610,12 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                       onClick={() => handleInspectConversation(c)}
                       className={`w-full text-left p-2.5 rounded-xl border text-xs flex items-center justify-between cursor-pointer ${
                         selectedConvTitle === c.title
-                          ? 'bg-purple-900/40 border-purple-400 text-white'
-                          : 'bg-[#090a0f] border-[#232738] text-gray-300 hover:border-purple-500/40'
+                          ? 'bg-sky-500/15 border-sky-400 text-white'
+                          : 'v2-neu-inset border-white/10 text-gray-300 hover:border-sky-400/40'
                       }`}
                     >
                       <span className="truncate font-semibold">{c.title}</span>
-                      <span className="text-[10px] text-purple-300 shrink-0 ml-2">
+                      <span className="text-[10px] text-sky-300 shrink-0 ml-2">
                         {c.language?.toUpperCase()}
                       </span>
                     </button>
@@ -553,15 +625,15 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
 
               {selectedConvMessages.length > 0 && (
                 <div className="border-t border-white/10 pt-3 space-y-2 max-h-56 overflow-y-auto pr-1">
-                  <div className="text-[11px] font-bold text-purple-300">Messages: {selectedConvTitle}</div>
+                  <div className="text-[11px] font-bold text-sky-300">Messages: {selectedConvTitle}</div>
                   {selectedConvMessages.map((m) => (
                     <div
                       key={m.id}
-                      className="p-2.5 rounded-xl bg-[#090a0f] border border-[#232738] text-xs space-y-1"
+                      className="p-2.5 rounded-xl v2-neu-inset border border-white/10 text-xs space-y-1"
                     >
                       <div className="flex justify-between text-[10px] text-gray-400 font-bold uppercase">
                         <span>{m.role}</span>
-                        <span>{new Date(m.timestamp).toLocaleTimeString()}</span>
+                        <span className="tabular-nums">{new Date(m.timestamp).toLocaleTimeString()}</span>
                       </div>
                       <p className="text-gray-200 whitespace-pre-wrap">{m.content}</p>
                     </div>

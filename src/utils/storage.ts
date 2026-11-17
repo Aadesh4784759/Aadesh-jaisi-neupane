@@ -7,9 +7,11 @@ import {
   ChatSession,
   EngagementMetrics,
   GeotaggedMedia,
+  LoginActivityEntry,
   PersonalTask,
   StudyProgressItem,
   TransferHistoryEntry,
+  TranslationHistoryEntry,
   UserProfile,
 } from '../types';
 import { INITIAL_BADGES, generateStreakHistory } from './gamification';
@@ -25,6 +27,8 @@ const STORAGE_KEYS = {
   USER_EXTRAS: 'aadesh_ai_user_extras_v1',
   VOICE_HISTORY: 'aadesh_ai_voice_history_v1',
   TRANSFER_HISTORY: 'aadesh_ai_transfer_history_v1',
+  TRANSLATION_HISTORY: 'aadesh_ai_translation_history_v1',
+  LOGIN_ACTIVITY: 'aadesh_ai_login_activity_v1',
   FOLDERS: 'aadesh_ai_folders_v1',
   MEMORIES: 'aadesh_ai_memories_v1',
   TASKS: 'aadesh_ai_tasks_v1',
@@ -62,15 +66,15 @@ export const DEFAULT_USER: UserProfile = {
   createdAt: Date.now(),
   lastActiveAt: Date.now(),
   preferredLanguage: 'en',
-  streakDays: 1,
-  longestStreak: 1,
-  xp: 50,
+  streakDays: 0,
+  longestStreak: 0,
+  xp: 0,
   level: 1,
-  levelTitle: 'Global Explorer',
+  levelTitle: 'Curious Novice',
   dailyGoalTarget: 5,
   dailyGoalCurrent: 0,
-  lastActiveDate: new Date().toISOString().slice(0, 10),
-  streakHistory: generateStreakHistory(1),
+  lastActiveDate: '',
+  streakHistory: generateStreakHistory(0),
   badges: INITIAL_BADGES,
 };
 
@@ -91,10 +95,18 @@ export const DEFAULT_SETTINGS: AppSettings = {
   offlineModeForce: false,
   screenReaderAnnounce: false,
   streamingResponses: true,
-  aiMemoryEnabled: true,
+  aiMemoryEnabled: false,
+  memoryConsent: 'pending',
   notificationsEnabled: true,
   soundEffects: true,
   streakReminders: true,
+  emailUpdatesEnabled: false,
+  privateAccount: false,
+  aiResponseMode: 'balanced',
+  focusMode: 'normal',
+  chatAppearance: 'spacious',
+  reducedAnimations: false,
+  biometricLockEnabled: false,
 };
 
 export const INITIAL_METRICS: EngagementMetrics = {
@@ -352,6 +364,21 @@ export const saveStoredSettings = (settings: AppSettings): void => {
       document.body.classList.remove('high-contrast');
     }
 
+    if (settings.reducedAnimations) {
+      document.body.classList.add('reduced-animations');
+    } else {
+      document.body.classList.remove('reduced-animations');
+    }
+
+    document.body.classList.remove('focus-mode-study', 'focus-mode-night', 'focus-mode-relax');
+    if (settings.focusMode === 'study') {
+      document.body.classList.add('focus-mode-study');
+    } else if (settings.focusMode === 'night') {
+      document.body.classList.add('focus-mode-night');
+    } else if (settings.focusMode === 'relax') {
+      document.body.classList.add('focus-mode-relax');
+    }
+
     document.body.classList.remove('font-size-large', 'font-size-xlarge');
     if (settings.fontSize === 'large') {
       document.body.classList.add('font-size-large');
@@ -594,6 +621,11 @@ export const saveStoredAutomationLogs = (
 };
 
 export interface UserLocalExtras {
+  nickname?: string;
+  age?: number;
+  onboardingCompleted?: boolean;
+  memoryConsent?: 'pending' | 'agreed' | 'disagreed';
+  lastSeenAt?: number;
   country?: string;
   countryFlag?: string;
   isManualCountry?: boolean;
@@ -645,4 +677,72 @@ export const saveStoredTransferHistory = (
     console.error('Failed to save transfer history:', err);
   }
 };
+
+export const getStoredTranslationHistory = (userId?: string): TranslationHistoryEntry[] => {
+  try {
+    const key = userId ? `${STORAGE_KEYS.TRANSLATION_HISTORY}_${userId}` : STORAGE_KEYS.TRANSLATION_HISTORY;
+    const raw = localStorage.getItem(key);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+};
+
+export const saveStoredTranslationHistory = (
+  entries: TranslationHistoryEntry[],
+  userId?: string
+): void => {
+  try {
+    const key = userId ? `${STORAGE_KEYS.TRANSLATION_HISTORY}_${userId}` : STORAGE_KEYS.TRANSLATION_HISTORY;
+    localStorage.setItem(key, JSON.stringify(entries.slice(0, 80)));
+  } catch (err) {
+    console.error('Failed to save translation history:', err);
+  }
+};
+
+export const getStoredLoginActivity = (userId?: string): LoginActivityEntry[] => {
+  try {
+    const key = userId ? `${STORAGE_KEYS.LOGIN_ACTIVITY}_${userId}` : STORAGE_KEYS.LOGIN_ACTIVITY;
+    const raw = localStorage.getItem(key);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+};
+
+export const recordLoginActivity = (
+  entry: { provider: string; email?: string; deviceSummary?: string },
+  userId?: string
+): LoginActivityEntry[] => {
+  const current = getStoredLoginActivity(userId);
+  const now = Date.now();
+  // Deduplicate rapid consecutive reloads within 10 minutes
+  if (current.length > 0 && now - current[0].timestamp < 10 * 60 * 1000 && current[0].provider === entry.provider) {
+    return current;
+  }
+  const browserUa =
+    typeof navigator !== 'undefined'
+      ? navigator.userAgent.includes('Mobile')
+        ? 'Mobile Browser'
+        : 'Desktop Browser'
+      : 'Web Session';
+  const nextEntry: LoginActivityEntry = {
+    id: `login-${now}`,
+    timestamp: now,
+    provider: entry.provider || 'firebase',
+    email: entry.email,
+    deviceSummary: entry.deviceSummary || browserUa,
+  };
+  const updated = [nextEntry, ...current].slice(0, 15);
+  try {
+    const key = userId ? `${STORAGE_KEYS.LOGIN_ACTIVITY}_${userId}` : STORAGE_KEYS.LOGIN_ACTIVITY;
+    localStorage.setItem(key, JSON.stringify(updated));
+  } catch {}
+  return updated;
+};
+
 

@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { User as FirebaseUser } from 'firebase/auth';
+import { motion, AnimatePresence } from 'motion/react';
 import {
   Mail,
   Lock,
@@ -65,10 +66,10 @@ export const MandatoryAuthGate: React.FC<MandatoryAuthGateProps> = ({
       if (firebaseUser.email) {
         setEmail(firebaseUser.email);
       }
-    } else if (!firebaseUser && stage === 'verify-email') {
-      setStage('login');
+    } else if (!firebaseUser) {
+      setStage((prev) => (prev === 'verify-email' ? 'login' : prev));
     }
-  }, [firebaseUser, stage]);
+  }, [firebaseUser]);
 
   useEffect(() => {
     if (resendCooldown <= 0) return;
@@ -112,6 +113,10 @@ export const MandatoryAuthGate: React.FC<MandatoryAuthGateProps> = ({
       setErrorMessage('Please enter both your email address and password.');
       return;
     }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      setErrorMessage('Please enter a valid email address (for example, name@example.com).');
+      return;
+    }
 
     setIsSubmitting(true);
     setErrorMessage(null);
@@ -139,6 +144,10 @@ export const MandatoryAuthGate: React.FC<MandatoryAuthGateProps> = ({
     const cleanEmail = email.trim();
     if (!cleanName || !cleanEmail || !password) {
       setErrorMessage('Please fill in your full name, email address, and password.');
+      return;
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      setErrorMessage('Please enter a valid email address (for example, name@example.com).');
       return;
     }
     if (password.length < 6) {
@@ -235,6 +244,10 @@ export const MandatoryAuthGate: React.FC<MandatoryAuthGateProps> = ({
     const cleanEmail = email.trim();
     if (!cleanEmail) {
       setErrorMessage('Please enter your registered email address.');
+      return;
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      setErrorMessage('Please enter a valid registered email address.');
       return;
     }
 
@@ -369,9 +382,17 @@ export const MandatoryAuthGate: React.FC<MandatoryAuthGateProps> = ({
             </div>
           )}
 
+          <AnimatePresence mode="wait" initial={false}>
+            <motion.div
+              key={stage}
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              transition={{ duration: 0.18, ease: 'easeOut' }}
+            >
           {/* STAGE 1: LOGIN FORM */}
           {stage === 'login' && (
-            <form onSubmit={handleLoginSubmit} className="space-y-4">
+            <form onSubmit={handleLoginSubmit} noValidate className="space-y-4">
               <div className="space-y-1.5">
                 <label className="text-xs font-semibold text-gray-300 block">
                   Email Address
@@ -445,7 +466,7 @@ export const MandatoryAuthGate: React.FC<MandatoryAuthGateProps> = ({
 
           {/* STAGE 2: SIGN UP FORM */}
           {stage === 'signup' && (
-            <form onSubmit={handleSignupSubmit} className="space-y-3.5">
+            <form onSubmit={handleSignupSubmit} noValidate className="space-y-3.5">
               <div className="space-y-1">
                 <label className="text-xs font-semibold text-gray-300 block">Full Name</label>
                 <div className="relative">
@@ -566,7 +587,7 @@ export const MandatoryAuthGate: React.FC<MandatoryAuthGateProps> = ({
 
               <button
                 type="submit"
-                disabled={isSubmitting || !agreedToTerms}
+                disabled={isSubmitting}
                 className="purple-glow-btn w-full py-2.5 px-4 rounded-xl text-sm font-bold text-white flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
               >
                 {isSubmitting ? (
@@ -650,7 +671,7 @@ export const MandatoryAuthGate: React.FC<MandatoryAuthGateProps> = ({
 
           {/* STAGE 4: FORGOT PASSWORD / RESET */}
           {stage === 'forgot-password' && (
-            <form onSubmit={handleResetPasswordSubmit} className="space-y-4">
+            <form onSubmit={handleResetPasswordSubmit} noValidate className="space-y-4">
               <div className="space-y-1">
                 <h2 className="text-base font-extrabold text-white flex items-center gap-2">
                   <KeyRound className="w-4 h-4 text-purple-400" />
@@ -703,6 +724,8 @@ export const MandatoryAuthGate: React.FC<MandatoryAuthGateProps> = ({
               </button>
             </form>
           )}
+            </motion.div>
+          </AnimatePresence>
 
           {/* Google Sign-In Divider & Button */}
           {(stage === 'login' || stage === 'signup') && (

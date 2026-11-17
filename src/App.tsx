@@ -1,9 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { User as FirebaseUser } from 'firebase/auth';
+import { motion, AnimatePresence } from 'motion/react';
 import confetti from 'canvas-confetti';
-import { ArrowLeft } from 'lucide-react';
+import { ArrowLeft, Sparkles, X } from 'lucide-react';
 import {
   AIConnectionHealth,
+  AIMemoryItem,
   AppSettings,
   ChatMessage,
   ChatSession,
@@ -20,6 +22,8 @@ import {
   getStoredMetrics,
   getStoredSessions,
   getStoredFolders,
+  getStoredMemories,
+  saveStoredMemories,
   getStoredSettings,
   getStoredUser,
   getUserLocalExtras,
@@ -31,10 +35,11 @@ import {
   saveStoredUser,
   saveStoredVoiceHistory,
   addVoiceHistoryEntry,
+  recordLoginActivity,
   recordMetricEvent,
 } from './utils/storage';
 import { SUPPORTED_LANGUAGES, VOICE_PERSONAS } from './data/languages';
-import { detectUserCountry } from './utils/country';
+import { detectUserCountry, detectCountryApproxViaIP } from './utils/country';
 import { Header } from './components/Header';
 import { NavigationDock, BottomNavTab } from './components/NavigationDock';
 import { FuturisticBackground } from './components/FuturisticBackground';
@@ -46,12 +51,17 @@ import { MoreView } from './components/MoreView';
 import { SettingsView } from './components/SettingsView';
 import { AdminDashboardView } from './components/AdminDashboardView';
 import { MandatoryAuthGate } from './components/MandatoryAuthGate';
+import { OnboardingModal } from './components/OnboardingModal';
 import { SettingsModal } from './components/SettingsModal';
 import { AuthModal } from './components/AuthModal';
 import { GamificationModal } from './components/GamificationModal';
 import { InstallAppModal } from './components/InstallAppModal';
 import { SplashScreen } from './components/SplashScreen';
-import { recordGamificationActivity } from './utils/gamification';
+import {
+  recordGamificationActivity,
+  evaluateCurrentStreakOnLoad,
+  generateStreakHistory,
+} from './utils/gamification';
 import { voiceAssistant } from './utils/speech';
 import { applyAvatarDynamicTheme, COLOR_THEME_PRESETS } from './utils/avatarTheme';
 import {
@@ -59,6 +69,7 @@ import {
   syncUserProfileToFirestore,
   loadUserProfileFromFirestore,
   loadConversationsFromFirestore,
+  loadMemoriesFromFirestore,
   saveConversationAndMessagesToFirestore,
   saveSingleMessageToFirestore,
   deleteConversationFromFirestore,
@@ -103,7 +114,55 @@ function sanitizeUserForFirestore(profile: UserProfile): UserProfile {
   };
 }
 
+const FRESH_LAUNCH_SESSION_KEY = 'aadesh_window_session_active';
+
+function detectFreshAppLaunch(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    const active = window.sessionStorage.getItem(FRESH_LAUNCH_SESSION_KEY) === '1';
+    if (!active) {
+      window.sessionStorage.setItem(FRESH_LAUNCH_SESSION_KEY, '1');
+      return true;
+    }
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+function resolveReopenNewChat(
+  sessionList: ChatSession[],
+  targetLanguage: string,
+  userId?: string
+): { sessions: ChatSession[]; sessionId: string } {
+  const existingEmpty = sessionList.find((s) => !s.messages || s.messages.length === 0);
+  if (existingEmpty) {
+    return {
+      sessions: sessionList,
+      sessionId: existingEmpty.id,
+    };
+  }
+  const now = Date.now();
+  const freshSession: ChatSession = {
+    id: `session-${now}`,
+    title: 'New Conversation',
+    createdAt: now,
+    updatedAt: now,
+    targetLanguage: targetLanguage || 'ne',
+    category: 'General',
+    messages: [],
+  };
+  const updated = [freshSession, ...sessionList];
+  saveStoredSessions(updated, userId);
+  return {
+    sessions: updated,
+    sessionId: freshSession.id,
+  };
+}
+
 export default function App() {
+  const isFreshLaunchRef = useRef<boolean>(detectFreshAppLaunch());
+  const hasUserPickedSessionRef = useRef<boolean>(false);
   const [settings, setSettings] = useState<AppSettings>(getStoredSettings());
   const [user, setUser] = useState<UserProfile>(getStoredUser());
   const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
@@ -122,14 +181,30 @@ export default function App() {
   const [initError, setInitError] = useState<string | null>(null);
   const [splashDismissed, setSplashDismissed] = useState<boolean>(false);
   const healthRequestInFlightRef = useRef<boolean>(false);
-  const [sessions, setSessions] = useState<ChatSession[]>(() => getStoredSessions(getStoredUser().id));
+  const initialLaunchState = useRef<{ sessions: ChatSession[]; sessionId: string } | null>(null);
+  if (!initialLaunchState.current) {
+    const initialUser = getStoredUser();
+    const stored = getStoredSessions(initialUser.id);
+    if (isFreshLaunchRef.current) {
+      initialLaunchState.current = resolveReopenNewChat(
+        stored,
+        settings.defaultTargetLanguage,
+        initialUser.id
+      );
+    } else {
+      initialLaunchState.current = {
+        sessions: stored,
+        sessionId: stored[0]?.id || 'session-default-welcome',
+      };
+    }
+  }
+  const [sessions, setSessions] = useState<ChatSession[]>(initialLaunchState.current.sessions);
   const [sessionFolders, setSessionFolders] = useState<string[]>(() =>
     getStoredFolders(getStoredUser().id)
   );
-  const [currentSessionId, setCurrentSessionId] = useState<string>(() => {
-    const stored = getStoredSessions(getStoredUser().id);
-    return stored[0]?.id || 'session-default-welcome';
-  });
+  const [currentSessionId, setCurrentSessionId] = useState<string>(
+    initialLaunchState.current.sessionId
+  );
   const [mediaItems, setMediaItems] = useState<GeotaggedMedia[]>(getStoredMedia());
   const [metrics, setMetrics] = useState<EngagementMetrics>(getStoredMetrics());
   const [activeTab, setActiveTab] = useState<AppTab>('chat');
@@ -148,6 +223,8 @@ export default function App() {
     maintenanceMode?: boolean;
   } | null>(null);
   const isSendingRef = useRef<boolean>(false);
+  const activeChatAbortRef = useRef<AbortController | null>(null);
+  const stopRequestedRef = useRef<boolean>(false);
   const activeFbUidRef = useRef<string | null>(null);
   const [fbAuthUser, setFbAuthUser] = useState<FirebaseUser | null>(null);
   const [isBrowserOnline, setIsBrowserOnline] = useState<boolean>(
@@ -155,6 +232,13 @@ export default function App() {
   );
   const [isKeyboardOpen, setIsKeyboardOpen] = useState<boolean>(false);
   const [isAuthInitialized, setIsAuthInitialized] = useState<boolean>(false);
+  const [showOnboarding, setShowOnboarding] = useState<boolean>(false);
+  const [welcomeBackName, setWelcomeBackName] = useState<string | null>(null);
+  const settingsRef = useRef<AppSettings>(settings);
+
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
 
   const isAuthenticatedVerified = Boolean(fbAuthUser && fbAuthUser.emailVerified);
   const isOnline = isBrowserOnline && !settings.offlineModeForce;
@@ -182,35 +266,97 @@ export default function App() {
       : Date.now();
     const providerName = fbUser.providerData[0]?.providerId?.includes('google') ? 'google' : 'email';
 
+    recordLoginActivity({ provider: providerName, email: fbUser.email || undefined }, fbUser.uid);
+
     const fsProfile = await loadUserProfileFromFirestore(fbUser.uid).catch(() => null);
     if (activeFbUidRef.current !== fbUser.uid) return;
 
     const extras = getUserLocalExtras(fbUser.uid);
+    const nowMs = Date.now();
+    const previousLastSeen = extras.lastSeenAt || fsProfile?.lastActiveAt;
+    saveUserLocalExtras(fbUser.uid, { lastSeenAt: nowMs });
+
     const detectedCountry = detectUserCountry();
     const isManual = Boolean(extras.isManualCountry || (fsProfile as any)?.isManualCountry);
     const resolvedCountry = isManual
       ? (extras.country || fsProfile?.country || detectedCountry.country)
-      : detectedCountry.country;
+      : detectedCountry.country !== 'Global'
+      ? detectedCountry.country
+      : fsProfile?.country || detectedCountry.country;
     const resolvedFlag = isManual
       ? (extras.countryFlag || fsProfile?.countryFlag || detectedCountry.flag)
-      : detectedCountry.flag;
+      : detectedCountry.country !== 'Global'
+      ? detectedCountry.flag
+      : fsProfile?.countryFlag || detectedCountry.flag;
+
+    const resolvedName = fsProfile?.name || cleanName;
+    const resolvedNickname = extras.nickname || fsProfile?.nickname || undefined;
+    const resolvedAge = extras.age || fsProfile?.age || undefined;
+    const hasCompletedOnboarding = Boolean(
+      extras.onboardingCompleted ||
+        fsProfile?.onboardingCompleted ||
+        (fsProfile &&
+          ((fsProfile.streakDays || 0) > 0 ||
+            Boolean(fsProfile.nickname) ||
+            (fsProfile.createdAt && nowMs - fsProfile.createdAt > 5 * 60 * 1000)))
+    );
+
+    if (!hasCompletedOnboarding) {
+      setShowOnboarding(true);
+    } else {
+      setShowOnboarding(false);
+    }
+
+    if (previousLastSeen && nowMs - previousLastSeen >= 5 * 60 * 60 * 1000) {
+      const greetingTarget = resolvedNickname || resolvedName.split(/\s+/)[0] || 'Friend';
+      setWelcomeBackName(greetingTarget);
+      window.setTimeout(() => {
+        setWelcomeBackName((cur) => (cur === greetingTarget ? null : cur));
+      }, 5500);
+    }
 
     setUser((prev) => {
       const baseUser = prev.id === fbUser.uid ? prev : { ...DEFAULT_USER };
+      const rawSavedStreak = Math.max(
+        Number((fsProfile as any)?.streakDays || 0),
+        Number(baseUser.streakDays || 0)
+      );
+      const savedLastActive =
+        (fsProfile as any)?.lastActiveDate || baseUser.lastActiveDate || '';
+      const evaluatedStreak = evaluateCurrentStreakOnLoad(rawSavedStreak, savedLastActive);
+      const resolvedLongestStreak = Math.max(
+        Number((fsProfile as any)?.longestStreak || 0),
+        Number(baseUser.longestStreak || 0),
+        evaluatedStreak
+      );
+      const streakHist =
+        baseUser.streakHistory && baseUser.streakHistory.length > 0
+          ? baseUser.streakHistory
+          : generateStreakHistory(evaluatedStreak);
+
       const updated: UserProfile = {
         ...baseUser,
         id: fbUser.uid,
-        name: fsProfile?.name || cleanName,
+        name: resolvedName,
+        nickname: resolvedNickname,
+        age: resolvedAge,
+        onboardingCompleted: hasCompletedOnboarding,
         username: fsProfile?.username || cleanHandle,
         email: fbUser.email || baseUser.email || '',
         avatarUrl:
-          (providerName === 'google' && fbUser.photoURL)
-            ? fbUser.photoURL
-            : extras.customAvatarDataUrl || fbUser.photoURL || fsProfile?.avatarUrl || baseUser.avatarUrl || '',
+          extras.customAvatarDataUrl ||
+          fsProfile?.avatarUrl ||
+          fbUser.photoURL ||
+          baseUser.avatarUrl ||
+          '',
         avatarColor: extras.avatarColor || baseUser.avatarColor || '#8b5cf6',
         country: resolvedCountry,
         countryFlag: resolvedFlag,
         isManualCountry: isManual,
+        streakDays: evaluatedStreak,
+        longestStreak: resolvedLongestStreak,
+        lastActiveDate: savedLastActive,
+        streakHistory: streakHist,
         termsAccepted: fsProfile?.termsAccepted ?? true,
         termsAcceptedAt: fsProfile?.termsAcceptedAt,
         provider: providerName,
@@ -218,7 +364,7 @@ export default function App() {
         role: isVerifiedOwner ? 'admin' : fsProfile?.role || 'user',
         status: fsProfile?.status || 'active',
         createdAt: fsProfile?.createdAt || createdAtMs,
-        lastActiveAt: Date.now(),
+        lastActiveAt: nowMs,
         preferredLanguage: fsProfile?.preferredLanguage || getStoredSettings().uiLanguage || 'en',
         linkedProviders: Array.from(
           new Set([...(baseUser.linkedProviders || []), providerName])
@@ -228,6 +374,53 @@ export default function App() {
       syncUserProfileToFirestore(sanitizeUserForFirestore(updated)).catch(() => {});
       return updated;
     });
+
+    const resolvedMemoryConsent =
+      extras.memoryConsent || fsProfile?.memoryConsent || settingsRef.current.memoryConsent;
+    if (resolvedMemoryConsent === 'agreed' || resolvedMemoryConsent === 'disagreed') {
+      handleUpdateSettings({
+        memoryConsent: resolvedMemoryConsent,
+        ...(resolvedMemoryConsent === 'disagreed' ? { aiMemoryEnabled: false } : {}),
+      });
+    }
+    if (resolvedMemoryConsent === 'agreed') {
+      void loadMemoriesFromFirestore(fbUser.uid).then((cloudMems) => {
+        if (!cloudMems.length || activeFbUidRef.current !== fbUser.uid) return;
+        const localMems = getStoredMemories(fbUser.uid);
+        const map = new Map<string, AIMemoryItem>();
+        for (const m of localMems) map.set(m.id, m);
+        for (const cm of cloudMems) {
+          const existing = map.get(cm.id);
+          if (!existing || cm.updatedAt >= existing.updatedAt) {
+            map.set(cm.id, cm);
+          }
+        }
+        saveStoredMemories(
+          Array.from(map.values()).sort((a, b) => b.updatedAt - a.updatedAt),
+          fbUser.uid
+        );
+      });
+    }
+
+    // If auto-detection fell back to 'Global', try approximate region lookup once without requesting GPS
+    if (!isManual && resolvedCountry === 'Global') {
+      void detectCountryApproxViaIP().then((ipOption) => {
+        if (!ipOption || activeFbUidRef.current !== fbUser.uid) return;
+        setUser((prev) => {
+          if (prev.id !== fbUser.uid || prev.isManualCountry || prev.country !== 'Global') {
+            return prev;
+          }
+          const updated: UserProfile = {
+            ...prev,
+            country: ipOption.country,
+            countryFlag: ipOption.flag,
+          };
+          saveStoredUser(updated);
+          syncUserProfileToFirestore(sanitizeUserForFirestore(updated)).catch(() => {});
+          return updated;
+        });
+      });
+    }
 
     if (fsProfile?.preferredLanguage) {
       handleUpdateSettings({ uiLanguage: fsProfile.preferredLanguage });
@@ -272,12 +465,24 @@ export default function App() {
           }
         }
         const merged = Array.from(sessionMap.values()).sort((a, b) => b.updatedAt - a.updatedAt);
-        setSessions(merged);
-        saveStoredSessions(merged, fbUser.uid);
-        if (merged[0]?.id) {
-          setCurrentSessionId((prevId) =>
-            merged.some((s) => s.id === prevId) ? prevId : merged[0].id
+        if (isFreshLaunchRef.current && !hasUserPickedSessionRef.current) {
+          const resolved = resolveReopenNewChat(
+            merged,
+            settingsRef.current.defaultTargetLanguage,
+            fbUser.uid
           );
+          setSessions(resolved.sessions);
+          saveStoredSessions(resolved.sessions, fbUser.uid);
+          setCurrentSessionId(resolved.sessionId);
+          setActiveTab('chat');
+        } else {
+          setSessions(merged);
+          saveStoredSessions(merged, fbUser.uid);
+          if (merged[0]?.id) {
+            setCurrentSessionId((prevId) =>
+              merged.some((s) => s.id === prevId) ? prevId : merged[0].id
+            );
+          }
         }
       }
     } catch {}
@@ -380,12 +585,23 @@ export default function App() {
     };
   }, []);
 
-  // Sync session & folders when user account switches
+  // Sync session & folders when user account switches (redirect to New Chat on fresh reopen)
   useEffect(() => {
     const userSessions = getStoredSessions(user.id);
-    setSessions(userSessions);
     setSessionFolders(getStoredFolders(user.id));
-    setCurrentSessionId(userSessions[0]?.id || `session-${Date.now()}`);
+    if (isFreshLaunchRef.current && !hasUserPickedSessionRef.current) {
+      const resolved = resolveReopenNewChat(
+        userSessions,
+        settingsRef.current.defaultTargetLanguage,
+        user.id
+      );
+      setSessions(resolved.sessions);
+      setCurrentSessionId(resolved.sessionId);
+      setActiveTab('chat');
+    } else {
+      setSessions(userSessions);
+      setCurrentSessionId(userSessions[0]?.id || `session-${Date.now()}`);
+    }
   }, [user.id]);
 
   // Real-time AI & Backend connectivity verification
@@ -511,13 +727,18 @@ export default function App() {
       saveStoredSettings(updated);
       return updated;
     });
-    if ((newSettings.colorTheme || newSettings.theme) && user.isLoggedIn) {
-      const themeToSave = newSettings.colorTheme || (newSettings.theme === 'light' ? 'pure-light' : 'dark-galaxy');
+    if (newSettings.memoryConsent && user.id) {
+      saveUserLocalExtras(user.id, { memoryConsent: newSettings.memoryConsent });
+    }
+    if ((newSettings.colorTheme || newSettings.theme || newSettings.memoryConsent) && user.isLoggedIn) {
+      const themeToSave =
+        newSettings.colorTheme || (newSettings.theme === 'light' ? 'pure-light' : 'dark-galaxy');
       syncUserProfileToFirestore(
         sanitizeUserForFirestore({
           ...user,
-          ...({ preferredTheme: themeToSave } as any),
-        })
+          ...((newSettings.colorTheme || newSettings.theme) ? { preferredTheme: themeToSave } : {}),
+          ...(newSettings.memoryConsent ? { memoryConsent: newSettings.memoryConsent } : {}),
+        } as any)
       ).catch(() => {});
     }
   };
@@ -537,6 +758,13 @@ export default function App() {
       messages: [],
     };
 
+  const handleStopGeneration = () => {
+    stopRequestedRef.current = true;
+    if (activeChatAbortRef.current) {
+      activeChatAbortRef.current.abort();
+    }
+  };
+
   // Send message in Chat or Voice view (uses SSE streaming when online for text/attachments; /api/chat for multimodal/offline)
   const handleSendMessage = async (params: {
     text: string;
@@ -551,8 +779,14 @@ export default function App() {
     if (!fbAuthUser || !fbAuthUser.emailVerified) {
       throw new Error('Authentication and email verification required.');
     }
-    if (isSendingRef.current) return;
+    if (isSendingRef.current) {
+      throw new Error('A message is already in progress. Please wait a moment.');
+    }
+    hasUserPickedSessionRef.current = true;
     isSendingRef.current = true;
+    stopRequestedRef.current = false;
+    const requestController = new AbortController();
+    activeChatAbortRef.current = requestController;
 
     const targetSessionId = currentSession.id;
     const userMsgId = `usr-${Date.now()}`;
@@ -609,9 +843,16 @@ export default function App() {
     setIsLoading(true);
     const startTime = Date.now();
     const modelMsgId = `mod-${Date.now()}`;
+    let reply = '';
+    const memoryContext =
+      settingsRef.current.memoryConsent === 'agreed' &&
+      settingsRef.current.aiMemoryEnabled !== false
+        ? getStoredMemories(user.id)
+            .filter((m) => m.approved)
+            .map((m) => `[${m.category}] ${m.content}`)
+        : [];
 
     try {
-      let reply = '';
       let translation = '';
       let detectedLanguage = 'en';
       let sentiment: 'positive' | 'curious' | 'inquiry' | 'urgent' | 'neutral' = 'positive';
@@ -623,8 +864,7 @@ export default function App() {
       const shouldStream =
         isOnline &&
         settings.streamingResponses !== false &&
-        !params.imageData &&
-        !params.location;
+        !params.imageData;
 
       if (!isOnline) {
         latencyMs = 120;
@@ -668,6 +908,7 @@ export default function App() {
         const streamRes = await fetch('/api/chat/stream', {
           method: 'POST',
           headers,
+          signal: requestController.signal,
           body: JSON.stringify({
             messages: updatedMessages
               .filter((m) => !m.isError)
@@ -678,6 +919,9 @@ export default function App() {
             targetLanguage: params.targetLanguage,
             userLanguage: settings.uiLanguage,
             voicePersona: settings.voicePersona || 'friendly',
+            responseMode: settings.aiResponseMode || 'balanced',
+            location: params.location,
+            memoryContext,
             customApiKey: settings.customGeminiApiKey,
           }),
         });
@@ -691,19 +935,13 @@ export default function App() {
         const decoder = new TextDecoder('utf-8');
         let sseBuffer = '';
 
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          sseBuffer += decoder.decode(value, { stream: true });
-
-          const events = sseBuffer.split('\n\n');
-          sseBuffer = events.pop() || '';
-
+        const processRawEvents = (events: string[]) => {
           for (const rawEvent of events) {
             const lines = rawEvent.split('\n');
             for (const line of lines) {
-              if (!line.startsWith('data: ')) continue;
-              const jsonStr = line.slice(6).trim();
+              const trimmedLine = line.trim();
+              if (!trimmedLine.startsWith('data:')) continue;
+              const jsonStr = trimmedLine.slice(5).trim();
               if (!jsonStr || jsonStr === '[DONE]') continue;
               try {
                 const payload = JSON.parse(jsonStr);
@@ -734,12 +972,70 @@ export default function App() {
               }
             }
           }
+        };
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) {
+            sseBuffer += decoder.decode();
+            break;
+          }
+          sseBuffer += decoder.decode(value, { stream: true });
+          sseBuffer = sseBuffer.replace(/\r\n/g, '\n');
+
+          const events = sseBuffer.split('\n\n');
+          sseBuffer = events.pop() || '';
+          processRawEvents(events);
+        }
+
+        if (sseBuffer.trim()) {
+          sseBuffer = sseBuffer.replace(/\r\n/g, '\n');
+          processRawEvents(sseBuffer.split('\n\n'));
         }
 
         latencyMs = Date.now() - startTime;
+
+        // If stream yielded no text, automatically fall back to non-streaming /api/chat
         if (!reply.trim()) {
-          reply = 'Response received.';
+          const fallbackRes = await fetch('/api/chat', {
+            method: 'POST',
+            headers,
+            signal: requestController.signal,
+            body: JSON.stringify({
+              messages: updatedMessages
+                .filter((m) => !m.isError)
+                .map((m) => ({ role: m.role, content: m.content })),
+              currentMessage: params.text,
+              attachmentName: params.attachmentName,
+              attachmentContent: params.attachmentContent,
+              targetLanguage: params.targetLanguage,
+              userLanguage: settings.uiLanguage,
+              voicePersona: settings.voicePersona || 'friendly',
+              responseMode: settings.aiResponseMode || 'balanced',
+              memoryContext,
+              customApiKey: settings.customGeminiApiKey,
+              mode: 'chat',
+            }),
+          });
+          const fallbackData = await fallbackRes.json().catch(() => ({}));
+          if (!fallbackRes.ok) {
+            throw new Error(fallbackData.error || `Server returned ${fallbackRes.status}`);
+          }
+          if (!fallbackData.reply || !String(fallbackData.reply).trim()) {
+            throw new Error('The AI service returned an empty response. Please try again.');
+          }
+          reply = fallbackData.reply;
+          translation = fallbackData.translation || '';
+          detectedLanguage = fallbackData.detectedLanguage || 'en';
+          sentiment = fallbackData.sentiment || 'positive';
+          suggestedQuestions = Array.isArray(fallbackData.suggestedQuestions)
+            ? fallbackData.suggestedQuestions
+            : [];
+          geotagInsights = fallbackData.geotagInsights;
+          modelUsed = fallbackData.modelUsed || modelUsed;
+          latencyMs = fallbackData.latencyMs || Date.now() - startTime;
         }
+
         setAiHealth((prev) => ({
           ...prev,
           state: 'connected',
@@ -760,6 +1056,7 @@ export default function App() {
         const res = await fetch('/api/chat', {
           method: 'POST',
           headers,
+          signal: requestController.signal,
           body: JSON.stringify({
             messages: updatedMessages
               .filter((m) => !m.isError)
@@ -772,6 +1069,8 @@ export default function App() {
             targetLanguage: params.targetLanguage,
             userLanguage: settings.uiLanguage,
             voicePersona: settings.voicePersona || 'friendly',
+            responseMode: settings.aiResponseMode || 'balanced',
+            memoryContext,
             location: params.location,
             customApiKey: settings.customGeminiApiKey,
             mode: 'chat',
@@ -784,7 +1083,10 @@ export default function App() {
         }
 
         const data = await res.json();
-        reply = data.reply || 'Response received.';
+        if (!data.reply || !String(data.reply).trim()) {
+          throw new Error(data.error || 'The AI service returned an empty response. Please try again.');
+        }
+        reply = data.reply;
         translation = data.translation || '';
         detectedLanguage = data.detectedLanguage || 'en';
         sentiment = data.sentiment || 'positive';
@@ -930,6 +1232,9 @@ export default function App() {
       );
       setUser(updatedUser);
       saveStoredUser(updatedUser);
+      if (updatedUser.isLoggedIn) {
+        syncUserProfileToFirestore(sanitizeUserForFirestore(updatedUser)).catch(() => {});
+      }
 
       if (newBadgeUnlocked) {
         try {
@@ -948,20 +1253,58 @@ export default function App() {
       });
       setMetrics(getStoredMetrics());
 
-      if (settings.autoSpeakAIResponses && activeTab === 'chat') {
+      if (settingsRef.current.autoSpeakAIResponses && activeTab === 'chat') {
         const targetLangObj =
           SUPPORTED_LANGUAGES.find((l) => l.code === params.targetLanguage) || SUPPORTED_LANGUAGES[0];
         const activePersonaObj =
-          VOICE_PERSONAS.find((p) => p.id === (settings.voicePersona || 'friendly')) || VOICE_PERSONAS[3];
+          VOICE_PERSONAS.find((p) => p.id === (settingsRef.current.voicePersona || 'friendly')) ||
+          VOICE_PERSONAS[3];
         voiceAssistant.speak(translation || reply, targetLangObj.speechCode, {
-          rate: settings.voiceSpeed ?? 1.0,
-          pitch: settings.voicePitch ?? activePersonaObj.pitch,
-          volume: settings.voiceVolume ?? 1.0,
+          rate: settingsRef.current.voiceSpeed ?? 1.0,
+          pitch: settingsRef.current.voicePitch ?? activePersonaObj.pitch,
+          volume: settingsRef.current.voiceVolume ?? 1.0,
         });
       }
 
       return { reply, translation };
     } catch (err: any) {
+      if (err?.name === 'AbortError' || stopRequestedRef.current) {
+        if (reply.trim()) {
+          const stoppedMessage: ChatMessage = {
+            id: modelMsgId,
+            role: 'model',
+            senderName: 'Aadesh AI',
+            content: `${reply.trim()}\n\n*(Response stopped)*`,
+            timestamp: Date.now(),
+            isStreaming: false,
+            latencyMs: Date.now() - startTime,
+          };
+          const stoppedSession: ChatSession = {
+            ...updatedSession,
+            updatedAt: Date.now(),
+            messages: [...updatedMessages, stoppedMessage],
+          };
+          setSessions((prev) => {
+            const nextSessions = prev.map((s) => (s.id === targetSessionId ? stoppedSession : s));
+            saveStoredSessions(nextSessions, user.id);
+            return nextSessions;
+          });
+          if (user.isLoggedIn) {
+            saveConversationAndMessagesToFirestore(user.id, stoppedSession).catch(() => {});
+          }
+          return { reply };
+        }
+        // Clean up empty streaming placeholder if stopped before first chunk
+        setSessions((prev) =>
+          prev.map((s) =>
+            s.id === targetSessionId
+              ? { ...s, messages: s.messages.filter((m) => m.id !== modelMsgId) }
+              : s
+          )
+        );
+        return;
+      }
+
       console.error('Chat error:', err);
       const errMsg = String(err?.message || 'Connection error');
       const isNetworkFailure =
@@ -996,6 +1339,8 @@ export default function App() {
       });
       throw err;
     } finally {
+      activeChatAbortRef.current = null;
+      stopRequestedRef.current = false;
       isSendingRef.current = false;
       setIsLoading(false);
     }
@@ -1008,6 +1353,7 @@ export default function App() {
       saveUserLocalExtras(updatedUser.id, {
         country: updatedUser.country,
         countryFlag: updatedUser.countryFlag,
+        isManualCountry: updatedUser.isManualCountry,
         avatarColor: updatedUser.avatarColor,
         ...(updatedUser.avatarUrl?.startsWith('data:')
           ? { customAvatarDataUrl: updatedUser.avatarUrl }
@@ -1021,6 +1367,8 @@ export default function App() {
 
   const handleSignOut = async () => {
     activeFbUidRef.current = null;
+    setShowOnboarding(false);
+    setWelcomeBackName(null);
     try {
       await logOut();
     } catch {}
@@ -1049,6 +1397,7 @@ export default function App() {
   };
 
   const handleNewSession = (initialCategory?: string) => {
+    hasUserPickedSessionRef.current = true;
     const cleanCategory =
       initialCategory && initialCategory.trim() && initialCategory !== 'All'
         ? initialCategory.trim().slice(0, 48)
@@ -1432,7 +1781,8 @@ export default function App() {
         {/* Futuristic Purple/Violet/Lavender 3D Liquid Waves, Orbs, Bubbles & Particles */}
         <FuturisticBackground theme={settings.theme} />
 
-      {/* CLEAN TOP HEADER (Logo + Live AI Status on Left | Clickable User, Flag, UID, Photo, Streak on Right) */}
+      <div className="flex flex-col flex-1 min-h-0 min-w-0">
+      {/* CLEAN TOP HEADER (Logo + Live AI Status on Left | Animated Profile Panel & Dropdown on Right) */}
       <Header
         user={user}
         aiHealth={aiHealth}
@@ -1443,8 +1793,38 @@ export default function App() {
           setSettingsSection('profile');
           setActiveTab('settings');
         }}
+        onOpenSettings={() => {
+          setSettingsSection('settings');
+          setActiveTab('settings');
+        }}
         onStreakClick={() => setIsGamificationModalOpen(true)}
+        onSignOut={handleSignOut}
       />
+
+      {/* Animated Welcome Back Greeting after ~5+ hours away */}
+      <AnimatePresence>
+        {welcomeBackName && (
+          <motion.div
+            initial={{ opacity: 0, y: -16, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -12, scale: 0.96 }}
+            transition={{ duration: 0.25 }}
+            className="fixed top-16 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-2xl glass-card border border-sky-400/50 shadow-[0_12px_36px_rgba(56,189,248,0.28)] flex items-center gap-2.5 text-xs sm:text-sm font-bold text-white"
+            role="status"
+          >
+            <Sparkles className="w-4 h-4 text-sky-400 shrink-0 animate-pulse" />
+            <span>Welcome Back, {welcomeBackName}!</span>
+            <button
+              type="button"
+              onClick={() => setWelcomeBackName(null)}
+              className="p-0.5 text-purple-200/75 hover:text-white cursor-pointer"
+              aria-label="Dismiss welcome greeting"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Owner Announcement Banner if active */}
       {platformNotice?.announcement && (
@@ -1477,7 +1857,10 @@ export default function App() {
             currentSession={currentSession}
             allSessions={sessions}
             sessionFolders={sessionFolders}
-            onSelectSession={setCurrentSessionId}
+            onSelectSession={(id) => {
+              hasUserPickedSessionRef.current = true;
+              setCurrentSessionId(id);
+            }}
             onNewSession={handleNewSession}
             onRenameSession={handleRenameSession}
             onUpdateSessionCategory={handleUpdateSessionCategory}
@@ -1487,6 +1870,7 @@ export default function App() {
             onSendMessage={async (params) => {
               await handleSendMessage(params);
             }}
+            onStopGeneration={handleStopGeneration}
             onUpdateSessionTargetLang={handleUpdateSessionTargetLang}
             onTranslateMessage={handleTranslateMessage}
             onFeedbackMessage={handleFeedbackMessage}
@@ -1515,6 +1899,8 @@ export default function App() {
             metrics={metrics}
             sessions={sessions}
             user={user}
+            settings={settings}
+            isOnline={isOnline}
           />
         )}
 
@@ -1522,6 +1908,14 @@ export default function App() {
           <TransferView
             userId={user.id}
             userName={user.name}
+            settings={settings}
+            isOnline={isOnline}
+            onUpdateSettings={handleUpdateSettings}
+            onRecordTranslationMetric={handleRecordTranslationMetric}
+            onOpenInChat={(text) => {
+              setChatDraft({ id: Date.now(), text });
+              setActiveTab('chat');
+            }}
             onAttachFileToChat={(file) => {
               setActiveTab('chat');
               void handleSendMessage({
@@ -1533,7 +1927,7 @@ export default function App() {
                 attachmentName: file.dataUrl ? undefined : file.name,
                 attachmentContent: file.textContent,
                 targetLanguage: currentSession.targetLanguage || settings.defaultTargetLanguage,
-              });
+              }).catch(() => {});
             }}
           />
         )}
@@ -1563,6 +1957,15 @@ export default function App() {
             settings={settings}
             isOnline={isOnline}
             mediaItems={mediaItems}
+            sessions={sessions}
+            currentSessionId={currentSession.id}
+            onSelectSession={(id) => {
+              hasUserPickedSessionRef.current = true;
+              setCurrentSessionId(id);
+              setActiveTab('chat');
+            }}
+            onDeleteSession={handleDeleteSession}
+            onUpdateSettings={handleUpdateSettings}
             onAddMedia={handleAddMedia}
             onDeleteMedia={handleDeleteMedia}
             onImageGenerated={handleImageGenerated}
@@ -1598,7 +2001,7 @@ export default function App() {
               void handleSendMessage({
                 text: `Tell me about ${countryName} (${city}), where the current live local time is ${formattedTime}.`,
                 targetLanguage: currentSession.targetLanguage || settings.defaultTargetLanguage,
-              });
+              }).catch(() => {});
             }}
             onOpenScannerToChat={(dataUrl, mimeType) => {
               setChatDraft({
@@ -1612,6 +2015,10 @@ export default function App() {
               setSettingsSection('settings');
               setActiveTab('settings');
             }}
+            onOpenProfile={() => {
+              setSettingsSection('profile');
+              setActiveTab('settings');
+            }}
           />
         )}
 
@@ -1622,6 +2029,9 @@ export default function App() {
             settings={settings}
             sessions={sessions}
             mediaItems={mediaItems}
+            metrics={metrics}
+            aiHealth={aiHealth}
+            fbAuthUser={fbAuthUser}
             isOnline={isOnline}
             isOwnerAdmin={isOwnerAdmin}
             onUpdateUser={handleUpdateUser}
@@ -1658,8 +2068,9 @@ export default function App() {
           </div>
         )}
       </main>
+      </div>
 
-      {/* BOTTOM NAVIGATION: 6 buttons for regular users, plus Owner button for aadeshjaisi6@gmail.com */}
+      {/* NAVIGATION: Exact 6 buttons (Chat, Analysis, Transfer, Voice, More, Setting) + Owner exclusively for aadeshjaisi6@gmail.com */}
       <NavigationDock
         activeTab={activeTab}
         onSelectTab={(tab) => {
@@ -1668,6 +2079,7 @@ export default function App() {
           }
           setActiveTab(tab);
         }}
+        onLogoClick={() => setActiveTab('chat')}
         isKeyboardOpen={isKeyboardOpen}
         isOwner={isOwner}
       />
@@ -1711,6 +2123,35 @@ export default function App() {
         isOpen={isInstallModalOpen}
         onClose={() => setIsInstallModalOpen(false)}
       />
+
+      {/* FIRST-TIME VERIFIED USER ONBOARDING */}
+      {showOnboarding && isAuthenticatedVerified && user.isLoggedIn && (
+        <OnboardingModal
+          user={user}
+          onComplete={(data) => {
+            const nextUser: UserProfile = {
+              ...user,
+              name: data.name,
+              nickname: data.nickname,
+              age: data.age,
+              onboardingCompleted: true,
+              country: data.country,
+              countryFlag: data.countryFlag,
+              isManualCountry: data.isManualCountry,
+            };
+            saveUserLocalExtras(user.id, {
+              nickname: data.nickname,
+              age: data.age,
+              onboardingCompleted: true,
+              country: data.country,
+              countryFlag: data.countryFlag,
+              isManualCountry: data.isManualCountry,
+            });
+            handleUpdateUser(nextUser);
+            setShowOnboarding(false);
+          }}
+        />
+      )}
       </div>
     </>
   );

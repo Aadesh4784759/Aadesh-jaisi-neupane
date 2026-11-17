@@ -4,6 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
+import crypto from 'crypto';
 import mammoth from 'mammoth';
 
 dotenv.config();
@@ -43,6 +44,13 @@ function getFirebaseWebApiKey(): string {
   return String(process.env.VITE_FIREBASE_API_KEY || '').trim();
 }
 
+const AUTH_TOKEN_CACHE_TTL_MS = 90 * 1000;
+const authTokenCache = new Map<string, { expiresAt: number; user: AuthenticatedFirebaseUser }>();
+
+function hashIdToken(idToken: string): string {
+  return crypto.createHash('sha256').update(idToken).digest('hex');
+}
+
 async function verifyFirebaseUserFromRequest(req: Request): Promise<{
   ok: boolean;
   status: number;
@@ -59,6 +67,20 @@ async function verifyFirebaseUserFromRequest(req: Request): Promise<{
       code: 'AUTH_REQUIRED',
       error: 'Authentication required. Please sign in to access Aadesh AI.',
     };
+  }
+
+  const tokenHash = hashIdToken(idToken);
+  const nowMs = Date.now();
+  const cachedAuth = authTokenCache.get(tokenHash);
+  if (cachedAuth && cachedAuth.expiresAt > nowMs) {
+    return {
+      ok: true,
+      status: 200,
+      user: cachedAuth.user,
+    };
+  }
+  if (cachedAuth) {
+    authTokenCache.delete(tokenHash);
   }
 
   const firebaseApiKey = getFirebaseWebApiKey();
@@ -112,17 +134,28 @@ async function verifyFirebaseUserFromRequest(req: Request): Promise<{
       };
     }
 
+    const verifiedUser: AuthenticatedFirebaseUser = {
+      uid: String(user.localId),
+      email,
+      displayName: user.displayName,
+      emailVerified,
+      createdAt: user.createdAt,
+      isOwnerAdmin: email === OWNER_ADMIN_EMAIL && emailVerified,
+    };
+
+    if (authTokenCache.size >= 500) {
+      const firstKey = authTokenCache.keys().next().value;
+      if (firstKey) authTokenCache.delete(firstKey);
+    }
+    authTokenCache.set(tokenHash, {
+      expiresAt: Date.now() + AUTH_TOKEN_CACHE_TTL_MS,
+      user: verifiedUser,
+    });
+
     return {
       ok: true,
       status: 200,
-      user: {
-        uid: String(user.localId),
-        email,
-        displayName: user.displayName,
-        emailVerified,
-        createdAt: user.createdAt,
-        isOwnerAdmin: email === OWNER_ADMIN_EMAIL && emailVerified,
-      },
+      user: verifiedUser,
     };
   } catch {
     return {
@@ -212,6 +245,37 @@ app.set('trust proxy', 1);
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
+interface ServerTelemetry {
+  totalApiRequests: number;
+  failedApiRequests: number;
+  recentErrors: Array<{ timestamp: string; route: string; message: string }>;
+}
+
+const serverTelemetry: ServerTelemetry = {
+  totalApiRequests: 0,
+  failedApiRequests: 0,
+  recentErrors: [],
+};
+
+function recordServerError(route: string, message: string): void {
+  serverTelemetry.failedApiRequests += 1;
+  serverTelemetry.recentErrors.unshift({
+    timestamp: new Date().toISOString(),
+    route,
+    message: sanitizeErrorMessage(message).slice(0, 220),
+  });
+  if (serverTelemetry.recentErrors.length > 20) {
+    serverTelemetry.recentErrors.length = 20;
+  }
+}
+
+app.use('/api', (req: Request, _res: Response, next: NextFunction): void => {
+  if (req.path !== '/health') {
+    serverTelemetry.totalApiRequests += 1;
+  }
+  next();
+});
+
 app.get('/api', (_req: Request, res: Response): void => {
   res.json({
     ok: true,
@@ -222,8 +286,8 @@ app.get('/api', (_req: Request, res: Response): void => {
 
 // Supported active Flash models ordered by priority
 const SUPPORTED_FLASH_FALLBACKS = [
-  'gemini-4-hydrogen',
   'gemini-3.1-flash-lite',
+  'gemini-4-hydrogen',
   'gemini-3.5-flash',
 ] as const;
 
@@ -578,6 +642,7 @@ app.post('/api/chat', requireAuthenticatedUser, async (req: Request, res: Respon
       targetLanguage = 'ne',
       userLanguage = 'en',
       voicePersona = 'friendly',
+      responseMode = 'balanced',
       location,
       memoryContext,
     } = req.body;
@@ -598,10 +663,16 @@ app.post('/api/chat', requireAuthenticatedUser, async (req: Request, res: Respon
     const userLangName = LANGUAGE_NAMES[userLanguage] || userLanguage;
     const personaInstruction = PERSONA_TONES[voicePersona] || PERSONA_TONES.friendly;
     const memoryBlock = buildMemoryBlock(memoryContext);
+    const modeDirective =
+      responseMode === 'fast'
+        ? 'RESPONSE MODE (FAST): Be crisp, direct, and concise. Give the exact answer immediately with minimal filler.'
+        : responseMode === 'detailed'
+        ? 'RESPONSE MODE (DETAILED): Provide thorough, structured, step-by-step explanations with clear examples, edge cases, and key takeaways.'
+        : 'RESPONSE MODE (BALANCED): Be well-structured, natural, and appropriately thorough without unnecessary verbosity.';
 
     const systemInstruction = `You are Aadesh AI ("One AI. Endless Possibilities.", created by Aadesh Jaisi), a professional global all-in-one AI assistant.
 Provide accurate, natural, helpful answers including step-by-step explanations, programming assistance with clean markdown code blocks, study guidance, multilingual help, and image analysis.
-Keep answers well-structured and concise for simple questions, detailed when complexity calls for it.
+${modeDirective}
 
 SUGGESTION RULE: For "suggestedQuestions", provide 3 short, context-aware follow-up action buttons tailored to this conversation (e.g., "Explain in more detail", "Give an example", "Summarize", or a specific follow-up).
 
@@ -666,6 +737,9 @@ Tone requirement: ${personaInstruction}${memoryBlock}`;
       contents.push({ role: 'user', parts: currentParts });
     }
 
+    const chatThinkingLevel =
+      responseMode === 'detailed' ? ThinkingLevel.MEDIUM : ThinkingLevel.MINIMAL;
+
     const { response, modelUsed } = await generateWithModelFallback(
       ai,
       (model) => ({
@@ -673,6 +747,9 @@ Tone requirement: ${personaInstruction}${memoryBlock}`;
         contents,
         config: {
           systemInstruction,
+          ...(model.startsWith('gemini-4') || model.startsWith('gemini-3')
+            ? { thinkingConfig: { thinkingLevel: chatThinkingLevel } }
+            : {}),
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,
@@ -742,6 +819,7 @@ Tone requirement: ${personaInstruction}${memoryBlock}`;
     }
   } catch (err: any) {
     const safeError = sanitizeErrorMessage(err);
+    recordServerError('/api/chat', safeError);
     console.error('Error in /api/chat:', safeError);
     const statusCode = isAuthFailure(err) ? 401 : 502;
     res.status(statusCode).json({
@@ -766,6 +844,7 @@ app.post('/api/chat/stream', requireAuthenticatedUser, async (req: Request, res:
       targetLanguage = 'ne',
       userLanguage = 'en',
       voicePersona = 'friendly',
+      responseMode = 'balanced',
       location,
       memoryContext,
     } = req.body;
@@ -781,6 +860,11 @@ app.post('/api/chat/stream', requireAuthenticatedUser, async (req: Request, res:
       return;
     }
 
+    let clientAborted = false;
+    req.on('close', () => {
+      clientAborted = true;
+    });
+
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
@@ -791,9 +875,16 @@ app.post('/api/chat/stream', requireAuthenticatedUser, async (req: Request, res:
     const userLangName = LANGUAGE_NAMES[userLanguage] || userLanguage;
     const personaInstruction = PERSONA_TONES[voicePersona] || PERSONA_TONES.friendly;
     const memoryBlock = buildMemoryBlock(memoryContext);
+    const modeDirective =
+      responseMode === 'fast'
+        ? 'Mode: FAST & concise. Answer directly with crisp clarity.'
+        : responseMode === 'detailed'
+        ? 'Mode: DETAILED & deep. Provide comprehensive step-by-step reasoning and examples.'
+        : 'Mode: BALANCED. Natural, clear, well-structured answers.';
 
     const systemInstruction = `You are Aadesh AI ("One AI. Endless Possibilities.", built by Aadesh Jaisi).
 Answer naturally and clearly in clean Markdown. Match the user's language (English, Nepali, or any requested language).
+${modeDirective}
 User UI language: ${userLangName} (${userLanguage}).
 Target translation preference: ${targetLangName} (${targetLanguage}).
 ${location?.name ? `Location context: ${location.name}.` : ''}
@@ -835,41 +926,89 @@ Tone: ${personaInstruction}${memoryBlock}`;
       contents.push({ role: 'user', parts: currentParts });
     }
 
+    const streamThinkingLevel =
+      responseMode === 'detailed' ? ThinkingLevel.MEDIUM : ThinkingLevel.MINIMAL;
     const candidates = getCandidateModels();
     let streamed = false;
+    let totalStreamedChars = 0;
     let usedModel = candidates[0];
     let lastErr: unknown = null;
 
     for (const model of candidates) {
+      if (clientAborted) break;
       try {
         const stream = await ai.models.generateContentStream({
           model,
           contents,
-          config: { systemInstruction },
+          config: {
+            systemInstruction,
+            ...(model.startsWith('gemini-4') || model.startsWith('gemini-3')
+              ? { thinkingConfig: { thinkingLevel: streamThinkingLevel } }
+              : {}),
+          },
         });
         usedModel = model;
         for await (const chunk of stream) {
+          if (clientAborted) break;
           const text = chunk.text || '';
           if (text) {
+            totalStreamedChars += text.length;
             res.write(`data: ${JSON.stringify({ chunk: text })}\n\n`);
           }
         }
-        streamed = true;
-        break;
+        if (totalStreamedChars > 0 || clientAborted) {
+          streamed = true;
+          break;
+        }
       } catch (err) {
         lastErr = err;
         if (isAuthFailure(err)) throw err;
       }
     }
 
+    // Fallback to standard generateContent if stream yielded zero text chunks
+    if (!streamed && !clientAborted) {
+      try {
+        const fallback = await generateWithModelFallback(
+          ai,
+          (model) => ({
+            model,
+            contents,
+            config: {
+              systemInstruction,
+              ...(model.startsWith('gemini-4') || model.startsWith('gemini-3')
+                ? { thinkingConfig: { thinkingLevel: streamThinkingLevel } }
+                : {}),
+            },
+          }),
+          10000,
+          16000
+        );
+        const fallbackText = fallback.response.text || '';
+        if (fallbackText.trim() && !clientAborted) {
+          usedModel = fallback.modelUsed;
+          res.write(`data: ${JSON.stringify({ chunk: fallbackText })}\n\n`);
+          streamed = true;
+        }
+      } catch (fallbackErr) {
+        lastErr = fallbackErr;
+      }
+    }
+
+    if (clientAborted) {
+      res.end();
+      return;
+    }
+
     if (!streamed) {
-      throw lastErr || new Error('Streaming failed across models');
+      throw lastErr || new Error('Gemini returned an empty response across models');
     }
 
     res.write(`data: ${JSON.stringify({ done: true, modelUsed: usedModel })}\n\n`);
     res.end();
   } catch (err: any) {
     const safeError = sanitizeErrorMessage(err);
+    recordServerError('/api/chat/stream', safeError);
     if (res.headersSent) {
       res.write(`data: ${JSON.stringify({ error: safeError, done: true })}\n\n`);
       res.end();
@@ -1122,6 +1261,9 @@ ${String(text).slice(0, 18000)}
         model,
         contents: prompt,
         config: {
+          ...(model.startsWith('gemini-4') || model.startsWith('gemini-3')
+            ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
+            : {}),
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,
@@ -1368,6 +1510,9 @@ app.get('/api/admin/overview', async (req: Request, res: Response): Promise<void
       supportedLanguagesCount: Object.keys(LANGUAGE_NAMES).length,
       uptimeSeconds: Math.round(process.uptime()),
       nodeEnv: process.env.NODE_ENV || 'development',
+      totalApiRequests: serverTelemetry.totalApiRequests,
+      failedApiRequests: serverTelemetry.failedApiRequests,
+      recentErrors: serverTelemetry.recentErrors,
     },
   });
 });
@@ -3063,6 +3208,114 @@ Produce the completed automated deliverable for this run in structured Markdown,
       executedAt,
     });
   }
+});
+
+// 15. REVERSE-GEOCODE GPS COORDINATES TO COUNTRY CODE (NO RAW COORDINATES STORED)
+app.get('/api/geo/reverse-country', async (req: Request, res: Response): Promise<void> => {
+  const lat = Number(req.query.lat);
+  const lng = Number(req.query.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+    res.status(400).json({ ok: false, error: 'Valid latitude and longitude are required.' });
+    return;
+  }
+
+  try {
+    // Primary: BigDataCloud reverse-geocode client API (fast, free, CORS-independent)
+    const bdcController = new AbortController();
+    const bdcTimer = setTimeout(() => bdcController.abort(), 4500);
+    try {
+      const bdcRes = await fetch(
+        `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${encodeURIComponent(
+          lat.toFixed(4)
+        )}&longitude=${encodeURIComponent(lng.toFixed(4))}&localityLanguage=en`,
+        { signal: bdcController.signal }
+      );
+      if (bdcRes.ok) {
+        const bdcData = await bdcRes.json();
+        const code = String(bdcData?.countryCode || '').trim().toUpperCase();
+        const country = String(bdcData?.countryName || '').trim();
+        if (/^[A-Z]{2}$/.test(code) || country) {
+          res.json({ ok: true, code, country, source: 'gps-reverse-geocode' });
+          return;
+        }
+      }
+    } finally {
+      clearTimeout(bdcTimer);
+    }
+
+    // Secondary: OpenStreetMap Nominatim reverse geocode
+    const nomController = new AbortController();
+    const nomTimer = setTimeout(() => nomController.abort(), 5000);
+    try {
+      const nomRes = await fetch(
+        `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(
+          lat.toFixed(4)
+        )}&lon=${encodeURIComponent(lng.toFixed(4))}&zoom=3&addressdetails=1`,
+        {
+          headers: { 'User-Agent': 'AadeshAI/2.5 (CountryDetection)' },
+          signal: nomController.signal,
+        }
+      );
+      if (nomRes.ok) {
+        const nomData = await nomRes.json();
+        const code = String(nomData?.address?.country_code || '').trim().toUpperCase();
+        const country = String(nomData?.address?.country || '').trim();
+        if (/^[A-Z]{2}$/.test(code) || country) {
+          res.json({ ok: true, code, country, source: 'gps-nominatim' });
+          return;
+        }
+      }
+    } finally {
+      clearTimeout(nomTimer);
+    }
+
+    res.status(404).json({ ok: false, error: 'Unable to determine country from GPS coordinates.' });
+  } catch (err) {
+    res.status(502).json({ ok: false, error: sanitizeErrorMessage(err) });
+  }
+});
+
+// 16. APPROXIMATE IP / EDGE REGION COUNTRY DETECTION (PRIVACY-SAFE, NO PERSISTENCE)
+app.get('/api/geo/ip-country', async (req: Request, res: Response): Promise<void> => {
+  const headerCode = String(
+    req.headers['x-vercel-ip-country'] ||
+      req.headers['cf-ipcountry'] ||
+      req.headers['x-country-code'] ||
+      ''
+  )
+    .trim()
+    .toUpperCase();
+
+  if (/^[A-Z]{2}$/.test(headerCode) && headerCode !== 'XX' && headerCode !== 'T1') {
+    res.json({ ok: true, code: headerCode, approximate: true, source: 'edge-header' });
+    return;
+  }
+
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3500);
+    try {
+      const ipRes = await fetch('https://ipapi.co/json/', {
+        headers: { 'User-Agent': 'AadeshAI/2.5' },
+        signal: controller.signal,
+      });
+      if (ipRes.ok) {
+        const ipData = await ipRes.json();
+        const code = String(ipData?.country_code || '').trim().toUpperCase();
+        const country = String(ipData?.country_name || '').trim();
+        if (/^[A-Z]{2}$/.test(code)) {
+          res.json({ ok: true, code, country, approximate: true, source: 'ip-lookup' });
+          return;
+        }
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    // Non-fatal fallback
+  }
+
+  res.json({ ok: false, approximate: true });
 });
 
 // Structured JSON 404 for unknown /api/* endpoints (prevents HTML SPA fallback on missing API routes)
