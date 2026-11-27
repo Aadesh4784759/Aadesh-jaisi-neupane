@@ -3836,6 +3836,23 @@ app.get('/api/admin/overview', async (req: Request, res: Response): Promise<void
   });
 });
 
+app.get('/api/admin/backup', async (req: Request, res: Response): Promise<void> => {
+  const result = await verifyOwnerFromRequest(req);
+  if (!result.ok) {
+    res.status(result.status).json({ authorized: false, error: result.error });
+    return;
+  }
+  res.json({
+    ok: true,
+    authorized: true,
+    owner: result.user,
+    message: 'Admin backup authorization verified successfully.',
+    projectIdentifier: 'aadesh-ai-global',
+    schemaVersion: '1.0',
+    timestamp: new Date().toISOString(),
+  });
+});
+
 // 5. IMAGE GENERATION & STUDIO ENDPOINTS
 const IMAGE_MODEL_CAPABILITIES = {
   'gemini-3.1-flash-lite-image': {

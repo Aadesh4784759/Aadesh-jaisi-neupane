@@ -34,6 +34,8 @@ import {
 } from '../utils/firebase';
 import { OWNER_ADMIN_EMAIL } from '../utils/storage';
 import { buildApiUrl } from '../utils/apiConfig';
+import { AdminAnalyticsChart } from './AdminAnalyticsChart';
+import { SecureBackupCenter } from './SecureBackupCenter';
 
 interface AdminDashboardViewProps {
   currentUser: UserProfile;
@@ -409,6 +411,16 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
           </div>
         )}
       </div>
+
+      {/* 30-Day DAU & AI Request Volume Recharts Component */}
+      <AdminAnalyticsChart
+        users={users}
+        analyticsEvents={analyticsEvents}
+        totalApiRequests={serverStatus?.totalApiRequests || 0}
+      />
+
+      {/* Secure Backup Center */}
+      <SecureBackupCenter userEmail={currentUser.email || OWNER_ADMIN_EMAIL} />
 
       {/* Daily Registrations + Owner Broadcast Banner */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

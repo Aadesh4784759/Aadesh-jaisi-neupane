@@ -1084,3 +1084,18 @@ test('P28: Firebase Hosting routes /api requests to Vercel backend with strict o
   assert.equal(hasRootNoCache, true);
 });
 
+test('P29: Groq and OpenRouter API providers are correctly configured with exact env variables, endpoints, auth headers, and real connection tests', async () => {
+  assert.equal(AI_PROVIDER_METADATA.groq.envVarName, 'GROQ_API_KEY');
+  assert.equal(AI_PROVIDER_METADATA.openrouter.envVarName, 'OPENROUTER_API_KEY');
+  assert.equal(DEFAULT_SETTINGS.aiProvider, 'gemini');
+
+  assert.ok(GROQ_CURATED_MODELS.some((m) => m.id === 'llama-3.3-70b-versatile'));
+  assert.ok(OPENROUTER_FALLBACK_MODELS.some((m) => m.id === 'openrouter/free'));
+
+  const serverTs = fs.readFileSync(path.resolve(process.cwd(), 'server.ts'), 'utf8');
+  assert.match(serverTs, /https:\/\/api\.groq\.com\/openai\/v1\/models/);
+  assert.match(serverTs, /https:\/\/openrouter\.ai\/api\/v1\/models/);
+  assert.match(serverTs, /Authorization:\s*`Bearer \$\{apiKey\}`/);
+  assert.match(serverTs, /app\.post\('\/api\/providers\/test'/);
+});
+
