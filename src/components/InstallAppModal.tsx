@@ -38,9 +38,9 @@ export const InstallAppModal: React.FC<InstallAppModalProps> = ({ isOpen, onClos
 
   return (
     <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-3 sm:p-5 animate-in fade-in duration-200">
-      <div className="glass-card rounded-3xl max-w-lg w-full border border-purple-500/50 shadow-2xl relative flex flex-col max-h-[92vh] overflow-hidden">
+      <div className="glass-card rounded-3xl max-w-lg w-full border border-purple-500/50 shadow-2xl relative flex flex-col max-h-[92vh] max-h-[92dvh] overflow-hidden">
         {/* Header */}
-        <div className="p-4 sm:p-5 border-b border-white/10 flex items-center justify-between bg-gradient-to-r from-purple-950/40 via-indigo-950/20 to-transparent">
+        <div className="p-4 sm:p-5 border-b border-white/10 flex items-center justify-between bg-gradient-to-r from-purple-950/40 via-indigo-950/20 to-transparent shrink-0">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-purple-600 via-indigo-600 to-amber-500 flex items-center justify-center text-white shadow-lg shadow-purple-500/20">
               <Smartphone className="w-5 h-5 text-white" />
@@ -63,7 +63,7 @@ export const InstallAppModal: React.FC<InstallAppModalProps> = ({ isOpen, onClos
         </div>
 
         {/* Tab navigation */}
-        <div className="flex border-b border-white/10 px-4 sm:px-6 bg-[#090a0f]/60 gap-1 pt-2">
+        <div className="flex border-b border-white/10 px-4 sm:px-6 bg-[#090a0f]/60 gap-1 pt-2 shrink-0 overflow-x-auto">
           <button
             onClick={() => setActiveTab('android')}
             className={`py-2.5 px-4 text-xs font-bold border-b-2 flex items-center gap-2 transition-all cursor-pointer ${
@@ -97,7 +97,7 @@ export const InstallAppModal: React.FC<InstallAppModalProps> = ({ isOpen, onClos
         </div>
 
         {/* Body */}
-        <div className="p-4 sm:p-6 overflow-y-auto space-y-4">
+        <div className="p-4 sm:p-6 flex-1 min-h-0 overflow-y-auto scroll-pane space-y-4">
           {/* Direct 1-Click Install Button if supported */}
           {isInstallable && (
             <div className="p-4 rounded-2xl bg-gradient-to-r from-purple-900/50 via-indigo-900/40 to-purple-950/60 border border-purple-500/50 shadow-lg text-center space-y-2">

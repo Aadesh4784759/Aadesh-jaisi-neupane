@@ -256,7 +256,6 @@ export const ImageStudioView: React.FC<ImageStudioViewProps> = ({
     try {
       const headers = await getAuthHeaders({
         'Content-Type': 'application/json',
-        ...(settings.customGeminiApiKey ? { 'x-gemini-api-key': settings.customGeminiApiKey } : {}),
       });
 
       const payload: Record<string, any> = {
@@ -264,7 +263,6 @@ export const ImageStudioView: React.FC<ImageStudioViewProps> = ({
         style,
         aspectRatio,
         model: selectedModel,
-        customApiKey: settings.customGeminiApiKey,
       };
       if (activeModelMeta.supportsResolution) {
         payload.resolution = resolution;
@@ -279,7 +277,7 @@ export const ImageStudioView: React.FC<ImageStudioViewProps> = ({
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data?.imageDataUrl || !String(data.imageDataUrl).startsWith('data:image/')) {
         throw new Error(
-          data?.error || `Image generation failed (${res.status}). Please check your API key or try again.`
+          data?.error || `Image generation failed (${res.status}). Please verify server AI configuration or try again.`
         );
       }
 

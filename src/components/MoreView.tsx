@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, lazy, Suspense } from 'react';
 import {
   Wand2,
   Image as ImageIcon,
@@ -48,16 +48,35 @@ import {
   loadMemoriesFromFirestore,
   saveMemoryToFirestore,
   deleteMemoryFromFirestore,
+  clearAllMemoriesFromFirestore,
 } from '../utils/firebase';
 import { getStoredMemories, saveStoredMemories } from '../utils/storage';
-import { ImageStudioView } from './ImageStudioView';
-import { WorldClockView } from './WorldClockView';
-import { InterpreterView } from './InterpreterView';
-import { GeotagGalleryView } from './GeotagGalleryView';
-import { MoreToolWorkspace, MoreWorkspaceToolId } from './MoreToolWorkspace';
-import { CameraScannerModal } from './CameraScannerModal';
+import { containsSecretOrCredential, extractMemoryKeywords } from '../utils/powerMemory';
+import type { MoreWorkspaceToolId } from './MoreToolWorkspace';
 import { MarkdownRenderer } from './MarkdownRenderer';
-import { TermsPrivacyModal } from './TermsPrivacyModal';
+import { PowerMemorySection } from './PowerMemorySection';
+
+const ImageStudioView = lazy(() =>
+  import('./ImageStudioView').then((m) => ({ default: m.ImageStudioView }))
+);
+const WorldClockView = lazy(() =>
+  import('./WorldClockView').then((m) => ({ default: m.WorldClockView }))
+);
+const InterpreterView = lazy(() =>
+  import('./InterpreterView').then((m) => ({ default: m.InterpreterView }))
+);
+const GeotagGalleryView = lazy(() =>
+  import('./GeotagGalleryView').then((m) => ({ default: m.GeotagGalleryView }))
+);
+const MoreToolWorkspace = lazy(() =>
+  import('./MoreToolWorkspace').then((m) => ({ default: m.MoreToolWorkspace }))
+);
+const CameraScannerModal = lazy(() =>
+  import('./CameraScannerModal').then((m) => ({ default: m.CameraScannerModal }))
+);
+const TermsPrivacyModal = lazy(() =>
+  import('./TermsPrivacyModal').then((m) => ({ default: m.TermsPrivacyModal }))
+);
 
 export type MorePageToolId =
   | 'conversation-log'
@@ -97,6 +116,19 @@ interface MoreViewProps {
   onOpenScannerToChat: (dataUrl: string, mimeType: string) => void;
   onOpenSettings: () => void;
   onOpenProfile?: () => void;
+  memories?: AIMemoryItem[];
+  onAddMemory?: (input: {
+    category: MemoryCategory;
+    content: string;
+    source?: AIMemoryItem['source'];
+  }) => { ok: boolean; error?: string };
+  onUpdateMemory?: (id: string, patch: { category?: MemoryCategory; content?: string }) => {
+    ok: boolean;
+    error?: string;
+  };
+  onToggleMemoryApproved?: (id: string) => void;
+  onDeleteMemory?: (id: string) => void;
+  onClearAllMemories?: () => Promise<void> | void;
 }
 
 type ToolCategoryGroup =
@@ -124,8 +156,8 @@ const TOOL_ITEMS: Array<{
   },
   {
     id: 'personal-memory',
-    title: 'Personal Memory',
-    description: 'Manage approved AI facts, goals, and custom behavior instructions.',
+    title: 'Power Memory',
+    description: 'Manage persistent AI facts, goals, comedy preferences, and instructions.',
     category: 'Workspace & Identity',
     icon: Brain,
     accentClass: 'text-violet-300 bg-violet-500/20 border-violet-400/35',
@@ -301,6 +333,12 @@ export const MoreView: React.FC<MoreViewProps> = ({
   onOpenScannerToChat,
   onOpenSettings,
   onOpenProfile,
+  memories: propMemories,
+  onAddMemory: propOnAddMemory,
+  onUpdateMemory: propOnUpdateMemory,
+  onToggleMemoryApproved: propOnToggleMemoryApproved,
+  onDeleteMemory: propOnDeleteMemory,
+  onClearAllMemories: propOnClearAllMemories,
 }) => {
   const [selectedTool, setSelectedTool] = useState<MorePageToolId | null>(null);
   const [scannerOpen, setScannerOpen] = useState(false);
@@ -309,13 +347,9 @@ export const MoreView: React.FC<MoreViewProps> = ({
   // Conversation Log state
   const [logSearch, setLogSearch] = useState('');
 
-  // Personal Memory state
-  const [memories, setMemories] = useState<AIMemoryItem[]>(() => getStoredMemories(user.id));
-  const [newMemoryCategory, setNewMemoryCategory] = useState<MemoryCategory>('preference');
-  const [newMemoryContent, setNewMemoryContent] = useState('');
-  const [editingMemoryId, setEditingMemoryId] = useState<string | null>(null);
-  const [editingMemoryCategory, setEditingMemoryCategory] = useState<MemoryCategory>('preference');
-  const [editingMemoryContent, setEditingMemoryContent] = useState('');
+  // Power Memory state (synced with lifted App.tsx state when provided)
+  const [localMemories, setLocalMemories] = useState<AIMemoryItem[]>(() => getStoredMemories(user.id));
+  const memories = propMemories ?? localMemories;
 
   // Help & Support filter
   const [helpQuery, setHelpQuery] = useState('');
@@ -323,8 +357,9 @@ export const MoreView: React.FC<MoreViewProps> = ({
   const isMemoryConsentAgreed = settings.memoryConsent === 'agreed';
 
   useEffect(() => {
+    if (propMemories) return;
     const localMems = getStoredMemories(user.id);
-    setMemories(localMems);
+    setLocalMemories(localMems);
     if (user.isLoggedIn && user.id && isMemoryConsentAgreed) {
       let active = true;
       void loadMemoriesFromFirestore(user.id).then((cloudMems) => {
@@ -338,14 +373,14 @@ export const MoreView: React.FC<MoreViewProps> = ({
           }
         }
         const merged = Array.from(map.values()).sort((a, b) => b.updatedAt - a.updatedAt);
-        setMemories(merged);
+        setLocalMemories(merged);
         saveStoredMemories(merged, user.id);
       });
       return () => {
         active = false;
       };
     }
-  }, [user.id, user.isLoggedIn, isMemoryConsentAgreed]);
+  }, [user.id, user.isLoggedIn, isMemoryConsentAgreed, propMemories]);
 
   // Gallery device photo picker
   const galleryFileRef = useRef<HTMLInputElement>(null);
@@ -377,56 +412,68 @@ export const MoreView: React.FC<MoreViewProps> = ({
 
   const activeMeta = TOOL_ITEMS.find((t) => t.id === selectedTool) || null;
 
-  const handleAddMemory = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!isMemoryConsentAgreed) return;
-    const text = newMemoryContent.trim();
-    if (!text) return;
+  const fallbackAddMemory = (input: {
+    category: MemoryCategory;
+    content: string;
+    source?: AIMemoryItem['source'];
+  }) => {
+    if (!isMemoryConsentAgreed) return { ok: false, error: 'Enable Power Memory first.' };
+    const text = input.content.trim();
+    if (!text) return { ok: false, error: 'Please write a memory before saving.' };
+    if (containsSecretOrCredential(text)) {
+      return { ok: false, error: 'Blocked: passwords, tokens, and API keys cannot be saved.' };
+    }
     const now = Date.now();
     const item: AIMemoryItem = {
       id: `mem-${now}`,
       userId: user.id,
-      category: newMemoryCategory,
+      category: input.category,
       content: text,
       approved: true,
+      source: input.source || 'manual',
+      keywords: extractMemoryKeywords(text),
       createdAt: now,
       updatedAt: now,
     };
     const next = [item, ...memories];
-    setMemories(next);
+    setLocalMemories(next);
     saveStoredMemories(next, user.id);
     if (user.isLoggedIn) {
       void saveMemoryToFirestore(user.id, item);
     }
-    setNewMemoryContent('');
+    return { ok: true };
   };
 
-  const handleSaveEditedMemory = (id: string) => {
-    if (!isMemoryConsentAgreed) return;
-    const cleanText = editingMemoryContent.trim();
-    if (!cleanText) return;
+  const fallbackUpdateMemory = (id: string, patch: { category?: MemoryCategory; content?: string }) => {
+    if (!isMemoryConsentAgreed) return { ok: false, error: 'Enable Power Memory first.' };
+    const cleanText = patch.content?.trim();
+    if (patch.content !== undefined && !cleanText) {
+      return { ok: false, error: 'Memory text cannot be empty.' };
+    }
+    if (cleanText && containsSecretOrCredential(cleanText)) {
+      return { ok: false, error: 'Blocked: passwords, tokens, and API keys cannot be saved.' };
+    }
     const now = Date.now();
     let updatedItem: AIMemoryItem | undefined;
     const next = memories.map((m) => {
       if (m.id !== id) return m;
       updatedItem = {
         ...m,
-        category: editingMemoryCategory,
-        content: cleanText,
+        ...(patch.category ? { category: patch.category } : {}),
+        ...(cleanText ? { content: cleanText, keywords: extractMemoryKeywords(cleanText) } : {}),
         updatedAt: now,
       };
       return updatedItem;
     });
-    setMemories(next);
+    setLocalMemories(next);
     saveStoredMemories(next, user.id);
     if (user.isLoggedIn && updatedItem) {
       void saveMemoryToFirestore(user.id, updatedItem);
     }
-    setEditingMemoryId(null);
-    setEditingMemoryContent('');
+    return { ok: true };
   };
 
-  const handleToggleMemoryApproved = (id: string) => {
+  const fallbackToggleMemoryApproved = (id: string) => {
     if (!isMemoryConsentAgreed) return;
     let updatedItem: AIMemoryItem | undefined;
     const next = memories.map((m) => {
@@ -434,23 +481,27 @@ export const MoreView: React.FC<MoreViewProps> = ({
       updatedItem = { ...m, approved: !m.approved, updatedAt: Date.now() };
       return updatedItem;
     });
-    setMemories(next);
+    setLocalMemories(next);
     saveStoredMemories(next, user.id);
     if (user.isLoggedIn && updatedItem) {
       void saveMemoryToFirestore(user.id, updatedItem);
     }
   };
 
-  const handleDeleteMemory = (id: string) => {
+  const fallbackDeleteMemory = (id: string) => {
     const next = memories.filter((m) => m.id !== id);
-    setMemories(next);
+    setLocalMemories(next);
     saveStoredMemories(next, user.id);
     if (user.isLoggedIn) {
       void deleteMemoryFromFirestore(user.id, id);
     }
-    if (editingMemoryId === id) {
-      setEditingMemoryId(null);
-      setEditingMemoryContent('');
+  };
+
+  const fallbackClearAllMemories = async () => {
+    setLocalMemories([]);
+    saveStoredMemories([], user.id);
+    if (user.isLoggedIn) {
+      await clearAllMemoriesFromFirestore(user.id);
     }
   };
 
@@ -526,7 +577,6 @@ export const MoreView: React.FC<MoreViewProps> = ({
     try {
       const headers = await getAuthHeaders({
         'Content-Type': 'application/json',
-        ...(settings.customGeminiApiKey ? { 'x-gemini-api-key': settings.customGeminiApiKey } : {}),
       });
       const res = await fetch('/api/video', {
         method: 'POST',
@@ -539,7 +589,6 @@ export const MoreView: React.FC<MoreViewProps> = ({
           videoData: videoFileMeta?.dataUrl || '',
           videoMimeType: videoFileMeta?.mimeType || 'video/mp4',
           targetLanguage: videoTargetLang,
-          customApiKey: settings.customGeminiApiKey,
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -801,235 +850,17 @@ export const MoreView: React.FC<MoreViewProps> = ({
           )}
 
           {selectedTool === 'personal-memory' && (
-            <div className="v2-neu-card rounded-3xl p-5 sm:p-6 border border-violet-400/30 space-y-5">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-white/10 pb-4">
-                <div>
-                  <h2 className="text-lg font-black text-white flex items-center gap-2">
-                    <Brain className="w-5 h-5 text-violet-400" />
-                    <span>Personal AI Memory</span>
-                  </h2>
-                  <p className="text-xs text-purple-200/75">
-                    Personal Memory requires your explicit consent. Only approved items are used when enabled.
-                  </p>
-                </div>
-
-                {onUpdateSettings && isMemoryConsentAgreed && (
-                  <div className="flex items-center gap-2 self-start sm:self-center">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        onUpdateSettings({ aiMemoryEnabled: settings.aiMemoryEnabled === false })
-                      }
-                      className="flex items-center gap-2.5 px-3.5 py-2 rounded-2xl v2-neu-inset border border-white/10 text-xs font-bold text-white cursor-pointer"
-                    >
-                      <span>Memory Injection</span>
-                      <span
-                        className={`w-10 h-5 rounded-full p-0.5 transition-colors flex items-center ${
-                          settings.aiMemoryEnabled !== false ? 'bg-sky-500 justify-end' : 'bg-white/15 justify-start'
-                        }`}
-                      >
-                        <span className="w-4 h-4 rounded-full bg-white shadow" />
-                      </span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() =>
-                        onUpdateSettings({ memoryConsent: 'disagreed', aiMemoryEnabled: false })
-                      }
-                      className="px-3 py-2 rounded-2xl bg-rose-950/50 hover:bg-rose-900/60 border border-rose-400/30 text-xs font-semibold text-rose-200 cursor-pointer"
-                    >
-                      Disable
-                    </button>
-                  </div>
-                )}
-              </div>
-
-              {!isMemoryConsentAgreed ? (
-                <div className="p-5 rounded-2xl v2-neu-inset border border-violet-400/35 space-y-4">
-                  <div className="space-y-1.5">
-                    <div className="text-sm font-extrabold text-white flex items-center gap-2">
-                      <ShieldCheck className="w-4 h-4 text-sky-400" />
-                      <span>
-                        {settings.memoryConsent === 'disagreed'
-                          ? 'Personal Memory is Disabled'
-                          : 'Enable Personal Memory?'}
-                      </span>
-                    </div>
-                    <p className="text-xs text-purple-200/80 leading-relaxed">
-                      With your permission, Aadesh AI saves preferences, study goals, and instructions to personalize answers and sync them securely to your account. If you disagree, no conversational memories are saved or retrieved.
-                    </p>
-                  </div>
-
-                  {onUpdateSettings && (
-                    <div className="flex flex-wrap items-center gap-2.5">
-                      <button
-                        type="button"
-                        onClick={() =>
-                          onUpdateSettings({ memoryConsent: 'agreed', aiMemoryEnabled: true })
-                        }
-                        className="electric-purple-btn min-h-[40px] px-4 py-2 rounded-xl text-xs font-bold text-white flex items-center gap-1.5 cursor-pointer"
-                      >
-                        <Check className="w-4 h-4" />
-                        <span>Agree &amp; Enable Memory</span>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() =>
-                          onUpdateSettings({ memoryConsent: 'disagreed', aiMemoryEnabled: false })
-                        }
-                        className={`min-h-[40px] px-4 py-2 rounded-xl border text-xs font-semibold cursor-pointer ${
-                          settings.memoryConsent === 'disagreed'
-                            ? 'bg-rose-950/60 border-rose-400/50 text-rose-200'
-                            : 'bg-white/5 hover:bg-white/10 border-white/15 text-purple-200'
-                        }`}
-                      >
-                        {settings.memoryConsent === 'disagreed' ? 'Disagreed (Disabled)' : 'Disagree'}
-                      </button>
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <>
-                  <form onSubmit={handleAddMemory} className="grid grid-cols-1 sm:grid-cols-12 gap-2.5">
-                    <select
-                      value={newMemoryCategory}
-                      onChange={(e) => setNewMemoryCategory(e.target.value as MemoryCategory)}
-                      className="sm:col-span-3 min-h-[42px] px-3 py-2 rounded-xl v2-neu-inset text-xs text-white outline-none"
-                    >
-                      <option value="preference">Preference</option>
-                      <option value="instruction">Instruction</option>
-                      <option value="fact">Fact</option>
-                      <option value="goal">Goal</option>
-                    </select>
-                    <input
-                      type="text"
-                      value={newMemoryContent}
-                      onChange={(e) => setNewMemoryContent(e.target.value)}
-                      placeholder="e.g., Prefer concise TypeScript code snippets and bilingual Nepali hints..."
-                      className="sm:col-span-7 min-h-[42px] px-3.5 py-2 rounded-xl v2-neu-inset text-xs text-white placeholder-purple-300/45 outline-none"
-                    />
-                    <button
-                      type="submit"
-                      className="sm:col-span-2 electric-purple-btn min-h-[42px] px-4 py-2 rounded-xl text-xs font-bold text-white flex items-center justify-center gap-1.5 cursor-pointer"
-                    >
-                      <Plus className="w-4 h-4" />
-                      <span>Save</span>
-                    </button>
-                  </form>
-
-                  {memories.length === 0 ? (
-                    <div className="p-6 text-center rounded-2xl v2-neu-inset text-xs text-purple-200/70">
-                      No saved personal memories yet. Add an instruction or preference above.
-                    </div>
-                  ) : (
-                    <div className="space-y-2.5">
-                      {memories.map((mem) => {
-                        const isEditing = editingMemoryId === mem.id;
-                        return (
-                          <div
-                            key={mem.id}
-                            className="p-3.5 rounded-2xl v2-neu-inset border border-white/10 flex flex-col gap-3"
-                          >
-                            {isEditing ? (
-                              <div className="grid grid-cols-1 sm:grid-cols-12 gap-2">
-                                <select
-                                  value={editingMemoryCategory}
-                                  onChange={(e) => setEditingMemoryCategory(e.target.value as MemoryCategory)}
-                                  className="sm:col-span-3 min-h-[38px] px-2.5 py-1.5 rounded-xl bg-[#140e2a] border border-purple-400/30 text-xs text-white outline-none"
-                                >
-                                  <option value="preference">Preference</option>
-                                  <option value="instruction">Instruction</option>
-                                  <option value="fact">Fact</option>
-                                  <option value="goal">Goal</option>
-                                </select>
-                                <input
-                                  type="text"
-                                  value={editingMemoryContent}
-                                  onChange={(e) => setEditingMemoryContent(e.target.value)}
-                                  className="sm:col-span-6 min-h-[38px] px-3 py-1.5 rounded-xl bg-[#140e2a] border border-sky-400/40 text-xs text-white outline-none"
-                                />
-                                <div className="sm:col-span-3 flex items-center gap-1.5 justify-end">
-                                  <button
-                                    type="button"
-                                    onClick={() => handleSaveEditedMemory(mem.id)}
-                                    className="min-h-[34px] px-3 py-1 rounded-xl electric-purple-btn text-xs font-bold text-white cursor-pointer"
-                                  >
-                                    Save
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      setEditingMemoryId(null);
-                                      setEditingMemoryContent('');
-                                    }}
-                                    className="min-h-[34px] px-2.5 py-1 rounded-xl bg-white/10 text-xs text-gray-200 cursor-pointer"
-                                  >
-                                    <X className="w-3.5 h-3.5" />
-                                  </button>
-                                </div>
-                              </div>
-                            ) : (
-                              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                                <div className="space-y-1 min-w-0">
-                                  <div className="flex items-center gap-2">
-                                    <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-200">
-                                      {mem.category}
-                                    </span>
-                                    <span
-                                      className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                                        mem.approved
-                                          ? 'bg-emerald-500/20 text-emerald-300'
-                                          : 'bg-white/10 text-gray-400'
-                                      }`}
-                                    >
-                                      {mem.approved ? 'Active in Context' : 'Paused'}
-                                    </span>
-                                  </div>
-                                  <p className="text-xs sm:text-sm text-white break-words">{mem.content}</p>
-                                </div>
-
-                                <div className="flex items-center gap-2 shrink-0">
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      setEditingMemoryId(mem.id);
-                                      setEditingMemoryCategory(mem.category);
-                                      setEditingMemoryContent(mem.content);
-                                    }}
-                                    aria-label="Edit memory"
-                                    className="min-h-[34px] px-2.5 py-1.5 rounded-xl bg-white/10 hover:bg-white/15 text-xs font-semibold text-sky-200 flex items-center gap-1 cursor-pointer"
-                                  >
-                                    <Edit3 className="w-3.5 h-3.5" />
-                                    <span>Edit</span>
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => handleToggleMemoryApproved(mem.id)}
-                                    className="min-h-[34px] px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white/15 text-xs font-semibold text-white cursor-pointer"
-                                  >
-                                    {mem.approved ? 'Pause' : 'Approve'}
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => handleDeleteMemory(mem.id)}
-                                    aria-label="Delete memory"
-                                    className="min-h-[34px] px-2.5 py-1.5 rounded-xl bg-rose-950/50 hover:bg-rose-900/60 border border-rose-400/30 text-rose-300 cursor-pointer"
-                                  >
-                                    <Trash2 className="w-3.5 h-3.5" />
-                                  </button>
-                                </div>
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
+            <PowerMemorySection
+              user={user}
+              settings={settings}
+              memories={memories}
+              onUpdateSettings={onUpdateSettings || (() => {})}
+              onAddMemory={propOnAddMemory || fallbackAddMemory}
+              onUpdateMemory={propOnUpdateMemory || fallbackUpdateMemory}
+              onToggleMemoryApproved={propOnToggleMemoryApproved || fallbackToggleMemoryApproved}
+              onDeleteMemory={propOnDeleteMemory || fallbackDeleteMemory}
+              onClearAllMemories={propOnClearAllMemories || fallbackClearAllMemories}
+            />
           )}
 
           {selectedTool === 'help-support' && (
@@ -1102,9 +933,16 @@ export const MoreView: React.FC<MoreViewProps> = ({
 
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
                 <div className="p-4 rounded-2xl v2-neu-inset border border-white/10 space-y-1">
-                  <div className="text-purple-300/75">Active Reasoning Model</div>
+                  <div className="text-purple-300/75">Active AI Model</div>
                   <div className="text-sm font-black text-white">
-                    {settings.geminiModel || 'gemini-4-hydrogen'}
+                    {(settings.aiProvider === 'openrouter'
+                      ? settings.openRouterModel || settings.aiModel
+                      : settings.aiModel) ||
+                      (settings.aiProvider === 'groq'
+                        ? 'llama-3.3-70b-versatile'
+                        : settings.aiProvider === 'openrouter'
+                        ? 'openrouter/free'
+                        : 'gemini-2.5-flash')}
                   </div>
                 </div>
                 <div className="p-4 rounded-2xl v2-neu-inset border border-white/10 space-y-1">
@@ -1124,29 +962,35 @@ export const MoreView: React.FC<MoreViewProps> = ({
           )}
 
           {selectedTool === 'image-gen' && (
-            <ImageStudioView
-              settings={settings}
-              user={user}
-              isOnline={isOnline}
-              onOpenSettings={onOpenSettings}
-              onImageGenerated={(latencyMs) => onImageGenerated(latencyMs ?? 0)}
-            />
+            <Suspense fallback={<div className="p-6 text-xs text-purple-200">Loading Image Studio...</div>}>
+              <ImageStudioView
+                settings={settings}
+                user={user}
+                isOnline={isOnline}
+                onOpenSettings={onOpenSettings}
+                onImageGenerated={(latencyMs) => onImageGenerated(latencyMs ?? 0)}
+              />
+            </Suspense>
           )}
 
           {selectedTool === 'world-time' && (
-            <WorldClockView
-              onAskAboutCountry={(country, formattedTime) => {
-                onAskAboutCountry(country.country, country.city, formattedTime);
-              }}
-            />
+            <Suspense fallback={<div className="p-6 text-xs text-purple-200">Loading World Clock...</div>}>
+              <WorldClockView
+                onAskAboutCountry={(country, formattedTime) => {
+                  onAskAboutCountry(country.country, country.city, formattedTime);
+                }}
+              />
+            </Suspense>
           )}
 
           {selectedTool === 'translation' && (
-            <InterpreterView
-              settings={settings}
-              isOnline={isOnline}
-              onRecordTranslationMetric={onRecordTranslationMetric}
-            />
+            <Suspense fallback={<div className="p-6 text-xs text-purple-200">Loading Interpreter...</div>}>
+              <InterpreterView
+                settings={settings}
+                isOnline={isOnline}
+                onRecordTranslationMetric={onRecordTranslationMetric}
+              />
+            </Suspense>
           )}
 
           {selectedTool === 'gallery' && (
@@ -1181,13 +1025,14 @@ export const MoreView: React.FC<MoreViewProps> = ({
                 </button>
               </div>
 
-              <GeotagGalleryView
-                mediaItems={mediaItems}
-                onAddMedia={onAddMedia}
-                onDeleteMedia={onDeleteMedia}
-                isOnline={isOnline}
-                customGeminiApiKey={settings.customGeminiApiKey}
-              />
+              <Suspense fallback={<div className="p-6 text-xs text-purple-200">Loading Geotag Gallery...</div>}>
+                <GeotagGalleryView
+                  mediaItems={mediaItems}
+                  onAddMedia={onAddMedia}
+                  onDeleteMedia={onDeleteMedia}
+                  isOnline={isOnline}
+                />
+              </Suspense>
             </div>
           )}
 
@@ -1375,34 +1220,44 @@ export const MoreView: React.FC<MoreViewProps> = ({
 
           {isMoreWorkspaceTool && (
             <div className="v2-neu-card rounded-3xl p-4 sm:p-6 border border-purple-400/30">
-              <MoreToolWorkspace
-                toolId={selectedTool}
-                settings={settings}
-                isOnline={isOnline}
-                onRecordTranslationMetric={onRecordTranslationMetric}
-                onSendToChat={(text) => onSendToChat(text)}
-                onOpenScanner={() => setScannerOpen(true)}
-              />
+              <Suspense fallback={<div className="p-6 text-xs text-purple-200">Loading AI tool workspace...</div>}>
+                <MoreToolWorkspace
+                  toolId={selectedTool}
+                  settings={settings}
+                  isOnline={isOnline}
+                  onRecordTranslationMetric={onRecordTranslationMetric}
+                  onSendToChat={(text) => onSendToChat(text)}
+                  onOpenScanner={() => setScannerOpen(true)}
+                />
+              </Suspense>
             </div>
           )}
         </div>
       )}
 
-      <CameraScannerModal
-        isOpen={scannerOpen}
-        mode="scanner"
-        onClose={() => setScannerOpen(false)}
-        onCapture={(dataUrl, mimeType) => {
-          setScannerOpen(false);
-          onOpenScannerToChat(dataUrl, mimeType);
-        }}
-      />
+      {scannerOpen && (
+        <Suspense fallback={null}>
+          <CameraScannerModal
+            isOpen={scannerOpen}
+            mode="scanner"
+            onClose={() => setScannerOpen(false)}
+            onCapture={(dataUrl, mimeType) => {
+              setScannerOpen(false);
+              onOpenScannerToChat(dataUrl, mimeType);
+            }}
+          />
+        </Suspense>
+      )}
 
-      <TermsPrivacyModal
-        isOpen={isTermsOpen}
-        onClose={() => setIsTermsOpen(false)}
-        initialTab="terms"
-      />
+      {isTermsOpen && (
+        <Suspense fallback={null}>
+          <TermsPrivacyModal
+            isOpen={isTermsOpen}
+            onClose={() => setIsTermsOpen(false)}
+            initialTab="terms"
+          />
+        </Suspense>
+      )}
     </div>
   );
 };

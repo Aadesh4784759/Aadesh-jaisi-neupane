@@ -122,7 +122,7 @@ export const ChatToolOverlay: React.FC<ChatToolOverlayProps> = ({
         aria-modal="true"
         aria-label={titles[activeTool]}
         onClick={(e) => e.stopPropagation()}
-        className="w-full sm:max-w-4xl max-h-[92vh] glass-card rounded-t-3xl sm:rounded-3xl border border-purple-400/40 shadow-2xl flex flex-col overflow-hidden"
+        className="w-full sm:max-w-4xl max-h-[92vh] max-h-[92dvh] glass-card rounded-t-3xl sm:rounded-3xl border border-purple-400/40 shadow-2xl flex flex-col overflow-hidden"
       >
         {/* Modal Header */}
         <div className="px-5 py-3.5 border-b border-white/10 bg-[#0b0718]/90 flex items-center justify-between shrink-0">
@@ -138,7 +138,7 @@ export const ChatToolOverlay: React.FC<ChatToolOverlayProps> = ({
         </div>
 
         {/* Modal Body */}
-        <div className="flex-1 min-h-0 overflow-y-auto p-3 sm:p-5">
+        <div className="flex-1 min-h-0 overflow-y-auto scroll-pane p-3 sm:p-5">
           {activeTool === 'image-gen' && (
             <ImageStudioView
               settings={settings}
@@ -233,7 +233,6 @@ export const ChatToolOverlay: React.FC<ChatToolOverlayProps> = ({
                 onAddMedia={onAddMedia}
                 onDeleteMedia={onDeleteMedia}
                 isOnline={isOnline}
-                customGeminiApiKey={settings.customGeminiApiKey}
               />
             </div>
           )}

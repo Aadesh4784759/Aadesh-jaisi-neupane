@@ -19,6 +19,8 @@ import {
   computeLevelInfo,
   isStreakRecoveryEligible,
   getMonthlyRecoveryUsage,
+  NEPAL_TIMEZONE,
+  resolveEffectiveStreakTimezone,
 } from '../utils/gamification';
 import { fetchUserUsageDatesFromFirestore } from '../utils/firebase';
 
@@ -26,7 +28,14 @@ interface DailyStreakTrackerProps {
   user: UserProfile;
   onOpenGamification?: () => void;
   onStreakCalculated?: (summary: CalculatedStreakSummary) => void;
+  onActivityLogsLoaded?: (logs: {
+    dateCounts: Record<string, number>;
+    recoveredDates: string[];
+    source: 'firestore' | 'local';
+    isSyncing: boolean;
+  }) => void;
   onRecoverStreak?: () => void;
+  hideCalendarGrid?: boolean;
   className?: string;
 }
 
@@ -34,27 +43,60 @@ export const DailyStreakTracker: React.FC<DailyStreakTrackerProps> = ({
   user,
   onOpenGamification,
   onStreakCalculated,
+  onActivityLogsLoaded,
   onRecoverStreak,
+  hideCalendarGrid = false,
   className = '',
 }) => {
   const prefersReducedMotion = useReducedMotion();
   const [firestoreDateCounts, setFirestoreDateCounts] = useState<Record<string, number>>({});
+  const [firestoreRecoveredDates, setFirestoreRecoveredDates] = useState<string[]>([]);
   const [logSource, setLogSource] = useState<'firestore' | 'local'>('local');
   const [isSyncingLogs, setIsSyncingLogs] = useState(false);
+
+  const effectiveTz = useMemo(
+    () => resolveEffectiveStreakTimezone(user.timezone),
+    [user.timezone]
+  );
 
   const loadFirestoreLogs = async () => {
     if (!user.isLoggedIn || !user.id || user.id === 'guest') {
       setLogSource('local');
+      onActivityLogsLoaded?.({
+        dateCounts: {},
+        recoveredDates: [],
+        source: 'local',
+        isSyncing: false,
+      });
       return;
     }
     setIsSyncingLogs(true);
+    onActivityLogsLoaded?.({
+      dateCounts: firestoreDateCounts,
+      recoveredDates: firestoreRecoveredDates,
+      source: logSource,
+      isSyncing: true,
+    });
     try {
-      const res = await fetchUserUsageDatesFromFirestore(user.id, user.timezone);
+      const res = await fetchUserUsageDatesFromFirestore(user.id, effectiveTz);
       setFirestoreDateCounts(res.dateCounts);
+      setFirestoreRecoveredDates(res.recoveredDates || []);
       setLogSource(res.source);
+      onActivityLogsLoaded?.({
+        dateCounts: res.dateCounts,
+        recoveredDates: res.recoveredDates || [],
+        source: res.source,
+        isSyncing: false,
+      });
     } catch (err) {
       console.warn('Could not load Firestore usage logs for streak:', err);
       setLogSource('local');
+      onActivityLogsLoaded?.({
+        dateCounts: firestoreDateCounts,
+        recoveredDates: firestoreRecoveredDates,
+        source: 'local',
+        isSyncing: false,
+      });
     } finally {
       setIsSyncingLogs(false);
     }
@@ -63,7 +105,7 @@ export const DailyStreakTracker: React.FC<DailyStreakTrackerProps> = ({
   useEffect(() => {
     loadFirestoreLogs();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user.id, user.isLoggedIn, user.xp, user.timezone]);
+  }, [user.id, user.isLoggedIn, user.xp, effectiveTz, user.recoveryCount]);
 
   // Merge Firestore logs with local streakHistory so offline or newly earned interactions reflect immediately
   const streakSummary = useMemo<CalculatedStreakSummary>(() => {
@@ -76,14 +118,19 @@ export const DailyStreakTracker: React.FC<DailyStreakTrackerProps> = ({
     if (user.lastActiveDate) {
       merged[user.lastActiveDate] = Math.max(merged[user.lastActiveDate] || 0, 1);
     }
+    const currentUserStreak = user.currentStreak ?? user.streakDays;
+    const hasAuthoritativeNonZeroOrBroken =
+      (typeof currentUserStreak === 'number' && currentUserStreak > 0) ||
+      Boolean(user.streakBrokenDate);
+
     return calculateConsecutiveStreakFromDates(
       merged,
       user.streakDays || 0,
       user.longestStreak || 0,
       30,
       {
-        timeZone: user.timezone,
-        authoritativeStreak: user.currentStreak ?? user.streakDays,
+        timeZone: effectiveTz,
+        authoritativeStreak: hasAuthoritativeNonZeroOrBroken ? currentUserStreak : undefined,
         lastActiveDate: user.lastActiveDate,
       }
     );
@@ -94,20 +141,20 @@ export const DailyStreakTracker: React.FC<DailyStreakTrackerProps> = ({
     user.streakDays,
     user.currentStreak,
     user.longestStreak,
-    user.timezone,
+    effectiveTz,
   ]);
 
   const recoveryInfo = useMemo(() => {
     return getMonthlyRecoveryUsage({
       recoveryCount: user.recoveryCount ?? 0,
       recoveryMonth: user.recoveryMonth ?? '',
-      timezone: user.timezone || 'UTC',
+      timezone: effectiveTz,
     });
-  }, [user.recoveryCount, user.recoveryMonth, user.timezone]);
+  }, [user.recoveryCount, user.recoveryMonth, effectiveTz]);
 
   const recoveryEligibility = useMemo(() => {
-    return isStreakRecoveryEligible(user);
-  }, [user]);
+    return isStreakRecoveryEligible(user, Date.now(), effectiveTz);
+  }, [user, effectiveTz]);
 
   useEffect(() => {
     onStreakCalculated?.(streakSummary);
@@ -424,46 +471,48 @@ export const DailyStreakTracker: React.FC<DailyStreakTrackerProps> = ({
         </div>
       </div>
 
-      {/* 30-Day Visual Calendar-Based Streak Grid */}
-      <div className="space-y-2">
-        <div className="flex items-center justify-between text-[11px]">
-          <span className="font-bold text-gray-200 flex items-center gap-1.5">
-            <Calendar className="w-3.5 h-3.5 text-amber-400" />
-            <span>Last 30 Days Interaction Calendar</span>
-          </span>
-          <span className="text-[10px] text-gray-400">
-            {streakSummary.totalInteractions} logged interactions
-          </span>
-        </div>
+      {/* 30-Day Visual Calendar-Based Streak Grid (hidden when full StreakCalendar is rendered in GamificationModal) */}
+      {!hideCalendarGrid && (
+        <div className="space-y-2">
+          <div className="flex items-center justify-between text-[11px]">
+            <span className="font-bold text-gray-200 flex items-center gap-1.5">
+              <Calendar className="w-3.5 h-3.5 text-amber-400" />
+              <span>Last 30 Days Interaction Calendar</span>
+            </span>
+            <span className="text-[10px] text-gray-400">
+              {streakSummary.totalInteractions} logged interactions
+            </span>
+          </div>
 
-        <div className="grid grid-cols-6 sm:grid-cols-10 gap-1.5">
-          {streakSummary.calendarGrid.map((cell) => (
-            <div
-              key={cell.date}
-              title={`${cell.date} (${cell.dayLabel}): ${cell.completed ? `${cell.count} interaction(s) completed` : 'No completed activity'}`}
-              className={`py-1.5 px-1 rounded-xl text-center flex flex-col items-center justify-between border transition-all ${
-                cell.completed
-                  ? 'bg-gradient-to-b from-amber-400/30 via-orange-500/20 to-rose-950/50 border-amber-400/75 text-white shadow-[0_0_14px_rgba(245,158,11,0.32)]'
-                  : 'bg-[#090a0f]/70 border-white/5 text-gray-500'
-              } ${cell.isToday ? 'ring-1 ring-amber-300/90' : ''}`}
-            >
-              <span className="text-[8px] font-bold uppercase tracking-tight leading-none">
-                {cell.dayLabel.slice(0, 2)}
-              </span>
-              <div className="my-1">
-                {cell.completed ? (
-                  <Flame className="w-3.5 h-3.5 fill-amber-400 text-amber-300 drop-shadow-[0_0_8px_rgba(251,191,36,0.9)]" />
-                ) : (
-                  <div className="w-3 h-3 rounded-full border border-gray-700 border-dashed" />
-                )}
+          <div className="grid grid-cols-6 sm:grid-cols-10 gap-1.5">
+            {streakSummary.calendarGrid.map((cell) => (
+              <div
+                key={cell.date}
+                title={`${cell.date} (${cell.dayLabel}): ${cell.completed ? `${cell.count} interaction(s) completed` : 'No completed activity'}`}
+                className={`py-1.5 px-1 rounded-xl text-center flex flex-col items-center justify-between border transition-all ${
+                  cell.completed
+                    ? 'bg-gradient-to-b from-amber-400/30 via-orange-500/20 to-rose-950/50 border-amber-400/75 text-white shadow-[0_0_14px_rgba(245,158,11,0.32)]'
+                    : 'bg-[#090a0f]/70 border-white/5 text-gray-500'
+                } ${cell.isToday ? 'ring-1 ring-amber-300/90' : ''}`}
+              >
+                <span className="text-[8px] font-bold uppercase tracking-tight leading-none">
+                  {cell.dayLabel.slice(0, 2)}
+                </span>
+                <div className="my-1">
+                  {cell.completed ? (
+                    <Flame className="w-3.5 h-3.5 fill-amber-400 text-amber-300 drop-shadow-[0_0_8px_rgba(251,191,36,0.9)]" />
+                  ) : (
+                    <div className="w-3 h-3 rounded-full border border-gray-700 border-dashed" />
+                  )}
+                </div>
+                <span className="text-[9px] font-mono text-gray-200 leading-none">
+                  {cell.dayNum}
+                </span>
               </div>
-              <span className="text-[9px] font-mono text-gray-200 leading-none">
-                {cell.dayNum}
-              </span>
-            </div>
-          ))}
+            ))}
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Daily Query Goal Mini Progress */}
       <div className="space-y-1.5 pt-2 border-t border-white/10">
@@ -488,9 +537,13 @@ export const DailyStreakTracker: React.FC<DailyStreakTrackerProps> = ({
       <div className="flex items-center justify-between text-[10px] text-gray-400 pt-1 border-t border-white/5">
         <span className="flex items-center gap-1.5">
           <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-          <span>Monthly Protections: {recoveryInfo.remaining}/3 available</span>
+          <span>Monthly Protections: {recoveryInfo.remaining}/5 available</span>
         </span>
-        <span className="text-gray-500 font-mono text-[9px]">{user.timezone || 'UTC'}</span>
+        <span className="text-gray-400 font-mono text-[9px]">
+          {effectiveTz === NEPAL_TIMEZONE
+            ? `Nepal Time (${NEPAL_TIMEZONE})`
+            : `Local Time (${effectiveTz})`}
+        </span>
       </div>
     </div>
   );

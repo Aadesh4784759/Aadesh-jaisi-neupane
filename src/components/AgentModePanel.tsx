@@ -200,7 +200,6 @@ export const AgentModePanel: React.FC<AgentModePanelProps> = ({
     try {
       const headers = await getAuthHeaders({
         'Content-Type': 'application/json',
-        ...(settings.customGeminiApiKey ? { 'x-gemini-api-key': settings.customGeminiApiKey } : {}),
       });
 
       const res = await fetch('/api/agent', {
@@ -209,7 +208,6 @@ export const AgentModePanel: React.FC<AgentModePanelProps> = ({
         body: JSON.stringify({
           agentType: persona,
           goal,
-          customApiKey: settings.customGeminiApiKey,
         }),
       });
 

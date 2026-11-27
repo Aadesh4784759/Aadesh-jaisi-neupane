@@ -152,7 +152,7 @@ export const MoreToolWorkspace: React.FC<MoreToolWorkspaceProps> = ({
     }
 
     if (!isOnline) {
-      setError('You are currently offline. Connect to the internet to run Gemini AI tools.');
+      setError('You are currently offline. Connect to the internet to run AI tools.');
       return;
     }
 
@@ -161,8 +161,12 @@ export const MoreToolWorkspace: React.FC<MoreToolWorkspaceProps> = ({
     try {
       const headers = await getAuthHeaders({
         'Content-Type': 'application/json',
-        ...(settings.customGeminiApiKey ? { 'x-gemini-api-key': settings.customGeminiApiKey } : {}),
       });
+      const activeProvider = settings.aiProvider || 'gemini';
+      const activeModel =
+        activeProvider === 'openrouter'
+          ? settings.openRouterModel || settings.aiModel
+          : settings.aiModel;
 
       if (toolId === 'doc-translate') {
         const res = await fetch('/api/translate', {
@@ -172,7 +176,8 @@ export const MoreToolWorkspace: React.FC<MoreToolWorkspaceProps> = ({
             text: inputA.slice(0, 12000),
             sourceLang: 'auto',
             targetLang,
-            customApiKey: settings.customGeminiApiKey,
+            aiProvider: activeProvider,
+            aiModel: activeModel,
           }),
         });
         const data = await res.json();
@@ -189,7 +194,6 @@ export const MoreToolWorkspace: React.FC<MoreToolWorkspaceProps> = ({
           body: JSON.stringify({
             mode: 'email_draft',
             targetLanguage: targetLang,
-            customApiKey: settings.customGeminiApiKey,
             prompt: `Write a complete, polished email.\nRecipient / Context: ${inputB || 'General recipient'}\nTone: ${tone}\nPurpose & Key Details:\n${inputA}`,
           }),
         });
@@ -210,7 +214,6 @@ export const MoreToolWorkspace: React.FC<MoreToolWorkspaceProps> = ({
           body: JSON.stringify({
             mode: 'email_draft',
             targetLanguage: targetLang,
-            customApiKey: settings.customGeminiApiKey,
             prompt: `${actionDesc[emailAction]}.\nPreferred Tone: ${tone}\n${inputB ? `Extra instructions: ${inputB}\n` : ''}\nOriginal Email Content:\n"""\n${inputA}\n"""`,
           }),
         });
@@ -225,7 +228,6 @@ export const MoreToolWorkspace: React.FC<MoreToolWorkspaceProps> = ({
           body: JSON.stringify({
             mode: 'writing',
             targetLanguage: targetLang,
-            customApiKey: settings.customGeminiApiKey,
             prompt: `Format: ${format}\nTone: ${tone}\n${inputB ? `Audience / Constraints: ${inputB}\n` : ''}Topic / Prompt:\n${inputA}`,
           }),
         });
@@ -241,7 +243,8 @@ export const MoreToolWorkspace: React.FC<MoreToolWorkspaceProps> = ({
             messages: [],
             targetLanguage: targetLang,
             userLanguage: settings.uiLanguage,
-            customApiKey: settings.customGeminiApiKey,
+            aiProvider: activeProvider,
+            aiModel: activeModel,
             currentMessage: `Fix all grammar, spelling, punctuation, and clarity issues in the text below using a "${tone}" style. Format your response cleanly with:\n1. **Corrected Text**\n2. **Key Improvements Made** (concise bullet list)\n\nText to correct:\n"""\n${inputA}\n"""`,
           }),
         });
@@ -256,7 +259,8 @@ export const MoreToolWorkspace: React.FC<MoreToolWorkspaceProps> = ({
           body: JSON.stringify({
             text: inputA.slice(0, 16000),
             targetLanguage: targetLang,
-            customApiKey: settings.customGeminiApiKey,
+            aiProvider: activeProvider,
+            aiModel: activeModel,
           }),
         });
         const data = await res.json();
@@ -274,7 +278,6 @@ export const MoreToolWorkspace: React.FC<MoreToolWorkspaceProps> = ({
               code: inputB,
               language: 'TypeScript / Python / JS',
               task: 'generate_or_debug',
-              customApiKey: settings.customGeminiApiKey,
             }),
           });
           const data = await res.json();
@@ -297,7 +300,6 @@ export const MoreToolWorkspace: React.FC<MoreToolWorkspaceProps> = ({
               topic: inputA,
               mode: 'notes',
               language: targetLang === 'ne' ? 'bilingual' : 'en',
-              customApiKey: settings.customGeminiApiKey,
             }),
           });
           const data = await res.json();
@@ -312,7 +314,6 @@ export const MoreToolWorkspace: React.FC<MoreToolWorkspaceProps> = ({
             body: JSON.stringify({
               query: inputA,
               targetLanguage: targetLang,
-              customApiKey: settings.customGeminiApiKey,
             }),
           });
           const data = await res.json();

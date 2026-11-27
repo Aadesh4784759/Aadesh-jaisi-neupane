@@ -1,6 +1,4 @@
-import React, { useState } from 'react';
-import ReactMarkdown, { Components } from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import React, { useState, useEffect } from 'react';
 import { Check, Copy, Terminal } from 'lucide-react';
 import { renderHighlightedText } from './HighlightText';
 
@@ -92,10 +90,52 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
   className = '',
   highlightQuery,
 }) => {
+  const [MarkdownModule, setMarkdownModule] = useState<any>(null);
+  const [remarkGfmModule, setRemarkGfmModule] = useState<any>(null);
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    let isMounted = true;
+    Promise.all([
+      import('react-markdown'),
+      import('remark-gfm'),
+    ])
+      .then(([mdMod, gfmMod]) => {
+        if (isMounted) {
+          setMarkdownModule(() => mdMod.default);
+          setRemarkGfmModule(() => gfmMod.default);
+          setIsLoading(false);
+        }
+      })
+      .catch(() => {
+        if (isMounted) {
+          setIsLoading(false);
+        }
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
   if (!content) return null;
 
-  const components: Components = {
-    pre({ children }) {
+  if (isLoading || !MarkdownModule) {
+    return (
+      <div
+        dir={rtl ? 'rtl' : 'ltr'}
+        className={`space-y-2 text-sm sm:text-[15px] leading-relaxed break-words text-gray-200 ${className}`}
+      >
+        <p>{content}</p>
+      </div>
+    );
+  }
+
+  const ReactMarkdown = MarkdownModule;
+  const remarkGfm = remarkGfmModule;
+
+  const components: any = {
+    pre(props: any) {
+      const children = props.children;
       const childArray = React.Children.toArray(children);
       const codeEl = childArray.find((c) => React.isValidElement(c)) as
         | React.ReactElement<{ className?: string; children?: React.ReactNode }>
@@ -107,8 +147,8 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
 
       return <CodeBlock language={language} code={rawCode} highlightQuery={highlightQuery} />;
     },
-    code({ className: codeClassName, children }) {
-      // If inside <pre>, pre() reads props directly; inline code renders cleanly below
+    code(props: any) {
+      const { className: codeClassName, children } = props;
       return (
         <code
           dir="ltr"
@@ -120,144 +160,144 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
         </code>
       );
     },
-    p({ children }) {
+    p(props: any) {
       return (
         <p className="leading-relaxed text-gray-100 my-1.5 first:mt-0 last:mb-0">
-          {highlightTextNodes(children, highlightQuery)}
+          {highlightTextNodes(props.children, highlightQuery)}
         </p>
       );
     },
-    strong({ children }) {
+    strong(props: any) {
       return (
         <strong className="font-bold text-white">
-          {highlightTextNodes(children, highlightQuery)}
+          {highlightTextNodes(props.children, highlightQuery)}
         </strong>
       );
     },
-    em({ children }) {
+    em(props: any) {
       return (
         <em className="italic text-purple-100">
-          {highlightTextNodes(children, highlightQuery)}
+          {highlightTextNodes(props.children, highlightQuery)}
         </em>
       );
     },
-    del({ children }) {
+    del(props: any) {
       return (
         <del className="line-through text-gray-400">
-          {highlightTextNodes(children, highlightQuery)}
+          {highlightTextNodes(props.children, highlightQuery)}
         </del>
       );
     },
-    a({ href, children }) {
+    a(props: any) {
       return (
         <a
-          href={href}
+          href={props.href}
           target="_blank"
           rel="noopener noreferrer"
           className="text-purple-300 underline decoration-purple-400/60 hover:text-purple-200 break-all"
         >
-          {highlightTextNodes(children, highlightQuery)}
+          {highlightTextNodes(props.children, highlightQuery)}
         </a>
       );
     },
-    h1({ children }) {
+    h1(props: any) {
       return (
         <h1 className="text-lg sm:text-xl font-extrabold text-white pt-1.5 pb-0.5">
-          {highlightTextNodes(children, highlightQuery)}
+          {highlightTextNodes(props.children, highlightQuery)}
         </h1>
       );
     },
-    h2({ children }) {
+    h2(props: any) {
       return (
         <h2 className="text-base sm:text-lg font-bold text-purple-200 pt-1.5 pb-0.5">
-          {highlightTextNodes(children, highlightQuery)}
+          {highlightTextNodes(props.children, highlightQuery)}
         </h2>
       );
     },
-    h3({ children }) {
+    h3(props: any) {
       return (
         <h3 className="text-sm sm:text-base font-bold text-purple-300 pt-1">
-          {highlightTextNodes(children, highlightQuery)}
+          {highlightTextNodes(props.children, highlightQuery)}
         </h3>
       );
     },
-    h4({ children }) {
+    h4(props: any) {
       return (
         <h4 className="text-sm font-bold text-purple-300 pt-0.5">
-          {highlightTextNodes(children, highlightQuery)}
+          {highlightTextNodes(props.children, highlightQuery)}
         </h4>
       );
     },
-    ul({ children }) {
+    ul(props: any) {
       return (
         <ul
           className={`space-y-1 my-2 list-disc ${
             rtl ? 'pr-5' : 'pl-5'
           } text-gray-100`}
         >
-          {children}
+          {props.children}
         </ul>
       );
     },
-    ol({ children }) {
+    ol(props: any) {
       return (
         <ol
           className={`space-y-1 my-2 list-decimal ${
             rtl ? 'pr-5' : 'pl-5'
           } text-gray-100`}
         >
-          {children}
+          {props.children}
         </ol>
       );
     },
-    li({ children }) {
+    li(props: any) {
       return (
         <li className="leading-relaxed">
-          {highlightTextNodes(children, highlightQuery)}
+          {highlightTextNodes(props.children, highlightQuery)}
         </li>
       );
     },
-    blockquote({ children }) {
+    blockquote(props: any) {
       return (
         <blockquote
           className={`my-2 border-purple-400/70 bg-purple-950/30 px-3.5 py-2 rounded-lg text-purple-100 italic ${
             rtl ? 'border-r-3' : 'border-l-3'
           }`}
         >
-          {highlightTextNodes(children, highlightQuery)}
+          {highlightTextNodes(props.children, highlightQuery)}
         </blockquote>
       );
     },
     hr() {
       return <hr className="border-white/10 my-3" />;
     },
-    table({ children }) {
+    table(props: any) {
       return (
         <div className="overflow-x-auto my-2.5 rounded-xl border border-purple-500/25">
-          <table className="w-full text-xs sm:text-sm border-collapse">{children}</table>
+          <table className="w-full text-xs sm:text-sm border-collapse">{props.children}</table>
         </div>
       );
     },
-    thead({ children }) {
-      return <thead className="bg-purple-950/50 text-purple-200">{children}</thead>;
+    thead(props: any) {
+      return <thead className="bg-purple-950/50 text-purple-200">{props.children}</thead>;
     },
-    tbody({ children }) {
-      return <tbody>{children}</tbody>;
+    tbody(props: any) {
+      return <tbody>{props.children}</tbody>;
     },
-    tr({ children }) {
-      return <tr className="border-b border-white/5 last:border-none">{children}</tr>;
+    tr(props: any) {
+      return <tr className="border-b border-white/5 last:border-none">{props.children}</tr>;
     },
-    th({ children }) {
+    th(props: any) {
       return (
         <th className="px-3 py-2 font-bold border-b border-purple-500/25 text-start">
-          {highlightTextNodes(children, highlightQuery)}
+          {highlightTextNodes(props.children, highlightQuery)}
         </th>
       );
     },
-    td({ children }) {
+    td(props: any) {
       return (
         <td className="px-3 py-2 text-gray-200">
-          {highlightTextNodes(children, highlightQuery)}
+          {highlightTextNodes(props.children, highlightQuery)}
         </td>
       );
     },
@@ -270,7 +310,7 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
         rtl ? 'text-right' : 'text-left'
       } ${className}`}
     >
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+      <ReactMarkdown remarkPlugins={remarkGfm ? [remarkGfm] : []} components={components}>
         {content}
       </ReactMarkdown>
     </div>

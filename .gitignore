@@ -7,3 +7,12 @@ coverage/
 .env*
 !.env.example
 server.js
+.vercel/
+*.bundle
+*.jks
+*.keystore
+*.p12
+*.mobileprovision
+google-services.json
+GoogleService-Info.plist
+DRAFT_firestore.rules

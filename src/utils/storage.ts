@@ -14,8 +14,9 @@ import {
   TranslationHistoryEntry,
   UserProfile,
 } from '../types';
-import { INITIAL_BADGES, generateStreakHistory } from './gamification';
+import { DailyMotivationState, DEFAULT_STREAK_GOAL_DAYS, INITIAL_BADGES, generateStreakHistory } from './gamification';
 import { detectUserCountry } from './country';
+import { sanitizeOpenRouterModelId } from './aiProviders';
 
 const STORAGE_KEYS = {
   SESSIONS: 'aadesh_ai_sessions_v1',
@@ -74,13 +75,14 @@ export const DEFAULT_USER: UserProfile = {
   streakDays: 0,
   currentStreak: 0,
   longestStreak: 0,
+  streakGoalDays: DEFAULT_STREAK_GOAL_DAYS,
   recoveryCount: 0,
   recoveryMonth: '',
   streakBeforeBreak: 0,
   streakBrokenDate: '',
   xp: 0,
   level: 1,
-  levelTitle: 'Curious Novice',
+  levelTitle: 'Novice',
   dailyGoalTarget: 5,
   dailyGoalCurrent: 0,
   lastActiveDate: '',
@@ -90,8 +92,12 @@ export const DEFAULT_USER: UserProfile = {
 
 export const DEFAULT_SETTINGS: AppSettings = {
   uiLanguage: 'en',
-  defaultTargetLanguage: 'ne', // Prioritize English & Nepali
-  autoSpeakAIResponses: false,
+  defaultTargetLanguage: 'en',
+  aiResponseLanguage: 'en',
+  autoDetectInputLanguage: false,
+  translationEnabled: false,
+  translationLanguage: 'ne',
+  autoSpeakAIResponses: true,
   voiceSpeed: 1.0,
   voicePitch: 1.0,
   voiceVolume: 1.0,
@@ -100,16 +106,21 @@ export const DEFAULT_SETTINGS: AppSettings = {
   highContrast: false,
   theme: 'dark',
   dynamicAvatarTheme: true,
+  aiProvider: 'gemini',
+  aiModel: 'gemini-3.1-flash-lite',
+  openRouterModel: 'openrouter/free',
   fontSize: 'normal',
   handsFreeMode: false,
   offlineModeForce: false,
   screenReaderAnnounce: false,
   streamingResponses: true,
   aiMemoryEnabled: false,
+  smartMemoryAutoSave: true,
   memoryConsent: 'pending',
   notificationsEnabled: true,
   soundEffects: true,
   streakReminders: true,
+  streakReminderTime: '20:00',
   emailUpdatesEnabled: false,
   privateAccount: false,
   aiResponseMode: 'balanced',
@@ -117,6 +128,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   chatAppearance: 'spacious',
   reducedAnimations: false,
   biometricLockEnabled: false,
+  analyticsConsent: false,
 };
 
 export const INITIAL_METRICS: EngagementMetrics = {
@@ -236,7 +248,7 @@ export const getStoredSessions = (userId?: string): ChatSession[] => {
         title: 'New Conversation',
         createdAt: Date.now(),
         updatedAt: Date.now(),
-        targetLanguage: 'ne',
+        targetLanguage: 'en',
         category: 'General',
         messages: [],
       };
@@ -359,7 +371,49 @@ export const getStoredSettings = (): AppSettings => {
   try {
     const raw = localStorage.getItem(STORAGE_KEYS.SETTINGS);
     if (!raw) return DEFAULT_SETTINGS;
-    return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && 'customGeminiApiKey' in parsed) {
+      delete parsed.customGeminiApiKey;
+      try {
+        localStorage.setItem(STORAGE_KEYS.SETTINGS, JSON.stringify({ ...DEFAULT_SETTINGS, ...parsed }));
+      } catch {}
+    }
+    const resolvedProvider =
+      parsed?.aiProvider === 'groq' || parsed?.aiProvider === 'openrouter' || parsed?.aiProvider === 'gemini'
+        ? parsed.aiProvider
+        : 'gemini';
+    const sanitizedOpenRouterModel = sanitizeOpenRouterModelId(
+      parsed?.openRouterModel || (resolvedProvider === 'openrouter' ? parsed?.aiModel : undefined)
+    );
+    const sanitizedAiModel =
+      resolvedProvider === 'openrouter'
+        ? sanitizeOpenRouterModelId(parsed?.aiModel || sanitizedOpenRouterModel)
+        : parsed?.aiModel || DEFAULT_SETTINGS.aiModel;
+
+    const resolvedAiResponseLang =
+      typeof parsed?.aiResponseLanguage === 'string' && parsed.aiResponseLanguage.trim()
+        ? parsed.aiResponseLanguage.trim()
+        : typeof parsed?.defaultTargetLanguage === 'string' && parsed.defaultTargetLanguage.trim()
+        ? parsed.defaultTargetLanguage.trim()
+        : 'en';
+
+    return {
+      ...DEFAULT_SETTINGS,
+      ...parsed,
+      defaultTargetLanguage: resolvedAiResponseLang,
+      aiResponseLanguage: resolvedAiResponseLang,
+      autoDetectInputLanguage: Boolean(parsed?.autoDetectInputLanguage),
+      translationEnabled: Boolean(parsed?.translationEnabled),
+      translationLanguage:
+        typeof parsed?.translationLanguage === 'string' && parsed.translationLanguage.trim()
+          ? parsed.translationLanguage.trim()
+          : 'ne',
+      aiProvider: resolvedProvider,
+      aiModel: sanitizedAiModel,
+      openRouterModel: sanitizedOpenRouterModel,
+      autoSpeakAIResponses:
+        typeof parsed?.autoSpeakAIResponses === 'boolean' ? parsed.autoSpeakAIResponses : true,
+    };
   } catch {
     return DEFAULT_SETTINGS;
   }
@@ -367,7 +421,9 @@ export const getStoredSettings = (): AppSettings => {
 
 export const saveStoredSettings = (settings: AppSettings): void => {
   try {
-    localStorage.setItem(STORAGE_KEYS.SETTINGS, JSON.stringify(settings));
+    const sanitizedSettings: Record<string, any> = { ...settings };
+    delete sanitizedSettings.customGeminiApiKey;
+    localStorage.setItem(STORAGE_KEYS.SETTINGS, JSON.stringify(sanitizedSettings));
     if (settings.highContrast) {
       document.body.classList.add('high-contrast');
     } else {
@@ -424,6 +480,145 @@ export const saveStoredUser = (user: UserProfile): void => {
     localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(user));
   } catch (err) {
     console.error('Failed to save user:', err);
+  }
+};
+
+export interface UserStreakBackup {
+  currentStreak: number;
+  longestStreak: number;
+  lastActiveDate: string;
+  timezone: string;
+  recoveryCount: number;
+  recoveryMonth: string;
+  streakBeforeBreak: number;
+  streakBrokenDate: string;
+  recoveredDates?: string[];
+  xp?: number;
+  level?: number;
+  levelTitle?: string;
+  updatedAt: number;
+}
+
+const STREAK_BACKUP_KEY_PREFIX = 'aadesh_ai_streak_backup_v1_';
+const SEEN_MILESTONES_KEY_PREFIX = 'aadesh_ai_seen_milestones_v1_';
+const LAST_REMINDER_DATE_KEY_PREFIX = 'aadesh_ai_streak_reminder_date_v1_';
+
+export const getLastStreakReminderDate = (userId?: string): string => {
+  const key = `${LAST_REMINDER_DATE_KEY_PREFIX}${userId || 'guest'}`;
+  try {
+    return localStorage.getItem(key) || '';
+  } catch {
+    return '';
+  }
+};
+
+export const saveLastStreakReminderDate = (userId: string | undefined, nepalDateKey: string): void => {
+  const key = `${LAST_REMINDER_DATE_KEY_PREFIX}${userId || 'guest'}`;
+  try {
+    localStorage.setItem(key, nepalDateKey);
+  } catch {}
+};
+
+export const getStoredUserStreakBackup = (userId?: string): UserStreakBackup | null => {
+  if (!userId || userId === 'unauthenticated' || userId === 'guest') return null;
+  try {
+    const raw = localStorage.getItem(`${STREAK_BACKUP_KEY_PREFIX}${userId}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return null;
+    return {
+      currentStreak: Math.max(0, Math.floor(Number(parsed.currentStreak) || 0)),
+      longestStreak: Math.max(0, Math.floor(Number(parsed.longestStreak) || 0)),
+      lastActiveDate: typeof parsed.lastActiveDate === 'string' ? parsed.lastActiveDate : '',
+      timezone: typeof parsed.timezone === 'string' ? parsed.timezone : '',
+      recoveryCount: Math.max(0, Math.floor(Number(parsed.recoveryCount) || 0)),
+      recoveryMonth: typeof parsed.recoveryMonth === 'string' ? parsed.recoveryMonth : '',
+      streakBeforeBreak: Math.max(0, Math.floor(Number(parsed.streakBeforeBreak) || 0)),
+      streakBrokenDate: typeof parsed.streakBrokenDate === 'string' ? parsed.streakBrokenDate : '',
+      recoveredDates: Array.isArray(parsed.recoveredDates)
+        ? parsed.recoveredDates.filter((d: unknown): d is string => typeof d === 'string')
+        : undefined,
+      xp: typeof parsed.xp === 'number' && Number.isFinite(parsed.xp) ? Math.max(0, Math.floor(parsed.xp)) : undefined,
+      level: typeof parsed.level === 'number' && Number.isFinite(parsed.level) ? Math.max(1, Math.floor(parsed.level)) : undefined,
+      levelTitle: typeof parsed.levelTitle === 'string' ? parsed.levelTitle : undefined,
+      updatedAt: Number(parsed.updatedAt) || Date.now(),
+    };
+  } catch {
+    return null;
+  }
+};
+
+export const saveStoredUserStreakBackup = (
+  userId: string,
+  backup: UserStreakBackup
+): void => {
+  if (!userId || userId === 'unauthenticated' || userId === 'guest') return;
+  try {
+    localStorage.setItem(`${STREAK_BACKUP_KEY_PREFIX}${userId}`, JSON.stringify(backup));
+  } catch (err) {
+    console.warn('Failed to save per-UID streak backup:', err);
+  }
+};
+
+export const getSeenStreakMilestones = (userId?: string): string[] => {
+  if (!userId || userId === 'unauthenticated' || userId === 'guest') return [];
+  try {
+    const raw = localStorage.getItem(`${SEEN_MILESTONES_KEY_PREFIX}${userId}`);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter((id: unknown): id is string => typeof id === 'string')
+      : [];
+  } catch {
+    return [];
+  }
+};
+
+export const saveSeenStreakMilestones = (userId: string, milestoneIds: string[]): void => {
+  if (!userId || userId === 'unauthenticated' || userId === 'guest') return;
+  try {
+    const unique = Array.from(new Set(milestoneIds.filter(Boolean)));
+    localStorage.setItem(`${SEEN_MILESTONES_KEY_PREFIX}${userId}`, JSON.stringify(unique));
+  } catch (err) {
+    console.warn('Failed to save seen streak milestones:', err);
+  }
+};
+
+const DAILY_MOTIVATION_KEY_PREFIX = 'aadesh_ai_daily_motivation_v1_';
+
+export const getStoredDailyMotivation = (userId?: string): DailyMotivationState | null => {
+  const key = `${DAILY_MOTIVATION_KEY_PREFIX}${userId || 'guest'}`;
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (
+      !parsed ||
+      typeof parsed.quoteId !== 'string' ||
+      typeof parsed.assignedAtMs !== 'number' ||
+      typeof parsed.expiresAtMs !== 'number'
+    ) {
+      return null;
+    }
+    return {
+      quoteId: parsed.quoteId,
+      assignedAtMs: parsed.assignedAtMs,
+      expiresAtMs: parsed.expiresAtMs,
+    };
+  } catch {
+    return null;
+  }
+};
+
+export const saveStoredDailyMotivation = (
+  userId: string | undefined,
+  state: DailyMotivationState
+): void => {
+  const key = `${DAILY_MOTIVATION_KEY_PREFIX}${userId || 'guest'}`;
+  try {
+    localStorage.setItem(key, JSON.stringify(state));
+  } catch (err) {
+    console.warn('Failed to save daily motivation state:', err);
   }
 };
 
@@ -646,9 +841,14 @@ export interface UserLocalExtras {
   avatarColor?: string;
   currentStreak?: number;
   longestStreak?: number;
+  streakGoalDays?: number;
+  xp?: number;
+  level?: number;
+  levelTitle?: string;
   lastActiveDate?: string;
   recoveryCount?: number;
   recoveryMonth?: string;
+  recoveredDates?: string[];
   streakBeforeBreak?: number;
   streakBrokenDate?: string;
 }

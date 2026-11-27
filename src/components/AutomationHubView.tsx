@@ -284,7 +284,6 @@ export const AutomationHubView: React.FC<AutomationHubViewProps> = ({
     try {
       const headers = await getAuthHeaders({
         'Content-Type': 'application/json',
-        ...(settings.customGeminiApiKey ? { 'x-gemini-api-key': settings.customGeminiApiKey } : {}),
       });
 
       const res = await fetch('/api/automation/execute', {
@@ -299,7 +298,6 @@ export const AutomationHubView: React.FC<AutomationHubViewProps> = ({
           frequency: sched.frequency,
           triggerType,
           targetLanguage: sched.targetLanguage || settings.defaultTargetLanguage || 'en',
-          customApiKey: settings.customGeminiApiKey,
         }),
       });
 
@@ -459,7 +457,6 @@ export const AutomationHubView: React.FC<AutomationHubViewProps> = ({
     try {
       const headers = await getAuthHeaders({
         'Content-Type': 'application/json',
-        ...(settings.customGeminiApiKey ? { 'x-gemini-api-key': settings.customGeminiApiKey } : {}),
       });
 
       const contextSlice = history
@@ -480,7 +477,6 @@ export const AutomationHubView: React.FC<AutomationHubViewProps> = ({
           userContext: resolvedPrompt,
           conversationHistory: contextSlice,
           targetLanguage: settings.defaultTargetLanguage || settings.uiLanguage || 'en',
-          customApiKey: settings.customGeminiApiKey,
         }),
       });
 

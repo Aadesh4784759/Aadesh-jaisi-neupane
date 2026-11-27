@@ -30,6 +30,8 @@ import {
   orderBy,
   limit,
   onSnapshot,
+  runTransaction,
+  writeBatch,
   Unsubscribe,
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
@@ -44,10 +46,35 @@ import {
   GeneratedImageItem,
   PersonalTask,
   StudyProgressItem,
+  SuggestionAnalyticsItem,
+  SuggestionCategory,
   UserProfile,
 } from '../types';
+import { AIProviderId, normalizeAIProviderId } from './aiProviders';
 import { OWNER_ADMIN_EMAIL } from './storage';
-import { getLocalDateKeyInTimezone } from './gamification';
+import {
+  buildSuggestionStatId,
+  classifySuggestionCategory,
+  normalizeSuggestionKey,
+} from './suggestionAnalytics';
+import {
+  applyDailyActivityToStreakState,
+  computeLevelInfo,
+  getLocalDateKeyInTimezone,
+  getRecoveredGapDateKeys,
+  GlobalLeaderboardEntry,
+  MAX_MONTHLY_STREAK_RECOVERIES,
+  NEPAL_TIMEZONE,
+  PersistentStreakState,
+  RankedLeaderboardEntry,
+  rankLeaderboardEntries,
+  rankLongestStreakLeaderboardEntries,
+  recoverBrokenStreakState,
+  resolveEffectiveStreakTimezone,
+  resolveValidTimezone,
+  StreakActivityTransitionResult,
+  StreakRecoveryResult,
+} from './gamification';
 
 export enum OperationType {
   CREATE = 'create',
@@ -134,7 +161,9 @@ async function testFirestoreConnection() {
     }
   }
 }
-testFirestoreConnection();
+if (typeof window !== 'undefined') {
+  testFirestoreConnection();
+}
 
 // Friendly human-readable error messages for Firebase Authentication
 export function formatAuthError(errorCodeOrMessage: string): string {
@@ -289,10 +318,40 @@ function safeDocId(raw: string): string {
   return cleaned.slice(0, 128) || `id-${Date.now()}`;
 }
 
+export function sanitizeFiniteInt(
+  value: unknown,
+  min: number,
+  max: number,
+  fallback: number = min
+): number {
+  const numeric = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.max(min, Math.min(max, Math.trunc(numeric)));
+}
+
+function resolveSafeDisplayName(
+  ...candidates: Array<string | null | undefined>
+): string {
+  for (const raw of candidates) {
+    const trimmed = String(raw || '').trim();
+    if (trimmed.length >= 1) {
+      return trimmed.slice(0, 100);
+    }
+  }
+  return 'User';
+}
+
 export async function syncUserProfileToFirestore(
   profile: UserProfile & {
     preferredTheme?: string;
     memoryConsent?: 'pending' | 'agreed' | 'disagreed';
+    aiProvider?: AIProviderId;
+    aiModel?: string;
+    openRouterModel?: string;
+    aiResponseLanguage?: string;
+    autoDetectInputLanguage?: boolean;
+    translationEnabled?: boolean;
+    translationLanguage?: string;
   }
 ): Promise<void> {
   if (!db || !auth?.currentUser || auth.currentUser.uid !== profile.id) return;
@@ -300,11 +359,21 @@ export async function syncUserProfileToFirestore(
   const docRef = doc(db, 'users', uid);
 
   try {
-    const existingSnap = await getDoc(docRef);
+    let existingSnap;
+    try {
+      existingSnap = await getDocFromServer(docRef);
+    } catch (serverErr: any) {
+      if (classifyFirestoreErrorKind(serverErr) === 'unavailable') {
+        existingSnap = await getDoc(docRef);
+      } else {
+        throw serverErr;
+      }
+    }
+
     const nowIso = new Date().toISOString();
     const creationTime = auth.currentUser.metadata.creationTime
       ? new Date(auth.currentUser.metadata.creationTime).toISOString()
-      : profile.createdAt
+      : profile.createdAt && Number.isFinite(profile.createdAt)
       ? new Date(profile.createdAt).toISOString()
       : nowIso;
 
@@ -312,32 +381,50 @@ export async function syncUserProfileToFirestore(
       (auth.currentUser.email || '').toLowerCase() === OWNER_ADMIN_EMAIL &&
       auth.currentUser.emailVerified;
 
-    const safeStreakDays = Math.max(0, Math.min(10000, Math.floor(Number(profile.streakDays) || 0)));
+    const safeStreakDays = sanitizeFiniteInt(profile.streakDays, 0, 10000, 0);
     const safeLongestStreak = Math.max(
       safeStreakDays,
-      Math.min(10000, Math.floor(Number(profile.longestStreak) || 0))
+      sanitizeFiniteInt(profile.longestStreak, 0, 10000, 0)
     );
-    const safeLastActiveDate = (profile.lastActiveDate || '').slice(0, 20);
+    const safeLastActiveDate = String(profile.lastActiveDate || '').trim().slice(0, 20);
+    const safeDisplayName = resolveSafeDisplayName(
+      profile.name,
+      auth.currentUser.displayName,
+      auth.currentUser.email ? auth.currentUser.email.split('@')[0] : undefined
+    );
 
     const coreCreatePayload = {
       userId: uid,
-      displayName: (profile.name || 'User').slice(0, 100),
-      username: (profile.username || 'user').slice(0, 64),
-      email: (profile.email || '').slice(0, 160),
-      photoURL: (profile.avatarUrl || '').slice(0, 1000),
-      preferredLanguage: (profile.preferredLanguage || 'en').slice(0, 20),
+      displayName: safeDisplayName,
+      username: (String(profile.username || 'user').trim() || 'user').slice(0, 64),
+      email: String(profile.email || '').slice(0, 160),
+      photoURL: String(profile.avatarUrl || '').slice(0, 1000),
+      preferredLanguage: (String(profile.preferredLanguage || 'en').trim() || 'en').slice(0, 20),
       status: 'active',
       role: isVerifiedOwner ? 'admin' : 'user',
-      provider: (profile.provider || 'email').slice(0, 32),
+      provider: (String(profile.provider || 'email').trim() || 'email').slice(0, 32),
       messageCount: 0,
       conversationCount: 1,
-      createdAt: creationTime,
+      createdAt: creationTime.slice(0, 50),
       updatedAt: nowIso,
       lastActiveAt: nowIso,
     };
 
-    const extendedFields = {
+    const nonStreakExtendedFields = {
       ...(profile.preferredTheme ? { preferredTheme: String(profile.preferredTheme).slice(0, 40) } : {}),
+      ...(profile.aiProvider ? { aiProvider: normalizeAIProviderId(profile.aiProvider) } : {}),
+      ...(profile.aiModel ? { aiModel: String(profile.aiModel).slice(0, 120) } : {}),
+      ...(profile.openRouterModel ? { openRouterModel: String(profile.openRouterModel).slice(0, 120) } : {}),
+      ...(profile.aiResponseLanguage ? { aiResponseLanguage: String(profile.aiResponseLanguage).slice(0, 20) } : {}),
+      ...(typeof profile.autoDetectInputLanguage === 'boolean'
+        ? { autoDetectInputLanguage: profile.autoDetectInputLanguage }
+        : {}),
+      ...(typeof profile.translationEnabled === 'boolean'
+        ? { translationEnabled: profile.translationEnabled }
+        : {}),
+      ...(profile.translationLanguage
+        ? { translationLanguage: String(profile.translationLanguage).slice(0, 20) }
+        : {}),
       ...(profile.nickname ? { nickname: String(profile.nickname).slice(0, 64) } : {}),
       ...(typeof profile.age === 'number' && Number.isFinite(profile.age) && profile.age > 0 && profile.age <= 130
         ? { age: Math.floor(profile.age) }
@@ -351,14 +438,35 @@ export async function syncUserProfileToFirestore(
       country: (profile.country || 'Global').slice(0, 80),
       countryCode: (profile.countryCode || 'GL').slice(0, 10),
       countryFlag: (profile.countryFlag || '🌐').slice(0, 16),
-      timezone: (profile.timezone || 'UTC').slice(0, 64),
+      timezone: resolveEffectiveStreakTimezone(profile.timezone).slice(0, 64),
       countryDetectionMethod: profile.countryDetectionMethod || 'timezone',
       isManualCountry: Boolean(profile.isManualCountry),
+      ...(typeof profile.streakGoalDays === 'number' &&
+      Number.isFinite(profile.streakGoalDays) &&
+      profile.streakGoalDays >= 1 &&
+      profile.streakGoalDays <= 365
+        ? { streakGoalDays: Math.floor(profile.streakGoalDays) }
+        : {}),
+      ...(typeof profile.xp === 'number' && Number.isFinite(profile.xp) && profile.xp >= 0
+        ? { xp: Math.floor(profile.xp) }
+        : {}),
+      ...(typeof profile.level === 'number' && Number.isFinite(profile.level) && profile.level >= 1
+        ? { level: Math.min(100, Math.floor(profile.level)) }
+        : {}),
+      ...(profile.levelTitle ? { levelTitle: String(profile.levelTitle).slice(0, 40) } : {}),
+      ...(Array.isArray(profile.recoveredDates) && profile.recoveredDates.length > 0
+        ? { recoveredDates: profile.recoveredDates.slice(0, 120) }
+        : {}),
+    };
+
+    const streakFieldsPayload = {
       streakDays: safeStreakDays,
       currentStreak: safeStreakDays,
       longestStreak: safeLongestStreak,
       ...(safeLastActiveDate ? { lastActiveDate: safeLastActiveDate } : {}),
-      ...(typeof profile.recoveryCount === 'number' ? { recoveryCount: Math.max(0, Math.min(3, profile.recoveryCount)) } : {}),
+      ...(typeof profile.recoveryCount === 'number'
+        ? { recoveryCount: Math.max(0, Math.min(MAX_MONTHLY_STREAK_RECOVERIES, Math.floor(profile.recoveryCount))) }
+        : {}),
       ...(profile.recoveryMonth ? { recoveryMonth: profile.recoveryMonth.slice(0, 16) } : {}),
       ...(typeof profile.streakBeforeBreak === 'number' ? { streakBeforeBreak: profile.streakBeforeBreak } : {}),
       ...(profile.streakBrokenDate ? { streakBrokenDate: profile.streakBrokenDate.slice(0, 20) } : {}),
@@ -366,27 +474,52 @@ export async function syncUserProfileToFirestore(
 
     if (!existingSnap.exists()) {
       try {
-        await setDoc(docRef, { ...coreCreatePayload, ...extendedFields });
+        await setDoc(docRef, { ...coreCreatePayload, ...nonStreakExtendedFields, ...streakFieldsPayload });
       } catch (writeErr: any) {
         if (String(writeErr?.code || writeErr?.message || '').toLowerCase().includes('permission')) {
           await setDoc(docRef, coreCreatePayload).catch(() => {});
         }
       }
     } else {
+      const existingData = existingSnap.data() || {};
+      const existingHasStreakRecord =
+        Boolean(existingData.lastActiveDate || existingData.last_active_date) ||
+        Number(existingData.currentStreak ?? existingData.current_streak ?? existingData.streakDays ?? 0) > 0 ||
+        Number(existingData.longestStreak ?? existingData.longest_streak ?? 0) > 0;
+
+      // CRITICAL DATA SAFETY: Never overwrite an existing Firestore streak document with 0 or stale local state.
+      // Streak increments and recoveries are persisted exclusively through atomic Firestore transactions.
+      const safeStreakBackfill =
+        !existingHasStreakRecord && (safeStreakDays > 0 || Boolean(safeLastActiveDate))
+          ? streakFieldsPayload
+          : {};
+
+      const existingXp = typeof existingData.xp === 'number' && Number.isFinite(existingData.xp) ? existingData.xp : 0;
+      const safeMergedXp = Math.max(existingXp, Math.floor(Number(profile.xp ?? 0) || 0));
+      const safeLevelInfo = computeLevelInfo(safeMergedXp);
+
       const coreUpdatePayload = {
-        displayName: (profile.name || 'User').slice(0, 100),
-        username: (profile.username || 'user').slice(0, 64),
-        email: (profile.email || '').slice(0, 160),
-        photoURL: (profile.avatarUrl || '').slice(0, 1000),
-        preferredLanguage: (profile.preferredLanguage || 'en').slice(0, 20),
-        provider: (profile.provider || 'email').slice(0, 32),
+        ...(!existingData.userId || existingData.userId !== uid ? { userId: uid } : {}),
+        displayName: safeDisplayName,
+        username: (String(profile.username || 'user').trim() || 'user').slice(0, 64),
+        email: String(profile.email || '').slice(0, 160),
+        photoURL: String(profile.avatarUrl || '').slice(0, 1000),
+        preferredLanguage: (String(profile.preferredLanguage || 'en').trim() || 'en').slice(0, 20),
+        provider: (String(profile.provider || 'email').trim() || 'email').slice(0, 32),
         updatedAt: nowIso,
         lastActiveAt: nowIso,
       };
       try {
-        await updateDoc(docRef, { ...coreUpdatePayload, ...extendedFields });
+        await updateDoc(docRef, {
+          ...coreUpdatePayload,
+          ...nonStreakExtendedFields,
+          xp: safeMergedXp,
+          level: Math.max(sanitizeFiniteInt(existingData.level, 1, 100, 1), sanitizeFiniteInt(profile.level, 1, 100, safeLevelInfo.level)),
+          levelTitle: (profile.levelTitle || safeLevelInfo.levelTitle || 'Novice').slice(0, 40),
+          ...safeStreakBackfill,
+        });
       } catch (updateErr: any) {
-        if (String(updateErr?.code || updateErr?.message || '').toLowerCase().includes('permission')) {
+        if (classifyFirestoreErrorKind(updateErr) === 'permission_denied') {
           await updateDoc(docRef, coreUpdatePayload).catch(() => {});
         }
       }
@@ -396,54 +529,773 @@ export async function syncUserProfileToFirestore(
   }
 }
 
-export async function loadUserProfileFromFirestore(
+export type FirestoreUserProfileRecord = Partial<UserProfile> & {
+  preferredTheme?: string;
+  memoryConsent?: 'pending' | 'agreed' | 'disagreed';
+  aiProvider?: AIProviderId;
+  aiModel?: string;
+  openRouterModel?: string;
+  aiResponseLanguage?: string;
+  autoDetectInputLanguage?: boolean;
+  translationEnabled?: boolean;
+  translationLanguage?: string;
+};
+
+export type FirestoreErrorKind = 'permission_denied' | 'unavailable' | 'other';
+
+/**
+ * Classifies Firestore SDK errors cleanly so callers NEVER confuse a `permission-denied`
+ * error with a missing (`not_found`) document or offline/unavailable transport failure.
+ */
+export function classifyFirestoreErrorKind(err: unknown): FirestoreErrorKind {
+  const code = String((err as any)?.code || '').toLowerCase();
+  const msg = String((err as any)?.message || err || '').toLowerCase();
+  if (
+    code.includes('permission-denied') ||
+    code.includes('permission_denied') ||
+    msg.includes('missing or insufficient permissions') ||
+    msg.includes('permission denied') ||
+    msg.includes('permission-denied')
+  ) {
+    return 'permission_denied';
+  }
+  if (
+    code.includes('unavailable') ||
+    code.includes('failed-precondition') ||
+    msg.includes('offline') ||
+    msg.includes('unavailable')
+  ) {
+    return 'unavailable';
+  }
+  return 'other';
+}
+
+export type FirestoreProfileLoadResult =
+  | { status: 'found'; profile: FirestoreUserProfileRecord }
+  | { status: 'not_found' }
+  | { status: 'permission_denied'; error: string }
+  | { status: 'error'; error: string };
+
+/**
+ * Loads the authenticated user's profile from Firestore (`users/{uid}`) with explicit status.
+ * Attempts a fresh server read first (preventing stale empty caches across refresh/logout-login),
+ * falls back to cached `getDoc` if offline, and explicitly separates missing documents (`not_found`)
+ * from Firestore authorization failures (`permission_denied`).
+ */
+export async function loadUserProfileFromFirestoreWithStatus(
   uid: string
-): Promise<(Partial<UserProfile> & { preferredTheme?: string; memoryConsent?: 'pending' | 'agreed' | 'disagreed' }) | null> {
-  if (!db || !auth?.currentUser) return null;
+): Promise<FirestoreProfileLoadResult> {
+  if (!db || !auth?.currentUser) {
+    return { status: 'error', error: 'Firestore or authenticated session unavailable' };
+  }
+  if (auth.currentUser.uid !== uid) {
+    return { status: 'permission_denied', error: 'Authenticated UID does not match requested profile' };
+  }
   const safeUid = safeDocId(uid);
+  const docRef = doc(db, 'users', safeUid);
   try {
-    const snap = await getDoc(doc(db, 'users', safeUid));
-    if (!snap.exists()) return null;
+    let snap;
+    try {
+      snap = await getDocFromServer(docRef);
+    } catch (serverErr: any) {
+      // Only fall back to local cache for offline/unavailable transport errors
+      if (classifyFirestoreErrorKind(serverErr) === 'unavailable') {
+        snap = await getDoc(docRef);
+      } else {
+        throw serverErr;
+      }
+    }
+
+    if (!snap.exists()) {
+      return { status: 'not_found' };
+    }
+
     const data = snap.data();
     return {
-      name: data.displayName,
-      nickname: typeof data.nickname === 'string' ? data.nickname : undefined,
-      age: typeof data.age === 'number' ? data.age : undefined,
-      onboardingCompleted:
-        typeof data.onboardingCompleted === 'boolean' ? data.onboardingCompleted : undefined,
-      memoryConsent:
-        data.memoryConsent === 'agreed' || data.memoryConsent === 'disagreed' || data.memoryConsent === 'pending'
-          ? data.memoryConsent
+      status: 'found',
+      profile: {
+        name: data.displayName,
+        nickname: typeof data.nickname === 'string' ? data.nickname : undefined,
+        age: typeof data.age === 'number' ? data.age : undefined,
+        onboardingCompleted:
+          typeof data.onboardingCompleted === 'boolean' ? data.onboardingCompleted : undefined,
+        memoryConsent:
+          data.memoryConsent === 'agreed' || data.memoryConsent === 'disagreed' || data.memoryConsent === 'pending'
+            ? data.memoryConsent
+            : undefined,
+        username: data.username,
+        email: data.email,
+        avatarUrl: data.photoURL,
+        preferredLanguage: data.preferredLanguage,
+        country: data.country || data.country_name,
+        countryCode: data.countryCode || data.country_code,
+        countryFlag: data.countryFlag,
+        timezone: data.timezone,
+        countryDetectionMethod: data.countryDetectionMethod,
+        isManualCountry: typeof data.isManualCountry === 'boolean' ? data.isManualCountry : undefined,
+        termsAccepted: data.termsAccepted,
+        termsAcceptedAt: data.termsAcceptedAt,
+        preferredTheme: data.preferredTheme,
+        aiProvider:
+          data.aiProvider === 'gemini' || data.aiProvider === 'groq' || data.aiProvider === 'openrouter'
+            ? data.aiProvider
+            : undefined,
+        aiModel: typeof data.aiModel === 'string' ? data.aiModel.slice(0, 120) : undefined,
+        openRouterModel:
+          typeof data.openRouterModel === 'string' ? data.openRouterModel.slice(0, 120) : undefined,
+        aiResponseLanguage:
+          typeof data.aiResponseLanguage === 'string' ? data.aiResponseLanguage.slice(0, 20) : undefined,
+        autoDetectInputLanguage:
+          typeof data.autoDetectInputLanguage === 'boolean' ? data.autoDetectInputLanguage : undefined,
+        translationEnabled:
+          typeof data.translationEnabled === 'boolean' ? data.translationEnabled : undefined,
+        translationLanguage:
+          typeof data.translationLanguage === 'string' ? data.translationLanguage.slice(0, 20) : undefined,
+        streakDays:
+          typeof data.currentStreak === 'number'
+            ? data.currentStreak
+            : typeof data.current_streak === 'number'
+            ? data.current_streak
+            : typeof data.streakDays === 'number'
+            ? data.streakDays
+            : undefined,
+        currentStreak:
+          typeof data.currentStreak === 'number'
+            ? data.currentStreak
+            : typeof data.current_streak === 'number'
+            ? data.current_streak
+            : typeof data.streakDays === 'number'
+            ? data.streakDays
+            : undefined,
+        longestStreak:
+          typeof data.longestStreak === 'number'
+            ? data.longestStreak
+            : typeof data.longest_streak === 'number'
+            ? data.longest_streak
+            : undefined,
+        lastActiveDate:
+          typeof data.lastActiveDate === 'string'
+            ? data.lastActiveDate
+            : typeof data.last_active_date === 'string'
+            ? data.last_active_date
+            : undefined,
+        recoveryCount:
+          typeof data.recoveryCount === 'number'
+            ? data.recoveryCount
+            : typeof data.recovery_count === 'number'
+            ? data.recovery_count
+            : undefined,
+        recoveryMonth:
+          typeof data.recoveryMonth === 'string'
+            ? data.recoveryMonth
+            : typeof data.recovery_month === 'string'
+            ? data.recovery_month
+            : undefined,
+        streakBeforeBreak: typeof data.streakBeforeBreak === 'number' ? data.streakBeforeBreak : undefined,
+        streakBrokenDate: typeof data.streakBrokenDate === 'string' ? data.streakBrokenDate : undefined,
+        xp: typeof data.xp === 'number' && Number.isFinite(data.xp) ? Math.max(0, Math.floor(data.xp)) : undefined,
+        level: typeof data.level === 'number' && Number.isFinite(data.level) ? Math.max(1, Math.floor(data.level)) : undefined,
+        levelTitle: typeof data.levelTitle === 'string' ? data.levelTitle : undefined,
+        streakGoalDays:
+          typeof data.streakGoalDays === 'number' && Number.isFinite(data.streakGoalDays)
+            ? Math.max(1, Math.min(365, Math.floor(data.streakGoalDays)))
+            : undefined,
+        recoveredDates: Array.isArray(data.recoveredDates)
+          ? data.recoveredDates.filter((d: unknown): d is string => typeof d === 'string').slice(0, 120)
           : undefined,
-      username: data.username,
-      email: data.email,
-      avatarUrl: data.photoURL,
-      preferredLanguage: data.preferredLanguage,
-      country: data.country,
-      countryCode: data.countryCode,
-      countryFlag: data.countryFlag,
-      timezone: data.timezone,
-      countryDetectionMethod: data.countryDetectionMethod,
-      isManualCountry: typeof data.isManualCountry === 'boolean' ? data.isManualCountry : undefined,
-      termsAccepted: data.termsAccepted,
-      termsAcceptedAt: data.termsAcceptedAt,
-      preferredTheme: data.preferredTheme,
-      streakDays: typeof data.streakDays === 'number' ? data.streakDays : typeof data.currentStreak === 'number' ? data.currentStreak : undefined,
-      currentStreak: typeof data.currentStreak === 'number' ? data.currentStreak : typeof data.streakDays === 'number' ? data.streakDays : undefined,
-      longestStreak: typeof data.longestStreak === 'number' ? data.longestStreak : undefined,
-      lastActiveDate: typeof data.lastActiveDate === 'string' ? data.lastActiveDate : undefined,
-      recoveryCount: typeof data.recoveryCount === 'number' ? data.recoveryCount : undefined,
-      recoveryMonth: typeof data.recoveryMonth === 'string' ? data.recoveryMonth : undefined,
-      streakBeforeBreak: typeof data.streakBeforeBreak === 'number' ? data.streakBeforeBreak : undefined,
-      streakBrokenDate: typeof data.streakBrokenDate === 'string' ? data.streakBrokenDate : undefined,
-      status: data.status || 'active',
-      role: data.role || 'user',
-      createdAt: data.createdAt ? new Date(data.createdAt).getTime() : undefined,
-      lastActiveAt: data.lastActiveAt ? new Date(data.lastActiveAt).getTime() : undefined,
+        status: data.status || 'active',
+        role: data.role || 'user',
+        createdAt: data.createdAt ? new Date(data.createdAt).getTime() : undefined,
+        lastActiveAt: data.lastActiveAt ? new Date(data.lastActiveAt).getTime() : undefined,
+      },
     };
-  } catch (err) {
+  } catch (err: any) {
+    const errKind = classifyFirestoreErrorKind(err);
+    const errMsg = err?.message || 'Failed to read user profile from Firestore';
     console.warn('Load user profile warning:', err);
+    if (errKind === 'permission_denied') {
+      return { status: 'permission_denied', error: errMsg };
+    }
+    return { status: 'error', error: errMsg };
+  }
+}
+
+export async function loadUserProfileFromFirestore(
+  uid: string
+): Promise<FirestoreUserProfileRecord | null> {
+  const res = await loadUserProfileFromFirestoreWithStatus(uid);
+  return res.status === 'found' ? res.profile : null;
+}
+
+export interface StreakCreateDocMeta {
+  displayName?: string;
+  username?: string;
+  email?: string;
+  photoURL?: string;
+  preferredLanguage?: string;
+  provider?: string;
+  role?: 'user' | 'admin';
+  createdAt?: number;
+}
+
+export type StreakErrorCode = 'unauthenticated' | 'permission_denied' | 'unavailable' | 'other';
+
+export type StreakTransactionSafeResult =
+  | { ok: true; result: StreakActivityTransitionResult }
+  | { ok: false; errorCode: StreakErrorCode; error: string };
+
+/**
+ * Atomic Firestore transaction to record a daily active streak day for an authenticated user (`users/{uid}`).
+ * - Uses the user's permanent Firebase UID as the single document identifier (no duplicate Streak documents).
+ * - Creates the `users/{uid}` document atomically if it does not yet exist.
+ * - Prevents duplicate same-day increments across concurrent tabs, rapid refreshes, or multiple devices.
+ * - Reports Firestore read/write errors explicitly without silently resetting values to 0.
+ */
+export interface StreakTransactionAdapter {
+  userId: string;
+  authEmail?: string | null;
+  authEmailVerified?: boolean;
+  authDisplayName?: string | null;
+  authCreationTime?: string | null;
+  runTx: <T>(
+    executor: (ops: {
+      getDoc: () => Promise<{ exists: boolean; data: Record<string, any> }>;
+      updateDoc: (patch: Record<string, any>) => Promise<void> | void;
+      setDoc: (docData: Record<string, any>) => Promise<void> | void;
+    }) => Promise<T>
+  ) => Promise<T>;
+  fallbackSetDoc?: (docData: Record<string, any>) => Promise<void>;
+  fallbackUpdateDoc?: (patch: Record<string, any>) => Promise<void>;
+}
+
+/**
+ * Pure adapter-backed execution of the atomic streak transaction so both live Firestore
+ * (`recordDailyStreakActivityInFirestoreSafe`) and integration tests in `src/tests/firestore.test.ts`
+ * run the exact same transaction read/merge/write logic.
+ */
+export async function executeDailyStreakTransactionCore(
+  adapter: StreakTransactionAdapter,
+  preferredTimeZone: string = NEPAL_TIMEZONE,
+  nowMs: number = Date.now(),
+  createMeta?: StreakCreateDocMeta,
+  localSeedState?: Partial<PersistentStreakState> | null
+): Promise<StreakTransactionSafeResult> {
+  const uid = safeDocId(adapter.userId);
+  let computedTransition: StreakActivityTransitionResult | null = null;
+  let docExisted = false;
+
+  const buildMergedServerState = (data: Record<string, any>, effectiveTz: string) => {
+    const fsCurrent = sanitizeFiniteInt(data.currentStreak ?? data.current_streak ?? data.streakDays, 0, 10000, 0);
+    const fsLongest = sanitizeFiniteInt(data.longestStreak ?? data.longest_streak, 0, 10000, 0);
+    const fsLastDate = String(data.lastActiveDate ?? data.last_active_date ?? '').trim().slice(0, 20);
+    const serverHasRecord = Boolean(fsLastDate) || fsCurrent > 0 || fsLongest > 0;
+
+    const seed = localSeedState || null;
+    const seedLastDate = String(seed?.lastActiveDate || '').trim().slice(0, 20);
+    const seedCurrent = sanitizeFiniteInt(seed?.currentStreak, 0, 10000, 0);
+    const seedLongest = sanitizeFiniteInt(seed?.longestStreak, 0, 10000, 0);
+    const seedHasRecord = Boolean(seedLastDate) || seedCurrent > 0 || seedLongest > 0;
+
+    const useSeed =
+      seedHasRecord &&
+      (!serverHasRecord ||
+        (seedLastDate !== '' && (fsLastDate === '' || seedLastDate > fsLastDate)) ||
+        (seedLastDate === fsLastDate && seedCurrent > fsCurrent));
+
+    const fsRecoveryCount = sanitizeFiniteInt(
+      data.recoveryCount ?? data.recovery_count,
+      0,
+      MAX_MONTHLY_STREAK_RECOVERIES,
+      0
+    );
+    const seedRecoveryCount = sanitizeFiniteInt(
+      seed?.recoveryCount,
+      0,
+      MAX_MONTHLY_STREAK_RECOVERIES,
+      0
+    );
+
+    return {
+      currentStreak: useSeed ? seedCurrent : fsCurrent,
+      longestStreak: Math.max(fsLongest, fsCurrent, seedLongest, seedCurrent),
+      lastActiveDate: useSeed ? seedLastDate : fsLastDate,
+      timezone: effectiveTz,
+      recoveryCount: Math.max(fsRecoveryCount, seedRecoveryCount),
+      recoveryMonth:
+        (String(data.recoveryMonth ?? data.recovery_month ?? '').trim() ||
+          String(seed?.recoveryMonth ?? '').trim()).slice(0, 16),
+      streakBeforeBreak: sanitizeFiniteInt(
+        data.streakBeforeBreak ?? seed?.streakBeforeBreak,
+        0,
+        10000,
+        0
+      ),
+      streakBrokenDate: String(data.streakBrokenDate ?? seed?.streakBrokenDate ?? '').trim().slice(0, 20),
+    };
+  };
+
+  try {
+    const transition = await adapter.runTx(async (txOps) => {
+      const snap = await txOps.getDoc();
+      docExisted = snap.exists;
+      const data = snap.exists ? snap.data : {};
+      const effectiveTz = resolveEffectiveStreakTimezone(
+        preferredTimeZone && preferredTimeZone !== 'UTC' && preferredTimeZone !== 'Etc/UTC'
+          ? preferredTimeZone
+          : typeof data.timezone === 'string'
+          ? data.timezone
+          : undefined,
+        preferredTimeZone
+      );
+
+      const serverState = buildMergedServerState(data, effectiveTz);
+      const nextTransition = applyDailyActivityToStreakState(serverState, nowMs, effectiveTz);
+      computedTransition = nextTransition;
+      const next = nextTransition.nextState;
+      const nowIso = new Date(nowMs).toISOString();
+
+      const safeNextCurrent = sanitizeFiniteInt(next.currentStreak, 0, 10000, 0);
+      const safeNextLongest = Math.max(safeNextCurrent, sanitizeFiniteInt(next.longestStreak, 0, 10000, 0));
+      const safeNextRecoveryCount = sanitizeFiniteInt(
+        next.recoveryCount,
+        0,
+        MAX_MONTHLY_STREAK_RECOVERIES,
+        0
+      );
+      const safeNextBeforeBreak = sanitizeFiniteInt(next.streakBeforeBreak, 0, 10000, 0);
+      const safeNextLastActive = String(next.lastActiveDate || '').trim().slice(0, 20);
+      const safeNextRecoveryMonth = String(next.recoveryMonth || '').trim().slice(0, 16);
+      const safeNextBrokenDate = String(next.streakBrokenDate || '').trim().slice(0, 20);
+      const safeNextTz = String(next.timezone || NEPAL_TIMEZONE).trim().slice(0, 64) || NEPAL_TIMEZONE;
+
+      const safeDisplayName = resolveSafeDisplayName(
+        createMeta?.displayName,
+        adapter.authDisplayName,
+        adapter.authEmail ? adapter.authEmail.split('@')[0] : undefined
+      );
+
+      if (snap.exists) {
+        const unchanged =
+          data.userId === uid &&
+          typeof data.displayName === 'string' &&
+          data.displayName.trim().length > 0 &&
+          data.currentStreak === safeNextCurrent &&
+          data.streakDays === safeNextCurrent &&
+          data.longestStreak === safeNextLongest &&
+          data.lastActiveDate === safeNextLastActive &&
+          data.timezone === safeNextTz &&
+          data.recoveryCount === safeNextRecoveryCount &&
+          String(data.recoveryMonth ?? '') === safeNextRecoveryMonth &&
+          sanitizeFiniteInt(data.streakBeforeBreak, 0, 10000, 0) === safeNextBeforeBreak &&
+          String(data.streakBrokenDate ?? '') === safeNextBrokenDate;
+
+        if (!unchanged) {
+          const identityBackfill: Record<string, any> = {};
+          if (!data.userId || typeof data.userId !== 'string' || data.userId !== uid) {
+            identityBackfill.userId = uid;
+          }
+          if (!data.displayName || typeof data.displayName !== 'string' || !data.displayName.trim()) {
+            identityBackfill.displayName = safeDisplayName;
+          }
+
+          await txOps.updateDoc({
+            ...identityBackfill,
+            streakDays: safeNextCurrent,
+            currentStreak: safeNextCurrent,
+            longestStreak: safeNextLongest,
+            lastActiveDate: safeNextLastActive,
+            timezone: safeNextTz,
+            recoveryCount: safeNextRecoveryCount,
+            recoveryMonth: safeNextRecoveryMonth,
+            streakBeforeBreak: safeNextBeforeBreak,
+            streakBrokenDate: safeNextBrokenDate,
+            updatedAt: nowIso,
+            lastActiveAt: nowIso,
+          });
+        }
+      } else {
+        const isVerifiedOwner =
+          (adapter.authEmail || '').toLowerCase() === OWNER_ADMIN_EMAIL &&
+          Boolean(adapter.authEmailVerified);
+        const creationTime = adapter.authCreationTime
+          ? new Date(adapter.authCreationTime).toISOString()
+          : createMeta?.createdAt && Number.isFinite(createMeta.createdAt)
+          ? new Date(createMeta.createdAt).toISOString()
+          : nowIso;
+        const fallbackHandle =
+          createMeta?.username?.trim() ||
+          safeDisplayName.toLowerCase().replace(/[^a-z0-9_]/g, '') ||
+          'user';
+
+        await txOps.setDoc({
+          userId: uid,
+          displayName: safeDisplayName,
+          username: fallbackHandle.slice(0, 64),
+          email: String(createMeta?.email || adapter.authEmail || '').slice(0, 160),
+          photoURL: String(createMeta?.photoURL || '').slice(0, 1000),
+          preferredLanguage: (String(createMeta?.preferredLanguage || 'en').trim() || 'en').slice(0, 20),
+          status: 'active',
+          role: isVerifiedOwner ? 'admin' : 'user',
+          provider: (String(createMeta?.provider || 'email').trim() || 'email').slice(0, 32),
+          messageCount: 0,
+          conversationCount: 1,
+          createdAt: creationTime.slice(0, 50),
+          updatedAt: nowIso,
+          lastActiveAt: nowIso,
+          streakDays: safeNextCurrent,
+          currentStreak: safeNextCurrent,
+          longestStreak: safeNextLongest,
+          lastActiveDate: safeNextLastActive,
+          timezone: safeNextTz,
+          recoveryCount: safeNextRecoveryCount,
+          recoveryMonth: safeNextRecoveryMonth,
+          streakBeforeBreak: safeNextBeforeBreak,
+          streakBrokenDate: safeNextBrokenDate,
+        });
+      }
+
+      return nextTransition;
+    });
+    return { ok: true, result: transition };
+  } catch (err: any) {
+    if (classifyFirestoreErrorKind(err) === 'permission_denied' && computedTransition) {
+      const next = (computedTransition as StreakActivityTransitionResult).nextState;
+      const nowIso = new Date(nowMs).toISOString();
+      const safeNextCurrent = sanitizeFiniteInt(next.currentStreak, 0, 10000, 0);
+      const safeNextLongest = Math.max(safeNextCurrent, sanitizeFiniteInt(next.longestStreak, 0, 10000, 0));
+      const safeNextRecoveryCount = sanitizeFiniteInt(
+        next.recoveryCount,
+        0,
+        MAX_MONTHLY_STREAK_RECOVERIES,
+        0
+      );
+      const safeNextLastActive = String(next.lastActiveDate || '').trim().slice(0, 20);
+      const safeNextRecoveryMonth = String(next.recoveryMonth || '').trim().slice(0, 16);
+      const safeNextTz = String(next.timezone || NEPAL_TIMEZONE).trim().slice(0, 64) || NEPAL_TIMEZONE;
+      const safeDisplayName = resolveSafeDisplayName(
+        createMeta?.displayName,
+        adapter.authDisplayName,
+        adapter.authEmail ? adapter.authEmail.split('@')[0] : undefined
+      );
+
+      if (!docExisted && adapter.fallbackSetDoc) {
+        try {
+          await adapter.fallbackSetDoc({
+            userId: uid,
+            displayName: safeDisplayName,
+            email: String(createMeta?.email || adapter.authEmail || '').slice(0, 160),
+            role: 'user',
+            status: 'active',
+            createdAt: nowIso,
+            updatedAt: nowIso,
+            lastActiveAt: nowIso,
+            streakDays: safeNextCurrent,
+            currentStreak: safeNextCurrent,
+            longestStreak: safeNextLongest,
+            lastActiveDate: safeNextLastActive,
+            timezone: safeNextTz,
+            recoveryCount: safeNextRecoveryCount,
+            recoveryMonth: safeNextRecoveryMonth,
+          });
+          return { ok: true, result: computedTransition };
+        } catch {
+          // Fall through
+        }
+      } else if (docExisted && adapter.fallbackUpdateDoc) {
+        const fallbackPayloads: Record<string, any>[] = [
+          {
+            streakDays: safeNextCurrent,
+            currentStreak: safeNextCurrent,
+            longestStreak: safeNextLongest,
+            lastActiveDate: safeNextLastActive,
+            timezone: safeNextTz,
+            recoveryCount: safeNextRecoveryCount,
+            recoveryMonth: safeNextRecoveryMonth,
+            updatedAt: nowIso,
+            lastActiveAt: nowIso,
+          },
+          {
+            displayName: safeDisplayName,
+            streakDays: safeNextCurrent,
+            currentStreak: safeNextCurrent,
+            longestStreak: safeNextLongest,
+            lastActiveDate: safeNextLastActive,
+            timezone: safeNextTz,
+            recoveryCount: safeNextRecoveryCount,
+            recoveryMonth: safeNextRecoveryMonth,
+            updatedAt: nowIso,
+            lastActiveAt: nowIso,
+          },
+          {
+            streakDays: safeNextCurrent,
+            currentStreak: safeNextCurrent,
+            longestStreak: safeNextLongest,
+            lastActiveDate: safeNextLastActive,
+            updatedAt: nowIso,
+            lastActiveAt: nowIso,
+          },
+          {
+            streakDays: safeNextCurrent,
+            lastActiveDate: safeNextLastActive,
+            updatedAt: nowIso,
+            lastActiveAt: nowIso,
+          },
+        ];
+        for (const payload of fallbackPayloads) {
+          try {
+            await adapter.fallbackUpdateDoc(payload);
+            return { ok: true, result: computedTransition };
+          } catch {
+            // Try next subset
+          }
+        }
+      }
+    }
+    console.warn('Atomic streak activity transaction warning:', err);
+    return {
+      ok: false,
+      errorCode: classifyFirestoreErrorKind(err),
+      error: err?.message || 'Failed to save streak transaction to Firestore',
+    };
+  }
+}
+
+export async function recordDailyStreakActivityInFirestoreSafe(
+  userId: string,
+  preferredTimeZone: string = NEPAL_TIMEZONE,
+  nowMs: number = Date.now(),
+  createMeta?: StreakCreateDocMeta,
+  localSeedState?: Partial<PersistentStreakState> | null
+): Promise<StreakTransactionSafeResult> {
+  if (!db || !auth?.currentUser || auth.currentUser.uid !== userId) {
+    return {
+      ok: false,
+      errorCode: 'unauthenticated',
+      error: 'Authenticated Firebase user required for streak persistence',
+    };
+  }
+  const firestore = db;
+  const currentAuthUser = auth.currentUser;
+  const uid = safeDocId(userId);
+  const docRef = doc(firestore, 'users', uid);
+
+  return executeDailyStreakTransactionCore(
+    {
+      userId: uid,
+      authEmail: currentAuthUser.email,
+      authEmailVerified: currentAuthUser.emailVerified,
+      authDisplayName: currentAuthUser.displayName,
+      authCreationTime: currentAuthUser.metadata.creationTime,
+      runTx: (executor) =>
+        runTransaction(firestore, async (tx) =>
+          executor({
+            getDoc: async () => {
+              const snap = await tx.get(docRef);
+              return { exists: snap.exists(), data: snap.exists() ? snap.data() : {} };
+            },
+            updateDoc: (patch) => {
+              tx.update(docRef, patch);
+            },
+            setDoc: (docData) => {
+              tx.set(docRef, docData);
+            },
+          })
+        ),
+      fallbackSetDoc: (docData) => setDoc(docRef, docData),
+      fallbackUpdateDoc: (patch) => updateDoc(docRef, patch),
+    },
+    preferredTimeZone,
+    nowMs,
+    {
+      ...createMeta,
+      photoURL: String(createMeta?.photoURL || currentAuthUser.photoURL || '').slice(0, 1000),
+    },
+    localSeedState
+  );
+}
+
+export async function recordDailyStreakActivityInFirestore(
+  userId: string,
+  preferredTimeZone: string = NEPAL_TIMEZONE,
+  nowMs: number = Date.now(),
+  createMeta?: StreakCreateDocMeta,
+  localSeedState?: Partial<PersistentStreakState> | null
+): Promise<StreakActivityTransitionResult | null> {
+  const res = await recordDailyStreakActivityInFirestoreSafe(
+    userId,
+    preferredTimeZone,
+    nowMs,
+    createMeta,
+    localSeedState
+  );
+  return res.ok ? res.result : null;
+}
+
+/**
+ * Atomic Firestore transaction to recover an eligible broken streak (max 5 recoveries per calendar month).
+ * Prevents concurrent or repeated recovery requests from consuming multiple monthly credits.
+ */
+export async function recoverDailyStreakInFirestore(
+  userId: string,
+  preferredTimeZone: string = NEPAL_TIMEZONE,
+  nowMs: number = Date.now()
+): Promise<(StreakRecoveryResult & { recoveredDates?: string[] }) | null> {
+  if (!db || !auth?.currentUser || auth.currentUser.uid !== userId) return null;
+  const firestore = db;
+  const uid = safeDocId(userId);
+  const docRef = doc(firestore, 'users', uid);
+
+  try {
+    let bridgedDates: string[] = [];
+    let resolvedTzForLog = resolveEffectiveStreakTimezone(preferredTimeZone);
+    const txResult = await runTransaction(firestore, async (tx) => {
+      const snap = await tx.get(docRef);
+      if (!snap.exists()) return null;
+      const data = snap.data();
+      const effectiveTz = resolveEffectiveStreakTimezone(
+        preferredTimeZone && preferredTimeZone !== 'UTC' && preferredTimeZone !== 'Etc/UTC'
+          ? preferredTimeZone
+          : typeof data.timezone === 'string'
+          ? data.timezone
+          : undefined,
+        preferredTimeZone
+      );
+      resolvedTzForLog = effectiveTz;
+
+      const serverState = {
+        currentStreak: sanitizeFiniteInt(data.currentStreak ?? data.current_streak ?? data.streakDays, 0, 10000, 0),
+        longestStreak: sanitizeFiniteInt(data.longestStreak ?? data.longest_streak, 0, 10000, 0),
+        lastActiveDate: String(data.lastActiveDate ?? data.last_active_date ?? '').trim().slice(0, 20),
+        timezone: effectiveTz,
+        recoveryCount: sanitizeFiniteInt(data.recoveryCount ?? data.recovery_count, 0, MAX_MONTHLY_STREAK_RECOVERIES, 0),
+        recoveryMonth: String(data.recoveryMonth ?? data.recovery_month ?? '').trim().slice(0, 16),
+        streakBeforeBreak: sanitizeFiniteInt(data.streakBeforeBreak, 0, 10000, 0),
+        streakBrokenDate: String(data.streakBrokenDate ?? '').trim().slice(0, 20),
+      };
+
+      const result = recoverBrokenStreakState(serverState, nowMs, effectiveTz);
+      if (!result.ok) {
+        return result;
+      }
+
+      const brokenAnchor =
+        serverState.streakBrokenDate || serverState.lastActiveDate || '';
+      bridgedDates = getRecoveredGapDateKeys(brokenAnchor, result.todayKey);
+
+      const existingRecoveredDates = Array.isArray(data.recoveredDates)
+        ? data.recoveredDates.filter((d: unknown): d is string => typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d))
+        : [];
+      const mergedRecoveredDates = Array.from(new Set([...existingRecoveredDates, ...bridgedDates]))
+        .sort()
+        .slice(-120);
+
+      const next = result.nextState;
+      const nowIso = new Date(nowMs).toISOString();
+      const safeRecoveredCurrent = sanitizeFiniteInt(next.currentStreak, 0, 10000, 0);
+      const safeRecoveredLongest = Math.max(
+        safeRecoveredCurrent,
+        sanitizeFiniteInt(next.longestStreak, 0, 10000, 0)
+      );
+      tx.update(docRef, {
+        ...(!data.userId || data.userId !== uid ? { userId: uid } : {}),
+        streakDays: safeRecoveredCurrent,
+        currentStreak: safeRecoveredCurrent,
+        longestStreak: safeRecoveredLongest,
+        lastActiveDate: String(next.lastActiveDate || '').trim().slice(0, 20),
+        timezone: String(next.timezone || effectiveTz).trim().slice(0, 64),
+        recoveryCount: sanitizeFiniteInt(next.recoveryCount, 0, MAX_MONTHLY_STREAK_RECOVERIES, 0),
+        recoveryMonth: String(next.recoveryMonth || '').trim().slice(0, 16),
+        streakBeforeBreak: 0,
+        streakBrokenDate: '',
+        recoveredDates: mergedRecoveredDates,
+        updatedAt: nowIso,
+        lastActiveAt: nowIso,
+      });
+
+      return result;
+    });
+
+    if (txResult && txResult.ok && bridgedDates.length > 0) {
+      // Persist recovered calendar dates in usage_analytics so the Streak Calendar displays them across sessions/devices
+      void Promise.all(
+        bridgedDates.map((dateKey) =>
+          recordUsageAnalyticsToFirestore({
+            eventType: 'streak_recovery',
+            explicitDateKey: dateKey,
+            timeZone: resolvedTzForLog,
+          })
+        )
+      ).catch(() => {});
+      return { ...txResult, recoveredDates: bridgedDates };
+    }
+
+    return txResult;
+  } catch (err) {
+    console.warn('Atomic streak recovery transaction warning:', err);
     return null;
+  }
+}
+
+/**
+ * Persists a Streak Freeze update (XP deduction, recoveryCount, anchored lastActiveDate, preserved streak)
+ * directly on `users/{uid}` so refreshing or logging out never resets the frozen streak to 0.
+ */
+export async function syncStreakFreezeToFirestoreSafe(
+  userId: string,
+  updatedUser: UserProfile,
+  timeZone: string = NEPAL_TIMEZONE,
+  nowMs: number = Date.now()
+): Promise<{ ok: boolean; error?: string }> {
+  if (!db || !auth?.currentUser || auth.currentUser.uid !== userId) {
+    return { ok: false, error: 'Authenticated Firebase user required' };
+  }
+  const uid = safeDocId(userId);
+  const docRef = doc(db, 'users', uid);
+  const nowIso = new Date(nowMs).toISOString();
+  const safeStreak = Math.max(1, Math.min(10000, Math.floor(updatedUser.currentStreak ?? updatedUser.streakDays ?? 1)));
+  const safeLongest = Math.max(safeStreak, Math.min(10000, Math.floor(updatedUser.longestStreak ?? safeStreak)));
+  const safeTz = resolveEffectiveStreakTimezone(timeZone || updatedUser.timezone);
+  const safeRecoveryCount = Math.max(0, Math.min(MAX_MONTHLY_STREAK_RECOVERIES, Math.floor(updatedUser.recoveryCount ?? 1)));
+  const safeRecoveryMonth = (updatedUser.recoveryMonth || getLocalDateKeyInTimezone(nowMs, safeTz).slice(0, 7)).slice(0, 16);
+  const safeLastActive = (updatedUser.lastActiveDate || getLocalDateKeyInTimezone(nowMs, safeTz)).slice(0, 20);
+  const safeXp = Math.max(0, Math.floor(Number(updatedUser.xp) || 0));
+
+  try {
+    await updateDoc(docRef, {
+      streakDays: safeStreak,
+      currentStreak: safeStreak,
+      longestStreak: safeLongest,
+      lastActiveDate: safeLastActive,
+      timezone: safeTz.slice(0, 64),
+      recoveryCount: safeRecoveryCount,
+      recoveryMonth: safeRecoveryMonth,
+      streakBeforeBreak: 0,
+      streakBrokenDate: '',
+      xp: safeXp,
+      updatedAt: nowIso,
+      lastActiveAt: nowIso,
+    });
+    return { ok: true };
+  } catch (err: any) {
+    const errText = String(err?.code || err?.message || '').toLowerCase();
+    if (errText.includes('permission')) {
+      try {
+        await updateDoc(docRef, {
+          streakDays: safeStreak,
+          currentStreak: safeStreak,
+          longestStreak: safeLongest,
+          lastActiveDate: safeLastActive,
+          recoveryCount: safeRecoveryCount,
+          recoveryMonth: safeRecoveryMonth,
+          updatedAt: nowIso,
+          lastActiveAt: nowIso,
+        });
+        return { ok: true };
+      } catch {
+        // Fall through
+      }
+    }
+    return { ok: false, error: err?.message || 'Failed to sync streak freeze to Firestore' };
   }
 }
 
@@ -653,17 +1505,21 @@ export async function deleteConversationFromFirestore(
 }
 
 export async function recordUsageAnalyticsToFirestore(params: {
-  eventType: 'chat' | 'voice' | 'image' | 'translation' | 'file';
+  eventType: 'chat' | 'voice' | 'image' | 'translation' | 'file' | 'streak_recovery';
   language?: string;
   latencyMs?: number;
   timeZone?: string;
+  explicitDateKey?: string;
 }): Promise<void> {
   if (!db || !auth?.currentUser) return;
   const uid = safeDocId(auth.currentUser.uid);
   const eventId = safeDocId(`evt-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`);
   const path = `usage_analytics/${eventId}`;
   const now = new Date();
-  const dateKey = getLocalDateKeyInTimezone(now.getTime(), params.timeZone);
+  const dateKey =
+    params.explicitDateKey && /^\d{4}-\d{2}-\d{2}$/.test(params.explicitDateKey)
+      ? params.explicitDateKey
+      : getLocalDateKeyInTimezone(now.getTime(), resolveEffectiveStreakTimezone(params.timeZone));
   try {
     await setDoc(doc(db, 'usage_analytics', eventId), {
       id: eventId,
@@ -683,19 +1539,21 @@ export async function recordUsageAnalyticsToFirestore(params: {
 
 export interface FirestoreUsageStreakResult {
   dateCounts: Record<string, number>;
+  recoveredDates: string[];
   totalInteractions: number;
   source: 'firestore' | 'local';
 }
 
 export async function fetchUserUsageDatesFromFirestore(
   userId: string,
-  timeZone?: string
+  timeZone: string = NEPAL_TIMEZONE
 ): Promise<FirestoreUsageStreakResult> {
   if (!db || !auth?.currentUser || auth.currentUser.uid !== userId) {
-    return { dateCounts: {}, totalInteractions: 0, source: 'local' };
+    return { dateCounts: {}, recoveredDates: [], totalInteractions: 0, source: 'local' };
   }
   const uid = safeDocId(userId);
   const dateCounts: Record<string, number> = {};
+  const recoveredDateSet = new Set<string>();
   let totalInteractions = 0;
 
   // 1. Query user's usage_analytics logs
@@ -706,8 +1564,13 @@ export async function fetchUserUsageDatesFromFirestore(
     );
     analyticsSnap.docs.forEach((d) => {
       const data = d.data();
+      const isRecoveryEvent = data.eventType === 'streak_recovery';
       let dateKey = '';
-      if (typeof data.timestamp === 'string') {
+
+      if (isRecoveryEvent && typeof data.dateKey === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(data.dateKey)) {
+        // Recovery events store the exact missed calendar date bridged by the recovery
+        dateKey = data.dateKey;
+      } else if (typeof data.timestamp === 'string') {
         const ms = new Date(data.timestamp).getTime();
         if (!Number.isNaN(ms)) {
           dateKey = getLocalDateKeyInTimezone(ms, timeZone);
@@ -717,8 +1580,12 @@ export async function fetchUserUsageDatesFromFirestore(
         dateKey = data.dateKey;
       }
       if (dateKey && /^\d{4}-\d{2}-\d{2}$/.test(dateKey)) {
-        dateCounts[dateKey] = (dateCounts[dateKey] || 0) + 1;
-        totalInteractions += 1;
+        if (isRecoveryEvent) {
+          recoveredDateSet.add(dateKey);
+        } else {
+          dateCounts[dateKey] = (dateCounts[dateKey] || 0) + 1;
+          totalInteractions += 1;
+        }
       }
     });
   } catch (err) {
@@ -763,6 +1630,7 @@ export async function fetchUserUsageDatesFromFirestore(
 
   return {
     dateCounts,
+    recoveredDates: Array.from(recoveredDateSet).sort(),
     totalInteractions: Math.max(
       totalInteractions,
       Object.values(dateCounts).reduce((sum, n) => sum + n, 0)
@@ -962,6 +1830,9 @@ export async function loadMemoriesFromFirestore(userId: string): Promise<AIMemor
         category: data.category || 'preference',
         content: data.content || '',
         approved: Boolean(data.approved),
+        ...(data.source ? { source: data.source } : {}),
+        ...(typeof data.isSensitive === 'boolean' ? { isSensitive: data.isSensitive } : {}),
+        ...(Array.isArray(data.keywords) ? { keywords: data.keywords.slice(0, 12) } : {}),
         createdAt: data.createdAt ? new Date(data.createdAt).getTime() : Date.now(),
         updatedAt: data.updatedAt ? new Date(data.updatedAt).getTime() : Date.now(),
       };
@@ -974,8 +1845,12 @@ export async function loadMemoriesFromFirestore(userId: string): Promise<AIMemor
   }
 }
 
-export async function saveMemoryToFirestore(userId: string, item: AIMemoryItem): Promise<void> {
-  if (!db || !auth?.currentUser || auth.currentUser.uid !== userId) return;
+export async function saveMemoryToFirestore(userId: string, item: AIMemoryItem): Promise<boolean> {
+  if (!db || !auth?.currentUser || auth.currentUser.uid !== userId) return false;
+  // Defense-in-depth: never persist secret tokens/keys in memory documents
+  if (/\b(?:AIza[0-9A-Za-z\-_]{20,}|gsk_[0-9A-Za-z]{16,}|sk-or-v1-[0-9A-Za-z]{16,}|sk-[0-9A-Za-z]{20,})\b/.test(item.content)) {
+    return false;
+  }
   const uid = safeDocId(userId);
   const memId = safeDocId(item.id);
   const path = `users/${uid}/memories/${memId}`;
@@ -986,27 +1861,55 @@ export async function saveMemoryToFirestore(userId: string, item: AIMemoryItem):
       category: item.category,
       content: item.content.slice(0, 2000),
       approved: Boolean(item.approved),
+      ...(item.source ? { source: item.source } : {}),
+      ...(typeof item.isSensitive === 'boolean' ? { isSensitive: item.isSensitive } : {}),
+      ...(Array.isArray(item.keywords) && item.keywords.length > 0
+        ? { keywords: item.keywords.filter((k) => typeof k === 'string').slice(0, 12) }
+        : {}),
       createdAt: new Date(item.createdAt || Date.now()).toISOString(),
       updatedAt: new Date(item.updatedAt || Date.now()).toISOString(),
     });
+    return true;
   } catch (err) {
     if (err instanceof Error && err.message.toLowerCase().includes('permission')) {
       handleFirestoreError(err, OperationType.WRITE, path);
     }
+    return false;
   }
 }
 
-export async function deleteMemoryFromFirestore(userId: string, memoryId: string): Promise<void> {
-  if (!db || !auth?.currentUser || auth.currentUser.uid !== userId) return;
+export async function deleteMemoryFromFirestore(userId: string, memoryId: string): Promise<boolean> {
+  if (!db || !auth?.currentUser || auth.currentUser.uid !== userId) return false;
   const uid = safeDocId(userId);
   const memId = safeDocId(memoryId);
   const path = `users/${uid}/memories/${memId}`;
   try {
     await deleteDoc(doc(db, 'users', uid, 'memories', memId));
+    return true;
   } catch (err) {
     if (err instanceof Error && err.message.toLowerCase().includes('permission')) {
       handleFirestoreError(err, OperationType.DELETE, path);
     }
+    return false;
+  }
+}
+
+export async function clearAllMemoriesFromFirestore(userId: string): Promise<boolean> {
+  if (!db || !auth?.currentUser || auth.currentUser.uid !== userId) return false;
+  const uid = safeDocId(userId);
+  const path = `users/${uid}/memories`;
+  try {
+    const snap = await getDocs(collection(db, 'users', uid, 'memories'));
+    if (snap.empty) return true;
+    const batch = writeBatch(db);
+    snap.docs.forEach((d) => batch.delete(d.ref));
+    await batch.commit();
+    return true;
+  } catch (err) {
+    if (err instanceof Error && err.message.toLowerCase().includes('permission')) {
+      handleFirestoreError(err, OperationType.DELETE, path);
+    }
+    return false;
   }
 }
 
@@ -1411,3 +2314,496 @@ export async function deleteAutomationLogFromFirestore(
     }
   }
 }
+
+// ---------------- GLOBAL STREAK LEADERBOARD (PII-ISOLATED REAL-TIME SYNC) ----------------
+
+function logFirestoreErrorQuiet(
+  error: unknown,
+  operationType: OperationType,
+  path: string | null
+): void {
+  const errMsg = error instanceof Error ? error.message : String(error);
+  // Log as warning with clear tag so optional background leaderboard sync never trips AI Studio fatal error monitoring
+  console.warn(`[Leaderboard notice] ${operationType} on ${path || 'streak_leaderboard'}:`, errMsg);
+}
+
+function sanitizeLeaderboardDisplayName(profile: Partial<UserProfile>): string {
+  const candidates = [profile.nickname, profile.name, profile.username];
+  for (const candidate of candidates) {
+    const cleaned = String(candidate || '').trim();
+    if (!cleaned) continue;
+    // Never publish raw email addresses to the public leaderboard
+    if (cleaned.includes('@')) {
+      const localPart = cleaned.split('@')[0].trim();
+      if (localPart) return localPart.slice(0, 64);
+      continue;
+    }
+    return cleaned.slice(0, 64);
+  }
+  return 'Aadesh Explorer';
+}
+
+function sanitizeLeaderboardAvatarUrl(url?: string): string {
+  const trimmed = String(url || '').trim();
+  if (!trimmed || !trimmed.startsWith('https://') || trimmed.length > 1000) {
+    return '';
+  }
+  return trimmed;
+}
+
+export type LeaderboardSyncSkipReason =
+  | 'unauthenticated'
+  | 'permission_denied'
+  | 'missing_user_doc'
+  | 'insufficient_streak'
+  | 'read_failed'
+  | 'write_failed';
+
+export type LeaderboardSyncResult =
+  | { ok: true; currentStreak: number; longestStreak: number }
+  | { ok: false; reason: LeaderboardSyncSkipReason; error?: string };
+
+export interface LeaderboardEligibilityInput {
+  authUid: string | null | undefined;
+  profileId: string;
+  userDocStatus: 'found' | 'not_found' | 'permission_denied' | 'error';
+  userDocData?: Record<string, any> | null;
+  profileCurrentStreak?: number;
+  profileLongestStreak?: number;
+  profileLastActiveDate?: string;
+}
+
+/**
+ * Pure authorization & sufficiency evaluator for leaderboard writes.
+ * Requires:
+ *  1. Matching authenticated UID
+ *  2. Existing `users/{uid}` document in Firestore (never writes when missing or permission-denied)
+ *  3. Sufficient persisted streak activity (`>= 1`) in the user's Firestore document
+ */
+export function evaluateLeaderboardSyncEligibility(
+  input: LeaderboardEligibilityInput
+):
+  | {
+      eligible: true;
+      currentStreak: number;
+      longestStreak: number;
+      lastActiveDate: string;
+    }
+  | { eligible: false; reason: LeaderboardSyncSkipReason; error: string } {
+  if (!input.authUid || input.authUid !== input.profileId) {
+    return {
+      eligible: false,
+      reason: 'unauthenticated',
+      error: 'Authenticated UID mismatch for leaderboard sync',
+    };
+  }
+  if (input.userDocStatus === 'permission_denied') {
+    return {
+      eligible: false,
+      reason: 'permission_denied',
+      error: 'Firestore denied read access to users/{uid} before leaderboard sync',
+    };
+  }
+  if (input.userDocStatus === 'not_found' || !input.userDocData) {
+    return {
+      eligible: false,
+      reason: 'missing_user_doc',
+      error: 'User document users/{uid} does not exist in Firestore yet',
+    };
+  }
+  if (input.userDocStatus === 'error') {
+    return {
+      eligible: false,
+      reason: 'read_failed',
+      error: 'Unable to verify users/{uid} document state before leaderboard sync',
+    };
+  }
+
+  const docCurrentStreak = Math.max(
+    0,
+    Math.min(
+      10000,
+      Math.floor(
+        Number(
+          input.userDocData.currentStreak ??
+            input.userDocData.current_streak ??
+            input.userDocData.streakDays ??
+            0
+        ) || 0
+      )
+    )
+  );
+  const docLongestStreak = Math.max(
+    0,
+    Math.min(
+      10000,
+      Math.floor(
+        Number(input.userDocData.longestStreak ?? input.userDocData.longest_streak ?? 0) || 0
+      )
+    )
+  );
+  if (Math.max(docCurrentStreak, docLongestStreak) < 1) {
+    return {
+      eligible: false,
+      reason: 'insufficient_streak',
+      error: 'Firestore user document must have a streak (>= 1) before publishing to leaderboard',
+    };
+  }
+
+  const clientCurrentStreak = Math.max(
+    0,
+    Math.min(10000, Math.floor(Number(input.profileCurrentStreak ?? 0) || 0))
+  );
+  const effectiveCurrentStreak = Math.max(docCurrentStreak, clientCurrentStreak);
+  const effectiveLongestStreak = Math.max(
+    effectiveCurrentStreak,
+    docLongestStreak,
+    Math.min(10000, Math.floor(Number(input.profileLongestStreak ?? 0) || 0))
+  );
+  const resolvedLastActiveDate = String(
+    input.profileLastActiveDate ||
+      input.userDocData.lastActiveDate ||
+      input.userDocData.last_active_date ||
+      ''
+  ).slice(0, 20);
+
+  return {
+    eligible: true,
+    currentStreak: effectiveCurrentStreak,
+    longestStreak: effectiveLongestStreak,
+    lastActiveDate: resolvedLastActiveDate,
+  };
+}
+
+/**
+ * Publishes or updates the authenticated user's PII-isolated summary document in
+ * `/streak_leaderboard/{userId}` after verifying that `users/{userId}` exists in Firestore
+ * and has sufficient active streak progress (`currentStreak >= 1`).
+ */
+export async function syncUserStreakLeaderboardEntry(
+  profile: Partial<UserProfile> & { id: string }
+): Promise<LeaderboardSyncResult> {
+  if (!db || !auth?.currentUser || auth.currentUser.uid !== profile.id) {
+    return {
+      ok: false,
+      reason: 'unauthenticated',
+      error: 'Authenticated Firebase user required for leaderboard sync',
+    };
+  }
+
+  const uid = safeDocId(profile.id);
+  const userDocRef = doc(db, 'users', uid);
+  let userDocStatus: 'found' | 'not_found' | 'permission_denied' | 'error' = 'error';
+  let userDocData: Record<string, any> | null = null;
+  let userReadErrorMessage = '';
+
+  try {
+    let userSnap;
+    try {
+      userSnap = await getDocFromServer(userDocRef);
+    } catch (serverErr: any) {
+      if (classifyFirestoreErrorKind(serverErr) === 'unavailable') {
+        userSnap = await getDoc(userDocRef);
+      } else {
+        throw serverErr;
+      }
+    }
+    if (!userSnap.exists()) {
+      userDocStatus = 'not_found';
+    } else {
+      userDocStatus = 'found';
+      userDocData = userSnap.data() as Record<string, any>;
+    }
+  } catch (readErr: any) {
+    const kind = classifyFirestoreErrorKind(readErr);
+    userReadErrorMessage = String(readErr?.message || readErr || '');
+    userDocStatus = kind === 'permission_denied' ? 'permission_denied' : 'error';
+  }
+
+  const eligibility = evaluateLeaderboardSyncEligibility({
+    authUid: auth.currentUser.uid,
+    profileId: profile.id,
+    userDocStatus,
+    userDocData,
+    profileCurrentStreak: profile.currentStreak ?? profile.streakDays ?? 0,
+    profileLongestStreak: profile.longestStreak ?? 0,
+    profileLastActiveDate: profile.lastActiveDate || '',
+  });
+
+  if (!eligibility.eligible) {
+    if (eligibility.reason === 'permission_denied') {
+      console.warn('[Leaderboard notice] streak_leaderboard write skipped: remote permissions boundary');
+    }
+    return {
+      ok: false,
+      reason: eligibility.reason,
+      error: userReadErrorMessage || eligibility.error,
+    };
+  }
+
+  const path = `streak_leaderboard/${uid}`;
+  const docRef = doc(db, 'streak_leaderboard', uid);
+  const safeLevel = Math.max(1, Math.min(100, computeLevelInfo(profile.xp || 0).level));
+  const nowIso = new Date().toISOString();
+
+  const payload = {
+    userId: uid,
+    displayName: sanitizeLeaderboardDisplayName(profile),
+    avatarUrl: sanitizeLeaderboardAvatarUrl(profile.avatarUrl),
+    avatarColor: String(profile.avatarColor || '#8b5cf6').slice(0, 24),
+    country: String(profile.country || 'Global').slice(0, 80),
+    countryFlag: String(profile.countryFlag || '🌐').slice(0, 16),
+    currentStreak: eligibility.currentStreak,
+    longestStreak: eligibility.longestStreak,
+    lastActiveDate: eligibility.lastActiveDate,
+    level: safeLevel,
+    updatedAt: nowIso,
+  };
+
+  try {
+    await setDoc(docRef, payload, { merge: true });
+    return {
+      ok: true,
+      currentStreak: eligibility.currentStreak,
+      longestStreak: eligibility.longestStreak,
+    };
+  } catch (err: any) {
+    const msg = String(err?.message || err);
+    if (classifyFirestoreErrorKind(err) === 'permission_denied') {
+      console.warn('[Leaderboard notice] streak_leaderboard write skipped: remote permissions boundary');
+      return { ok: false, reason: 'permission_denied', error: msg };
+    }
+    logFirestoreErrorQuiet(err, OperationType.WRITE, path);
+    return { ok: false, reason: 'write_failed', error: msg };
+  }
+}
+
+export interface GlobalLeaderboardErrorInfo {
+  code: string;
+  message: string;
+  isPermissionError: boolean;
+}
+
+/**
+ * Subscribes in real time via Firestore `onSnapshot` to the top active streak holders
+ * (`currentStreak >= 1`) in `/streak_leaderboard`.
+ * Uses a single-field query (`where + orderBy` on `currentStreak`) so no composite index is required.
+ */
+export function subscribeToGlobalStreakLeaderboard(options: {
+  currentUserId?: string;
+  maxEntries?: number;
+  onData: (entries: RankedLeaderboardEntry[]) => void;
+  onError?: (error: GlobalLeaderboardErrorInfo) => void;
+}): Unsubscribe {
+  const safeMax = Math.max(1, Math.min(25, Math.floor(options.maxEntries ?? 10)));
+  if (!db || !auth?.currentUser) {
+    options.onData([]);
+    return () => {};
+  }
+
+  const leaderboardQuery = query(
+    collection(db, 'streak_leaderboard'),
+    where('currentStreak', '>=', 1),
+    orderBy('currentStreak', 'desc'),
+    limit(safeMax)
+  );
+
+  return onSnapshot(
+    leaderboardQuery,
+    (snapshot) => {
+      const rawEntries: GlobalLeaderboardEntry[] = snapshot.docs.map((docSnap) => {
+        const d = docSnap.data() || {};
+        return {
+          userId: String(d.userId || docSnap.id),
+          displayName: String(d.displayName || 'Aadesh Explorer').slice(0, 64),
+          avatarUrl: typeof d.avatarUrl === 'string' ? d.avatarUrl : undefined,
+          avatarColor: typeof d.avatarColor === 'string' ? d.avatarColor : undefined,
+          country: typeof d.country === 'string' ? d.country : undefined,
+          countryFlag: typeof d.countryFlag === 'string' ? d.countryFlag : undefined,
+          currentStreak: Math.max(0, Math.floor(Number(d.currentStreak) || 0)),
+          longestStreak: Math.max(0, Math.floor(Number(d.longestStreak) || 0)),
+          lastActiveDate: typeof d.lastActiveDate === 'string' ? d.lastActiveDate : undefined,
+          level: typeof d.level === 'number' ? d.level : 1,
+          updatedAt: typeof d.updatedAt === 'string' ? d.updatedAt : '',
+        };
+      });
+
+      const ranked = rankLeaderboardEntries(rawEntries, options.currentUserId, safeMax);
+      options.onData(ranked);
+    },
+    (err: any) => {
+      logFirestoreErrorQuiet(err, OperationType.LIST, 'streak_leaderboard');
+      const code = String(err?.code || 'unknown');
+      const msg = String(err?.message || 'Unable to load live leaderboard');
+      const isPermissionError =
+        code.toLowerCase().includes('permission') || msg.toLowerCase().includes('permission');
+      options.onError?.({
+        code,
+        message: msg,
+        isPermissionError,
+      });
+    }
+  );
+}
+
+/**
+ * Subscribes in real time via Firestore `onSnapshot` to the top 10 users ordered by `longestStreak`
+ * (`longestStreak >= 1`) in `/streak_leaderboard` (populated by `syncUserStreakLeaderboardEntry`).
+ * Uses a single-field query (`where + orderBy` on `longestStreak`) so no composite index is needed.
+ */
+export function subscribeToLongestStreakLeaderboard(options: {
+  currentUserId?: string;
+  maxEntries?: number;
+  onData: (entries: RankedLeaderboardEntry[]) => void;
+  onError?: (error: GlobalLeaderboardErrorInfo) => void;
+}): Unsubscribe {
+  const safeMax = Math.max(1, Math.min(25, Math.floor(options.maxEntries ?? 10)));
+  if (!db || !auth?.currentUser) {
+    options.onData([]);
+    return () => {};
+  }
+
+  const leaderboardQuery = query(
+    collection(db, 'streak_leaderboard'),
+    where('longestStreak', '>=', 1),
+    orderBy('longestStreak', 'desc'),
+    limit(safeMax)
+  );
+
+  return onSnapshot(
+    leaderboardQuery,
+    (snapshot) => {
+      const rawEntries: GlobalLeaderboardEntry[] = snapshot.docs.map((docSnap) => {
+        const d = docSnap.data() || {};
+        return {
+          userId: String(d.userId || docSnap.id),
+          displayName: String(d.displayName || 'Aadesh Explorer').slice(0, 64),
+          avatarUrl: typeof d.avatarUrl === 'string' ? d.avatarUrl : undefined,
+          avatarColor: typeof d.avatarColor === 'string' ? d.avatarColor : undefined,
+          country: typeof d.country === 'string' ? d.country : undefined,
+          countryFlag: typeof d.countryFlag === 'string' ? d.countryFlag : undefined,
+          currentStreak: Math.max(0, Math.floor(Number(d.currentStreak) || 0)),
+          longestStreak: Math.max(0, Math.floor(Number(d.longestStreak) || 0)),
+          lastActiveDate: typeof d.lastActiveDate === 'string' ? d.lastActiveDate : undefined,
+          level: typeof d.level === 'number' ? d.level : 1,
+          updatedAt: typeof d.updatedAt === 'string' ? d.updatedAt : '',
+        };
+      });
+
+      const ranked = rankLongestStreakLeaderboardEntries(
+        rawEntries,
+        options.currentUserId,
+        safeMax
+      );
+      options.onData(ranked);
+    },
+    (err: any) => {
+      logFirestoreErrorQuiet(err, OperationType.LIST, 'streak_leaderboard');
+      const code = String(err?.code || 'unknown');
+      const msg = String(err?.message || 'Unable to load longest streak leaderboard');
+      const isPermissionError =
+        code.toLowerCase().includes('permission') || msg.toLowerCase().includes('permission');
+      options.onError?.({
+        code,
+        message: msg,
+        isPermissionError,
+      });
+    }
+  );
+}
+
+// ---------------- SUGGESTED REPLIES ENGAGEMENT ANALYTICS ----------------
+
+/**
+ * Atomically records a user click on a Suggested Reply chip inside
+ * `/users/{userId}/suggestionAnalytics/{statId}` using a Firestore SDK v13.2.0 transaction.
+ */
+export async function recordSuggestedReplyClickInFirestore(
+  userId: string,
+  suggestionText: string,
+  language?: string,
+  nowMs: number = Date.now()
+): Promise<boolean> {
+  if (!db || !auth?.currentUser || auth.currentUser.uid !== userId) return false;
+  const trimmed = String(suggestionText || '').trim().slice(0, 160);
+  const normalizedKey = normalizeSuggestionKey(trimmed);
+  if (!trimmed || !normalizedKey) return false;
+
+  const uid = safeDocId(userId);
+  const statId = buildSuggestionStatId(trimmed);
+  const category: SuggestionCategory = classifySuggestionCategory(trimmed);
+  const statRef = doc(db, 'users', uid, 'suggestionAnalytics', statId);
+  const nowIso = new Date(nowMs).toISOString();
+
+  try {
+    await runTransaction(db, async (tx) => {
+      const snap = await tx.get(statRef);
+      if (snap.exists()) {
+        const existing = snap.data() || {};
+        const prevCount = sanitizeFiniteInt(existing.clickCount, 0, 999999, 0);
+        const nextCount = Math.min(1000000, prevCount + 1);
+        tx.update(statRef, {
+          sampleText: trimmed,
+          category,
+          ...(language ? { language: String(language).slice(0, 20) } : {}),
+          clickCount: nextCount,
+          lastClickedAt: nowIso,
+        });
+      } else {
+        tx.set(statRef, {
+          id: statId,
+          userId: uid,
+          normalizedKey,
+          sampleText: trimmed,
+          category,
+          ...(language ? { language: String(language).slice(0, 20) } : {}),
+          clickCount: 1,
+          lastClickedAt: nowIso,
+          createdAt: nowIso,
+        });
+      }
+    });
+    return true;
+  } catch (err) {
+    if (classifyFirestoreErrorKind(err) === 'permission_denied') {
+      console.warn('[SuggestionAnalytics notice] write skipped due to remote permissions:', err);
+    }
+    return false;
+  }
+}
+
+export async function loadTopSuggestedReplyPatternsFromFirestore(
+  userId: string,
+  maxItems: number = 25
+): Promise<SuggestionAnalyticsItem[]> {
+  if (!db || !auth?.currentUser || auth.currentUser.uid !== userId) return [];
+  const uid = safeDocId(userId);
+  const safeLimit = sanitizeFiniteInt(maxItems, 1, 50, 25);
+
+  try {
+    const snap = await getDocs(
+      query(
+        collection(db, 'users', uid, 'suggestionAnalytics'),
+        orderBy('clickCount', 'desc'),
+        limit(safeLimit)
+      )
+    );
+    return snap.docs.map((d) => {
+      const data = d.data() || {};
+      return {
+        id: String(data.id || d.id),
+        normalizedKey: String(data.normalizedKey || '').slice(0, 120),
+        sampleText: String(data.sampleText || '').slice(0, 160),
+        category: (data.category as SuggestionCategory) || 'general',
+        language: typeof data.language === 'string' ? data.language.slice(0, 20) : undefined,
+        clickCount: sanitizeFiniteInt(data.clickCount, 0, 1000000, 0),
+        lastClickedAt: data.lastClickedAt ? new Date(data.lastClickedAt).getTime() : Date.now(),
+        createdAt: data.createdAt ? new Date(data.createdAt).getTime() : Date.now(),
+      };
+    });
+  } catch {
+    return [];
+  }
+}
+
+

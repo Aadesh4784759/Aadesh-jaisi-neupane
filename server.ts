@@ -6,6 +6,27 @@ import { fileURLToPath } from 'url';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import crypto from 'crypto';
 import mammoth from 'mammoth';
+import {
+  AI_PROVIDER_METADATA,
+  AIModelOption,
+  AIProviderId,
+  AIProviderStatusInfo,
+  classifyOpenRouterModel,
+  classifyProviderError,
+  ConnectionHistoryEntry,
+  GEMINI_QUOTA_FALLBACK_MODEL,
+  GEMINI_SUPPORTED_MODELS,
+  getStaticCatalogForProvider,
+  GROQ_CURATED_MODELS,
+  isGeminiQuotaOrRateLimitError,
+  isNonFallbackClientError,
+  normalizeAIProviderId,
+  OPENROUTER_FALLBACK_MODELS,
+  ProviderConnectionState,
+  ProviderErrorLogEntry,
+  resolveSafeModelForProvider,
+  sanitizeProviderSecretText,
+} from './src/utils/aiProviders';
 
 dotenv.config();
 
@@ -242,8 +263,111 @@ const HOST = getCliArg('--host') || '0.0.0.0';
 
 const app = express();
 app.set('trust proxy', 1);
+app.disable('x-powered-by');
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
+
+// Baseline security headers compatible with AI Studio preview iframe
+app.use((_req: Request, res: Response, next: NextFunction): void => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'camera=(self), microphone=(self), geolocation=(self)');
+  next();
+});
+
+export function createSlidingWindowRateLimiter(options: {
+  maxRequests: number;
+  windowMs: number;
+  keyPrefix?: string;
+}) {
+  const buckets = new Map<string, number[]>();
+  const { maxRequests, windowMs, keyPrefix = 'rl' } = options;
+
+  const checkLimit = (identifier: string, nowMs: number = Date.now()) => {
+    const key = `${keyPrefix}:${identifier}`;
+    const cutoff = nowMs - windowMs;
+    const recent = (buckets.get(key) || []).filter((ts) => ts > cutoff);
+    if (recent.length >= maxRequests) {
+      const oldest = recent[0] ?? nowMs;
+      const retryAfterSeconds = Math.max(1, Math.ceil((oldest + windowMs - nowMs) / 1000));
+      buckets.set(key, recent);
+      return { allowed: false, remaining: 0, retryAfterSeconds };
+    }
+    recent.push(nowMs);
+    if (buckets.size >= 5000) {
+      const firstKey = buckets.keys().next().value;
+      if (firstKey) buckets.delete(firstKey);
+    }
+    buckets.set(key, recent);
+    return { allowed: true, remaining: Math.max(0, maxRequests - recent.length), retryAfterSeconds: 0 };
+  };
+
+  const middleware = (req: Request, res: Response, next: NextFunction): void => {
+    if (req.method === 'OPTIONS') {
+      next();
+      return;
+    }
+    const authUid = (req as Request & { authUser?: AuthenticatedFirebaseUser }).authUser?.uid;
+    const rawIp = String(req.ip || req.socket?.remoteAddress || 'unknown');
+    const identifier = authUid ? `uid:${authUid}` : `ip:${rawIp}`;
+    const verdict = checkLimit(identifier);
+    res.setHeader('X-RateLimit-Limit', String(maxRequests));
+    res.setHeader('X-RateLimit-Remaining', String(verdict.remaining));
+    if (!verdict.allowed) {
+      res.setHeader('Retry-After', String(verdict.retryAfterSeconds));
+      res.status(429).json({
+        ok: false,
+        code: 'RATE_LIMITED',
+        retryAfterSeconds: verdict.retryAfterSeconds,
+        error: `Too many requests. Please wait ${verdict.retryAfterSeconds}s before retrying.`,
+      });
+      return;
+    }
+    next();
+  };
+
+  return { checkLimit, middleware };
+}
+
+export function validateChatPayloadBounds(body: any): { ok: true } | { ok: false; error: string } {
+  if (!body || typeof body !== 'object') {
+    return { ok: false, error: 'Invalid JSON request payload.' };
+  }
+  if (typeof body.currentMessage === 'string' && body.currentMessage.length > 32000) {
+    return { ok: false, error: 'Message exceeds maximum length (32,000 characters).' };
+  }
+  if (typeof body.attachmentContent === 'string' && body.attachmentContent.length > 120000) {
+    return { ok: false, error: 'Attached text exceeds maximum allowed size (120,000 characters).' };
+  }
+  if (typeof body.imageData === 'string' && body.imageData.length > 14 * 1024 * 1024) {
+    return { ok: false, error: 'Image payload exceeds 10MB limit.' };
+  }
+  if (body.messages !== undefined) {
+    if (!Array.isArray(body.messages)) {
+      return { ok: false, error: 'Conversation history must be an array.' };
+    }
+    if (body.messages.length > 120) {
+      return { ok: false, error: 'Conversation history slice exceeds maximum limit.' };
+    }
+  }
+  return { ok: true };
+}
+
+const aiGenerationRateLimiter = createSlidingWindowRateLimiter({
+  maxRequests: 35,
+  windowMs: 60 * 1000,
+  keyPrefix: 'ai-gen',
+});
+const providerTestRateLimiter = createSlidingWindowRateLimiter({
+  maxRequests: 15,
+  windowMs: 60 * 1000,
+  keyPrefix: 'ai-test',
+});
+const publicGeoRateLimiter = createSlidingWindowRateLimiter({
+  maxRequests: 60,
+  windowMs: 60 * 1000,
+  keyPrefix: 'geo',
+});
 
 interface ServerTelemetry {
   totalApiRequests: number;
@@ -275,6 +399,9 @@ app.use('/api', (req: Request, _res: Response, next: NextFunction): void => {
   }
   next();
 });
+app.use('/api/providers/test', providerTestRateLimiter.middleware);
+app.use('/api/geo', publicGeoRateLimiter.middleware);
+app.use(['/api/chat', '/api/translate', '/api/media', '/api/study', '/api/automation'], aiGenerationRateLimiter.middleware);
 
 app.get('/api', (_req: Request, res: Response): void => {
   res.json({
@@ -284,12 +411,65 @@ app.get('/api', (_req: Request, res: Response): void => {
   });
 });
 
-// Supported active Flash models ordered by priority
+// Supported active Flash models ordered by priority (gemini-3.1-flash-lite prioritized for reliability and speed)
 const SUPPORTED_FLASH_FALLBACKS = [
   'gemini-3.1-flash-lite',
-  'gemini-4-hydrogen',
   'gemini-3.5-flash',
+  'gemini-4-hydrogen',
 ] as const;
+
+const GEMINI_RELIABLE_OVERLOAD_MODEL = 'gemini-3.1-flash-lite';
+
+function isTransientOverloadError(err: unknown): boolean {
+  const status = Number((err as any)?.status || (err as any)?.code || 0);
+  const msg = sanitizeErrorMessage(err).toLowerCase();
+  return (
+    status === 503 ||
+    msg.includes('503') ||
+    msg.includes('unavailable') ||
+    msg.includes('high demand') ||
+    msg.includes('overloaded')
+  );
+}
+
+function getGeminiThinkingConfig(
+  model: string,
+  preferredLevel?: ThinkingLevel | string
+): { thinkingConfig?: { thinkingLevel: ThinkingLevel } } {
+  // Only apply thinkingConfig to Gemini 3.x and Gemini 4.x models
+  if (!model.startsWith('gemini-3') && !model.startsWith('gemini-4')) {
+    return {};
+  }
+
+  const normalized = String(preferredLevel || '').toUpperCase();
+
+  // Gemini 4 and Gemini 3.7/3.8 models reject ThinkingLevel.MINIMAL (HTTP 400 INVALID_ARGUMENT).
+  if (
+    model.startsWith('gemini-4') ||
+    model.startsWith('gemini-3.7') ||
+    model.startsWith('gemini-3.8')
+  ) {
+    if (normalized.includes('MINIMAL')) {
+      return { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } };
+    }
+    if (normalized.includes('HIGH')) {
+      return { thinkingConfig: { thinkingLevel: ThinkingLevel.HIGH } };
+    }
+    return { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } };
+  }
+
+  // Gemini 3.1 / 3.5 models support MINIMAL, LOW, MEDIUM, HIGH
+  if (normalized.includes('LOW')) {
+    return { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } };
+  }
+  if (normalized.includes('MEDIUM')) {
+    return { thinkingConfig: { thinkingLevel: ThinkingLevel.MEDIUM } };
+  }
+  if (normalized.includes('HIGH')) {
+    return { thinkingConfig: { thinkingLevel: ThinkingLevel.HIGH } };
+  }
+  return { thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL } };
+}
 
 const DEPRECATED_MODELS = new Set([
   'gemini-pro',
@@ -306,16 +486,13 @@ function sanitizeErrorMessage(err: unknown): string {
       ? err
       : (err as any)?.message
         ? String((err as any).message)
-        : 'Unexpected error communicating with Gemini AI.';
+        : 'Unexpected error communicating with AI provider.';
 
-  return raw
-    .replace(/AIza[0-9A-Za-z_-]{8,}/g, '[REDACTED_API_KEY]')
-    .replace(/AQ\.[0-9A-Za-z._-]{8,}/g, '[REDACTED_API_KEY]')
-    .replace(/([?&]key=)[^&\s"']+/gi, '$1[REDACTED]');
+  return sanitizeProviderSecretText(raw);
 }
 
 function sanitizeModelName(rawModel?: string): string {
-  const defaultModel = 'gemini-4-hydrogen';
+  const defaultModel = GEMINI_RELIABLE_OVERLOAD_MODEL;
   if (!rawModel) return defaultModel;
 
   let cleaned = rawModel.trim();
@@ -331,32 +508,51 @@ function sanitizeModelName(rawModel?: string): string {
 
   // Reject API keys accidentally placed in GEMINI_MODEL and enforce gemini-* format
   if (
-    /^(?:aq\.|aiza)/i.test(cleaned) ||
+    /^(?:aq\.|aiza|gsk_|sk-or-)/i.test(cleaned) ||
     !/^gemini-[a-z0-9][a-z0-9._-]{1,48}$/i.test(cleaned)
   ) {
     return defaultModel;
   }
 
   if (DEPRECATED_MODELS.has(cleaned.toLowerCase())) {
-    return 'gemini-4-hydrogen';
+    return defaultModel;
   }
 
   return cleaned;
 }
 
-function getCandidateModels(): string[] {
-  const configured = sanitizeModelName(process.env.GEMINI_MODEL || 'gemini-4-hydrogen');
+function getCandidateModels(preferredGeminiModel?: string): string[] {
+  const configured = sanitizeModelName(
+    preferredGeminiModel || process.env.GEMINI_MODEL || GEMINI_RELIABLE_OVERLOAD_MODEL
+  );
   return Array.from(new Set([configured, ...SUPPORTED_FLASH_FALLBACKS]));
 }
 
-// Shared Gemini Client with telemetry header and optional user key override
-const getGeminiClient = (customKey?: string) => {
-  const cleanedCustom = customKey?.trim().replace(/^['"]+|['"]+$/g, '') || '';
-  const cleanedEnv = process.env.GEMINI_API_KEY?.trim().replace(/^['"]+|['"]+$/g, '') || '';
-  const apiKey = cleanedCustom.length > 0 ? cleanedCustom : cleanedEnv;
+function readCleanServerEnvKey(envName: 'GEMINI_API_KEY' | 'GROQ_API_KEY' | 'OPENROUTER_API_KEY'): string {
+  const raw =
+    envName === 'GEMINI_API_KEY'
+      ? process.env.GEMINI_API_KEY || process.env.API_KEY || process.env.GEMINI_API || process.env.GOOGLE_API_KEY || ''
+      : process.env[envName] || '';
+  return String(raw)
+    .trim()
+    .replace(/^['"]+|['"]+$/g, '')
+    .trim();
+}
+
+// Shared cached Gemini Client reading strictly from server-side environment variables
+let cachedGeminiClientKey = '';
+let cachedGeminiClientInstance: GoogleGenAI | null = null;
+
+const getGeminiClient = () => {
+  const apiKey = readCleanServerEnvKey('GEMINI_API_KEY');
   if (!apiKey) return null;
 
-  return new GoogleGenAI({
+  if (cachedGeminiClientInstance && cachedGeminiClientKey === apiKey) {
+    return cachedGeminiClientInstance;
+  }
+
+  cachedGeminiClientKey = apiKey;
+  cachedGeminiClientInstance = new GoogleGenAI({
     apiKey,
     httpOptions: {
       headers: {
@@ -364,7 +560,11 @@ const getGeminiClient = (customKey?: string) => {
       },
     },
   });
+  return cachedGeminiClientInstance;
 };
+
+const getGroqApiKey = () => readCleanServerEnvKey('GROQ_API_KEY');
+const getOpenRouterApiKey = () => readCleanServerEnvKey('OPENROUTER_API_KEY');
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number = 15000): Promise<T> {
   return Promise.race([
@@ -375,6 +575,28 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number = 15000): Promise
   ]);
 }
 
+function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      const abortErr: any = new Error('Aborted');
+      abortErr.name = 'AbortError';
+      reject(abortErr);
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      const abortErr: any = new Error('Aborted');
+      abortErr.name = 'AbortError';
+      reject(abortErr);
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 function isAuthFailure(err: unknown): boolean {
   const msg = sanitizeErrorMessage(err).toLowerCase();
   const status = (err as any)?.status || (err as any)?.code;
@@ -383,6 +605,7 @@ function isAuthFailure(err: unknown): boolean {
     status === 403 ||
     msg.includes('api_key_invalid') ||
     msg.includes('api key not valid') ||
+    msg.includes('invalid api key') ||
     msg.includes('permission denied')
   );
 }
@@ -394,9 +617,10 @@ async function generateWithModelFallback(
   ai: GoogleGenAI,
   buildParams: (model: string) => Parameters<typeof ai.models.generateContent>[0],
   primaryTimeoutMs: number = 8000,
-  fallbackTimeoutMs: number = 18000
+  fallbackTimeoutMs: number = 18000,
+  preferredGeminiModel?: string
 ): Promise<{ response: Awaited<ReturnType<typeof ai.models.generateContent>>; modelUsed: string }> {
-  const candidates = getCandidateModels();
+  const candidates = getCandidateModels(preferredGeminiModel);
   const now = Date.now();
   const prioritized = [
     ...candidates.filter((m) => (modelCooldownUntil.get(m) ?? 0) <= now),
@@ -417,7 +641,7 @@ async function generateWithModelFallback(
       return { response, modelUsed: model };
     } catch (err) {
       lastError = err;
-      if (isAuthFailure(err)) {
+      if (isNonFallbackClientError(err) || isAuthFailure(err)) {
         throw err;
       }
       modelCooldownUntil.set(model, Date.now() + MODEL_COOLDOWN_MS);
@@ -434,7 +658,16 @@ function extractJsonText(rawText?: string): Record<string, any> {
     .replace(/^```(?:json)?\s*/i, '')
     .replace(/\s*```$/i, '')
     .trim();
-  return JSON.parse(cleaned);
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    const firstBrace = cleaned.indexOf('{');
+    const lastBrace = cleaned.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace > firstBrace) {
+      return JSON.parse(cleaned.slice(firstBrace, lastBrace + 1));
+    }
+    throw new Error('Malformed JSON payload from AI provider.');
+  }
 }
 
 function buildMemoryBlock(memoryContext?: unknown): string {
@@ -444,7 +677,7 @@ function buildMemoryBlock(memoryContext?: unknown): string {
     .slice(0, 20)
     .map((m, idx) => `${idx + 1}. ${m.trim().slice(0, 300)}`);
   if (items.length === 0) return '';
-  return `\n\nUSER-APPROVED PERSONALIZATION MEMORY (Respect these saved preferences & instructions):\n${items.join('\n')}`;
+  return `\n\nPOWER MEMORY — USER-APPROVED PERSISTENT CONTEXT (Separate from current conversation messages; apply naturally without repeating items verbatim unless directly relevant, and never invent or claim a memory that is not listed below):\n${items.join('\n')}`;
 }
 
 // Language map reference for system prompt
@@ -494,129 +727,1539 @@ async function probeLiveGeminiConnection(
   candidates: string[]
 ): Promise<{ ok: boolean; model: string; latencyMs: number; error?: string }> {
   const startMs = Date.now();
-  let lastErr: unknown = null;
+  const targetModel = candidates[0] || sanitizeModelName(process.env.GEMINI_MODEL);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 4500);
 
-  for (let i = 0; i < candidates.length; i++) {
-    const model = candidates[i];
-    try {
-      await withTimeout(ai.models.get({ model }), 4500);
+  try {
+    await ai.models.get({
+      model: targetModel,
+      config: { abortSignal: controller.signal },
+    });
+    return {
+      ok: true,
+      model: targetModel,
+      latencyMs: Date.now() - startMs,
+    };
+  } catch (err: any) {
+    if (isAuthFailure(err)) {
       return {
-        ok: true,
-        model,
+        ok: false,
+        model: targetModel,
         latencyMs: Date.now() - startMs,
+        error: 'Google Gemini rejected the server GEMINI_API_KEY configuration.',
       };
-    } catch (err) {
-      lastErr = err;
-      if (isAuthFailure(err)) {
-        return {
-          ok: false,
-          model,
-          latencyMs: Date.now() - startMs,
-          error: 'Gemini API key was rejected by Google Gemini. Please check your API key configuration.',
-        };
-      }
     }
+    const sanitized =
+      err?.name === 'AbortError'
+        ? `Google Gemini health probe timed out on ${targetModel}.`
+        : sanitizeErrorMessage(err);
+    return {
+      ok: false,
+      model: targetModel,
+      latencyMs: Date.now() - startMs,
+      error: sanitized || 'Unable to verify Google Gemini API availability.',
+    };
+  } finally {
+    clearTimeout(timer);
   }
-
-  const sanitized = sanitizeErrorMessage(lastErr);
-  return {
-    ok: false,
-    model: candidates[0],
-    latencyMs: Date.now() - startMs,
-    error: sanitized || 'Unable to verify Google Gemini API availability.',
-  };
 }
 
-// HEALTH & REAL-TIME GOOGLE GEMINI CONNECTION STATUS CHECK
-app.get('/api/health', async (req: Request, res: Response): Promise<void> => {
-  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-  const customKey = ((req.headers['x-gemini-api-key'] as string) || '').trim();
-  const forceRefresh = req.query.force === '1' || req.query.force === 'true';
-  const ai = getGeminiClient(customKey);
+// ---------- Multi-Provider Server Integrations (Groq & OpenRouter) ----------
+const PROVIDER_MODELS_CACHE_TTL_MS = 10 * 60 * 1000;
+const PROVIDER_HEALTH_CACHE_TTL_MS = 30 * 1000;
+
+let groqModelsCache: {
+  checkedAtMs: number;
+  ok: boolean;
+  models: AIModelOption[];
+  latencyMs: number;
+  error?: string;
+} | null = null;
+
+let openRouterCatalogCache: {
+  checkedAtMs: number;
+  models: AIModelOption[];
+  freeModelsCount: number;
+  paidModelsCount: number;
+  source: 'live' | 'catalog';
+} | null = null;
+
+let openRouterKeyHealthCache: {
+  checkedAtMs: number;
+  ok: boolean;
+  latencyMs: number;
+  error?: string;
+} | null = null;
+
+const PROVIDER_GENERATION_CACHE_TTL_MS = 15 * 60 * 1000;
+const MAX_PROVIDER_ERROR_LOGS = 3;
+const MAX_CONNECTION_HISTORY = 30;
+
+interface ProviderGenerationVerification {
+  verified: boolean;
+  testedAtMs: number;
+  model: string;
+  latencyMs: number;
+  error?: string;
+}
+
+const providerGenerationVerificationCache: Partial<
+  Record<AIProviderId, ProviderGenerationVerification>
+> = {};
+
+const providerErrorLogs: Record<AIProviderId, ProviderErrorLogEntry[]> = {
+  gemini: [],
+  groq: [],
+  openrouter: [],
+};
+
+const lastSuccessfulProviderConnectedAt: Partial<Record<AIProviderId, string>> = {};
+
+const connectionHistory: ConnectionHistoryEntry[] = [];
+
+function appendProviderErrorLog(
+  provider: AIProviderId,
+  entry: Omit<ProviderErrorLogEntry, 'message'> & { message: string }
+): void {
+  const cleanMsg = sanitizeErrorMessage(entry.message).slice(0, 300);
+  if (!cleanMsg) return;
+  const list = providerErrorLogs[provider];
+  list.unshift({
+    id: entry.id || `err-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    timestamp: entry.timestamp,
+    model: entry.model,
+    ...(entry.code ? { code: entry.code } : {}),
+    message: cleanMsg,
+    ...(entry.source ? { source: entry.source } : {}),
+  });
+  if (list.length > MAX_PROVIDER_ERROR_LOGS) {
+    list.length = MAX_PROVIDER_ERROR_LOGS;
+  }
+}
+
+function appendConnectionHistory(entry: Omit<ConnectionHistoryEntry, 'id'>): void {
+  connectionHistory.unshift({
+    id: `conn-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    provider: entry.provider,
+    model: entry.model,
+    status: entry.status,
+    latencyMs: Math.max(0, Math.round(entry.latencyMs || 0)),
+    timestamp: entry.timestamp,
+    ...(entry.source ? { source: entry.source } : {}),
+    ...(entry.action ? { action: entry.action } : {}),
+    ...(entry.error ? { error: sanitizeErrorMessage(entry.error).slice(0, 260) } : {}),
+  });
+  if (connectionHistory.length > MAX_CONNECTION_HISTORY) {
+    connectionHistory.length = MAX_CONNECTION_HISTORY;
+  }
+}
+
+function recordProviderGenerationResult(
+  provider: AIProviderId,
+  result: {
+    verified: boolean;
+    model: string;
+    latencyMs: number;
+    error?: string;
+    code?: string;
+    source?: 'test' | 'chat' | 'health';
+  }
+): void {
+  const nowIso = new Date().toISOString();
+  const cleanErr = result.error ? sanitizeErrorMessage(result.error) : undefined;
+  if (result.verified) {
+    lastSuccessfulProviderConnectedAt[provider] = nowIso;
+    if (provider === 'gemini') {
+      lastSuccessfulGeminiConnectedAt = nowIso;
+    }
+  }
+  providerGenerationVerificationCache[provider] = {
+    verified: result.verified,
+    testedAtMs: Date.now(),
+    model: result.model,
+    latencyMs: result.latencyMs,
+    ...(cleanErr ? { error: cleanErr } : {}),
+  };
+
+  const action: ConnectionHistoryEntry['action'] =
+    result.source === 'test' ? 'test' : result.source === 'health' ? 'health_check' : 'chat';
+
+  if (!result.verified && cleanErr) {
+    appendProviderErrorLog(provider, {
+      timestamp: nowIso,
+      model: result.model,
+      code: result.code,
+      message: cleanErr,
+      source: result.source || 'test',
+    });
+  }
+
+  appendConnectionHistory({
+    provider,
+    model: result.model,
+    status: result.verified ? 'success' : 'failed',
+    latencyMs: result.latencyMs,
+    timestamp: nowIso,
+    source: result.source || 'test',
+    action,
+    ...(cleanErr ? { error: cleanErr } : {}),
+  });
+}
+
+function getFreshProviderVerification(
+  provider: AIProviderId
+): ProviderGenerationVerification | null {
+  const entry = providerGenerationVerificationCache[provider];
+  if (!entry) return null;
+  if (Date.now() - entry.testedAtMs > PROVIDER_GENERATION_CACHE_TTL_MS) {
+    delete providerGenerationVerificationCache[provider];
+    return null;
+  }
+  return entry;
+}
+
+const GROQ_CHAT_EXCLUDED_RE = /(whisper|tts|playai|orpheus|guard|safeguard|prompt-guard)/i;
+
+async function fetchGroqModelsCached(
+  apiKey: string,
+  forceRefresh: boolean = false
+): Promise<{ ok: boolean; models: AIModelOption[]; latencyMs: number; error?: string; source: 'live' | 'catalog' }> {
+  const now = Date.now();
+  if (!forceRefresh && groqModelsCache && now - groqModelsCache.checkedAtMs < PROVIDER_HEALTH_CACHE_TTL_MS) {
+    return {
+      ok: groqModelsCache.ok,
+      models: groqModelsCache.models,
+      latencyMs: groqModelsCache.latencyMs,
+      error: groqModelsCache.error,
+      source: groqModelsCache.ok ? 'live' : 'catalog',
+    };
+  }
+
+  const startMs = Date.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+  try {
+    const res = await fetch('https://api.groq.com/openai/v1/models', {
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        Accept: 'application/json',
+      },
+      signal: controller.signal,
+    });
+    const latencyMs = Date.now() - startMs;
+
+    if (!res.ok) {
+      let rawErr = `Groq API HTTP ${res.status}`;
+      try {
+        const errJson = await res.json();
+        rawErr = errJson?.error?.message || rawErr;
+      } catch {}
+      const classified = classifyProviderError('groq', res.status, sanitizeErrorMessage(rawErr));
+      groqModelsCache = {
+        checkedAtMs: Date.now(),
+        ok: false,
+        models: GROQ_CURATED_MODELS,
+        latencyMs,
+        error: classified.message,
+      };
+      return { ok: false, models: GROQ_CURATED_MODELS, latencyMs, error: classified.message, source: 'catalog' };
+    }
+
+    const payload = await res.json();
+    const rawList: Array<{ id?: string; owned_by?: string; context_window?: number; active?: boolean }> =
+      Array.isArray(payload?.data) ? payload.data : [];
+
+    const curatedById = new Map(GROQ_CURATED_MODELS.map((m) => [m.id, m]));
+    const liveChatModels: AIModelOption[] = rawList
+      .filter((item) => {
+        const id = String(item?.id || '').trim();
+        return id.length > 0 && item?.active !== false && !GROQ_CHAT_EXCLUDED_RE.test(id);
+      })
+      .map((item) => {
+        const id = String(item.id).trim();
+        const curated = curatedById.get(id);
+        return {
+          id,
+          name: curated?.name || id,
+          provider: 'groq' as const,
+          isFree: true,
+          pricingLabel: 'Free tier (rate-limited)',
+          contextLength:
+            typeof item.context_window === 'number' && Number.isFinite(item.context_window)
+              ? item.context_window
+              : curated?.contextLength,
+          description: curated?.description || `${item.owned_by || 'Groq'} production model on Groq LPU.`,
+          isDefault: id === AI_PROVIDER_METADATA.groq.defaultModel,
+          supportsVision: curated?.supportsVision ?? /llama-4-(?:scout|maverick)/i.test(id),
+        };
+      });
+
+    // Sort defaults / curated production models first
+    liveChatModels.sort((a, b) => {
+      if (a.isDefault !== b.isDefault) return a.isDefault ? -1 : 1;
+      const aCurated = curatedById.has(a.id) ? 0 : 1;
+      const bCurated = curatedById.has(b.id) ? 0 : 1;
+      if (aCurated !== bCurated) return aCurated - bCurated;
+      return a.name.localeCompare(b.name);
+    });
+
+    const models = liveChatModels.length > 0 ? liveChatModels : GROQ_CURATED_MODELS;
+    groqModelsCache = {
+      checkedAtMs: Date.now(),
+      ok: true,
+      models,
+      latencyMs,
+    };
+    return { ok: true, models, latencyMs, source: 'live' };
+  } catch (err: any) {
+    const latencyMs = Date.now() - startMs;
+    const msg = sanitizeErrorMessage(
+      err?.name === 'AbortError' ? 'Groq health verification timed out.' : err
+    );
+    groqModelsCache = {
+      checkedAtMs: Date.now(),
+      ok: false,
+      models: GROQ_CURATED_MODELS,
+      latencyMs,
+      error: msg,
+    };
+    return { ok: false, models: GROQ_CURATED_MODELS, latencyMs, error: msg, source: 'catalog' };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchOpenRouterCatalogCached(
+  forceRefresh: boolean = false
+): Promise<{
+  models: AIModelOption[];
+  freeModelsCount: number;
+  paidModelsCount: number;
+  source: 'live' | 'catalog';
+}> {
+  const now = Date.now();
+  if (!forceRefresh && openRouterCatalogCache && now - openRouterCatalogCache.checkedAtMs < PROVIDER_MODELS_CACHE_TTL_MS) {
+    return {
+      models: openRouterCatalogCache.models,
+      freeModelsCount: openRouterCatalogCache.freeModelsCount,
+      paidModelsCount: openRouterCatalogCache.paidModelsCount,
+      source: openRouterCatalogCache.source,
+    };
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5500);
+  try {
+    const apiKey = getOpenRouterApiKey();
+    const res = await fetch('https://openrouter.ai/api/v1/models', {
+      headers: {
+        Accept: 'application/json',
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+      },
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      throw new Error(`OpenRouter models catalog returned HTTP ${res.status}`);
+    }
+
+    const payload = await res.json();
+    const rawModels: any[] = Array.isArray(payload?.data) ? payload.data : [];
+    const parsedAll: AIModelOption[] = [];
+    for (const item of rawModels) {
+      const classified = classifyOpenRouterModel(item);
+      if (classified) parsedAll.push(classified);
+    }
+
+    const freeModels = parsedAll.filter((m) => m.isFree);
+    const paidModels = parsedAll.filter((m) => !m.isFree);
+
+    freeModels.sort((a, b) => {
+      if (a.isDefault !== b.isDefault) return a.isDefault ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+    paidModels.sort((a, b) => a.name.localeCompare(b.name));
+
+    // Store ALL live OpenRouter free + paid models so validation covers every active OpenRouter ID
+    const combined = [...freeModels, ...paidModels];
+    if (combined.length === 0) {
+      throw new Error('OpenRouter catalog returned zero models.');
+    }
+
+    openRouterCatalogCache = {
+      checkedAtMs: Date.now(),
+      models: combined,
+      freeModelsCount: freeModels.length,
+      paidModelsCount: paidModels.length,
+      source: 'live',
+    };
+    return {
+      models: combined,
+      freeModelsCount: freeModels.length,
+      paidModelsCount: paidModels.length,
+      source: 'live',
+    };
+  } catch {
+    openRouterCatalogCache = {
+      checkedAtMs: Date.now(),
+      models: OPENROUTER_FALLBACK_MODELS,
+      freeModelsCount: OPENROUTER_FALLBACK_MODELS.filter((m) => m.isFree).length,
+      paidModelsCount: 0,
+      source: 'catalog',
+    };
+    return {
+      models: OPENROUTER_FALLBACK_MODELS,
+      freeModelsCount: OPENROUTER_FALLBACK_MODELS.filter((m) => m.isFree).length,
+      paidModelsCount: 0,
+      source: 'catalog',
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function verifyOpenRouterKeyCached(
+  apiKey: string,
+  forceRefresh: boolean = false
+): Promise<{ ok: boolean; latencyMs: number; error?: string }> {
+  const now = Date.now();
+  if (!forceRefresh && openRouterKeyHealthCache && now - openRouterKeyHealthCache.checkedAtMs < PROVIDER_HEALTH_CACHE_TTL_MS) {
+    return {
+      ok: openRouterKeyHealthCache.ok,
+      latencyMs: openRouterKeyHealthCache.latencyMs,
+      error: openRouterKeyHealthCache.error,
+    };
+  }
+
+  const startMs = Date.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 4500);
+  try {
+    const res = await fetch('https://openrouter.ai/api/v1/key', {
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        Accept: 'application/json',
+      },
+      signal: controller.signal,
+    });
+    const latencyMs = Date.now() - startMs;
+
+    if (!res.ok) {
+      let rawErr = `OpenRouter key verification HTTP ${res.status}`;
+      try {
+        const errJson = await res.json();
+        rawErr = errJson?.error?.message || rawErr;
+      } catch {}
+      const classified = classifyProviderError('openrouter', res.status, sanitizeErrorMessage(rawErr));
+      openRouterKeyHealthCache = {
+        checkedAtMs: Date.now(),
+        ok: false,
+        latencyMs,
+        error: classified.message,
+      };
+      return { ok: false, latencyMs, error: classified.message };
+    }
+
+    openRouterKeyHealthCache = {
+      checkedAtMs: Date.now(),
+      ok: true,
+      latencyMs,
+    };
+    return { ok: true, latencyMs };
+  } catch (err: any) {
+    const latencyMs = Date.now() - startMs;
+    const msg = sanitizeErrorMessage(
+      err?.name === 'AbortError' ? 'OpenRouter verification timed out.' : err
+    );
+    openRouterKeyHealthCache = {
+      checkedAtMs: Date.now(),
+      ok: false,
+      latencyMs,
+      error: msg,
+    };
+    return { ok: false, latencyMs, error: msg };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function getGeminiProviderStatus(
+  forceRefresh: boolean = false,
+  requestedGeminiModel?: string
+): Promise<{
+  statusInfo: AIProviderStatusInfo;
+  geminiProbeOk: boolean;
+  checkedAtIso: string;
+}> {
+  const ai = getGeminiClient();
   const candidates = getCandidateModels();
+  const targetModel =
+    requestedGeminiModel && requestedGeminiModel.trim()
+      ? sanitizeModelName(requestedGeminiModel)
+      : candidates[0];
+  const meta = AI_PROVIDER_METADATA.gemini;
 
   if (!ai) {
-    res.json({
-      status: 'ok',
-      authRequired: true,
-      backendConnected: true,
-      geminiConnected: false,
-      aiService: 'error',
-      isLiveAI: false,
-      model: candidates[0],
-      fallbackModels: candidates.slice(1),
-      checkedAt: new Date().toISOString(),
-      lastConnectedAt: lastSuccessfulGeminiConnectedAt,
-      latencyMs: 0,
-      error: 'Gemini API key is not configured on the server.',
-      version: '2.5.0',
-      platform: 'Aadesh AI',
-    });
-    return;
+    const checkedAtIso = new Date().toISOString();
+    return {
+      geminiProbeOk: false,
+      checkedAtIso,
+      statusInfo: {
+        id: 'gemini',
+        name: meta.name,
+        badge: 'Default',
+        description: meta.description,
+        envVarName: meta.envVarName,
+        configured: false,
+        status: 'not_configured',
+        defaultModel: meta.defaultModel,
+        activeModel: targetModel,
+        models: GEMINI_SUPPORTED_MODELS,
+        freeModelsCount: GEMINI_SUPPORTED_MODELS.length,
+        paidModelsCount: 0,
+        latencyMs: 0,
+        checkedAt: checkedAtIso,
+        error: 'GEMINI_API_KEY is not configured on the server.',
+        errorLog: [...providerErrorLogs.gemini],
+        source: 'catalog',
+      },
+    };
   }
 
   const now = Date.now();
-  const useDefaultCache =
-    !customKey &&
+  const verification = getFreshProviderVerification('gemini');
+
+  if (
     !forceRefresh &&
     defaultKeyHealthCache &&
-    now - defaultKeyHealthCache.checkedAtMs < GEMINI_HEALTH_CACHE_TTL_MS;
+    defaultKeyHealthCache.model === targetModel &&
+    now - defaultKeyHealthCache.checkedAtMs < GEMINI_HEALTH_CACHE_TTL_MS
+  ) {
+    const checkedAtIso = new Date(defaultKeyHealthCache.checkedAtMs).toISOString();
+    let status: ProviderConnectionState = 'configured';
+    let errorMsg = defaultKeyHealthCache.error;
+    if (!defaultKeyHealthCache.geminiConnected) {
+      status = 'error';
+    } else if (verification?.verified) {
+      status = 'connected';
+      errorMsg = undefined;
+    } else if (verification && !verification.verified && verification.error) {
+      status = 'error';
+      errorMsg = verification.error;
+    } else {
+      status = 'configured';
+    }
 
-  if (useDefaultCache && defaultKeyHealthCache) {
-    res.json({
-      status: 'ok',
-      authRequired: true,
-      backendConnected: true,
-      geminiConnected: defaultKeyHealthCache.geminiConnected,
-      aiService: defaultKeyHealthCache.geminiConnected ? 'connected' : 'error',
-      isLiveAI: defaultKeyHealthCache.geminiConnected,
-      model: defaultKeyHealthCache.model,
-      fallbackModels: candidates.filter((m) => m !== defaultKeyHealthCache?.model),
-      checkedAt: new Date(defaultKeyHealthCache.checkedAtMs).toISOString(),
-      lastConnectedAt: lastSuccessfulGeminiConnectedAt,
-      latencyMs: defaultKeyHealthCache.latencyMs,
-      ...(defaultKeyHealthCache.error ? { error: defaultKeyHealthCache.error } : {}),
-      cached: true,
-      version: '2.5.0',
-      platform: 'Aadesh AI',
-    });
-    return;
+    const isVerified = Boolean(verification?.verified && defaultKeyHealthCache.geminiConnected);
+    return {
+      geminiProbeOk: defaultKeyHealthCache.geminiConnected,
+      checkedAtIso,
+      statusInfo: {
+        id: 'gemini',
+        name: meta.name,
+        badge: 'Default',
+        description: meta.description,
+        envVarName: meta.envVarName,
+        configured: true,
+        status,
+        generationVerified: isVerified,
+        lastTestedAt: verification ? new Date(verification.testedAtMs).toISOString() : null,
+        ...(verification?.verified ? { lastVerifiedModel: verification.model } : {}),
+        defaultModel: meta.defaultModel,
+        activeModel: verification?.verified ? verification.model : defaultKeyHealthCache.model,
+        models: GEMINI_SUPPORTED_MODELS,
+        freeModelsCount: GEMINI_SUPPORTED_MODELS.length,
+        paidModelsCount: 0,
+        latencyMs: verification?.latencyMs ?? defaultKeyHealthCache.latencyMs,
+        checkedAt: checkedAtIso,
+        ...(errorMsg ? { error: errorMsg } : {}),
+        errorLog: [...providerErrorLogs.gemini],
+        source: 'live',
+      },
+    };
   }
 
-  const probe = await probeLiveGeminiConnection(ai, candidates);
+  const probe = await probeLiveGeminiConnection(ai, [targetModel]);
   const checkedAtIso = new Date().toISOString();
-
   if (probe.ok) {
     lastSuccessfulGeminiConnectedAt = checkedAtIso;
   }
+  defaultKeyHealthCache = {
+    checkedAtMs: Date.now(),
+    geminiConnected: probe.ok,
+    model: probe.model,
+    latencyMs: probe.latencyMs,
+    error: probe.error,
+  };
 
-  if (!customKey) {
-    defaultKeyHealthCache = {
-      checkedAtMs: Date.now(),
-      geminiConnected: probe.ok,
-      model: probe.model,
-      latencyMs: probe.latencyMs,
-      error: probe.error,
+  let status: ProviderConnectionState = 'configured';
+  let errorMsg = probe.error;
+  if (!probe.ok) {
+    status = 'error';
+  } else if (verification?.verified) {
+    status = 'connected';
+    errorMsg = undefined;
+  } else if (verification && !verification.verified && verification.error) {
+    status = 'error';
+    errorMsg = verification.error;
+  } else {
+    status = 'configured';
+  }
+
+  const isVerified = Boolean(verification?.verified && probe.ok);
+  return {
+    geminiProbeOk: probe.ok,
+    checkedAtIso,
+    statusInfo: {
+      id: 'gemini',
+      name: meta.name,
+      badge: 'Default',
+      description: meta.description,
+      envVarName: meta.envVarName,
+      configured: true,
+      status,
+      generationVerified: isVerified,
+      lastTestedAt: verification ? new Date(verification.testedAtMs).toISOString() : null,
+      ...(verification?.verified ? { lastVerifiedModel: verification.model } : {}),
+      defaultModel: meta.defaultModel,
+      activeModel: verification?.verified ? verification.model : probe.model,
+      models: GEMINI_SUPPORTED_MODELS,
+      freeModelsCount: GEMINI_SUPPORTED_MODELS.length,
+      paidModelsCount: 0,
+      latencyMs: verification?.latencyMs ?? probe.latencyMs,
+      checkedAt: checkedAtIso,
+      ...(errorMsg ? { error: errorMsg } : {}),
+      errorLog: [...providerErrorLogs.gemini],
+      source: 'live',
+    },
+  };
+}
+
+async function getGroqProviderStatus(forceRefresh: boolean = false): Promise<AIProviderStatusInfo> {
+  const apiKey = getGroqApiKey();
+  const meta = AI_PROVIDER_METADATA.groq;
+  const checkedAtIso = new Date().toISOString();
+
+  if (!apiKey) {
+    return {
+      id: 'groq',
+      name: meta.name,
+      badge: 'Ultra-Fast LPU',
+      description: meta.description,
+      envVarName: meta.envVarName,
+      configured: false,
+      status: 'not_configured',
+      generationVerified: false,
+      defaultModel: meta.defaultModel,
+      activeModel: meta.defaultModel,
+      models: GROQ_CURATED_MODELS,
+      freeModelsCount: GROQ_CURATED_MODELS.length,
+      paidModelsCount: 0,
+      latencyMs: 0,
+      checkedAt: checkedAtIso,
+      error: 'GROQ_API_KEY is not configured in server environment variables.',
+      errorLog: [...providerErrorLogs.groq],
+      source: 'catalog',
     };
   }
+
+  const probe = await fetchGroqModelsCached(apiKey, forceRefresh);
+  const resolved = resolveSafeModelForProvider('groq', probe.models, meta.defaultModel);
+  const verification = getFreshProviderVerification('groq');
+
+  let status: ProviderConnectionState = 'configured';
+  let errorMsg = probe.error;
+  if (!probe.ok) {
+    status = 'error';
+  } else if (verification?.verified) {
+    status = 'connected';
+    errorMsg = undefined;
+  } else if (verification && !verification.verified && verification.error) {
+    status = 'error';
+    errorMsg = verification.error;
+  } else {
+    status = 'configured';
+  }
+
+  return {
+    id: 'groq',
+    name: meta.name,
+    badge: 'Ultra-Fast LPU',
+    description: meta.description,
+    envVarName: meta.envVarName,
+    configured: true,
+    status,
+    generationVerified: Boolean(verification?.verified && probe.ok),
+    lastTestedAt: verification ? new Date(verification.testedAtMs).toISOString() : null,
+    ...(verification?.verified ? { lastVerifiedModel: verification.model } : {}),
+    defaultModel: meta.defaultModel,
+    activeModel: verification?.verified ? verification.model : resolved.modelId,
+    models: probe.models,
+    freeModelsCount: probe.models.filter((m) => m.isFree).length,
+    paidModelsCount: probe.models.filter((m) => !m.isFree).length,
+    latencyMs: verification?.latencyMs ?? probe.latencyMs,
+    checkedAt: checkedAtIso,
+    ...(errorMsg ? { error: errorMsg } : {}),
+    errorLog: [...providerErrorLogs.groq],
+    source: probe.source,
+  };
+}
+
+async function getOpenRouterProviderStatus(forceRefresh: boolean = false): Promise<AIProviderStatusInfo> {
+  const apiKey = getOpenRouterApiKey();
+  const meta = AI_PROVIDER_METADATA.openrouter;
+  const checkedAtIso = new Date().toISOString();
+
+  const [catalog, keyCheck] = await Promise.all([
+    fetchOpenRouterCatalogCached(forceRefresh),
+    apiKey ? verifyOpenRouterKeyCached(apiKey, forceRefresh) : Promise.resolve(null),
+  ]);
+
+  const resolvedDefault = resolveSafeModelForProvider('openrouter', catalog.models, meta.defaultModel, {
+    allowPaidExplicit: false,
+  });
+
+  if (!apiKey) {
+    return {
+      id: 'openrouter',
+      name: meta.name,
+      badge: 'Free & Paid Models',
+      description: meta.description,
+      envVarName: meta.envVarName,
+      configured: false,
+      status: 'not_configured',
+      generationVerified: false,
+      defaultModel: resolvedDefault.modelId,
+      activeModel: resolvedDefault.modelId,
+      models: catalog.models,
+      freeModelsCount: catalog.freeModelsCount,
+      paidModelsCount: catalog.paidModelsCount,
+      latencyMs: 0,
+      checkedAt: checkedAtIso,
+      error: 'OPENROUTER_API_KEY is not configured in server environment variables.',
+      errorLog: [...providerErrorLogs.openrouter],
+      source: catalog.source,
+    };
+  }
+
+  const verification = getFreshProviderVerification('openrouter');
+  let status: ProviderConnectionState = 'configured';
+  let errorMsg = keyCheck?.error;
+  if (!keyCheck?.ok) {
+    status = 'error';
+  } else if (verification?.verified) {
+    status = 'connected';
+    errorMsg = undefined;
+  } else if (verification && !verification.verified && verification.error) {
+    status = 'error';
+    errorMsg = verification.error;
+  } else {
+    status = 'configured';
+  }
+
+  return {
+    id: 'openrouter',
+    name: meta.name,
+    badge: 'Free & Paid Models',
+    description: meta.description,
+    envVarName: meta.envVarName,
+    configured: true,
+    status,
+    generationVerified: Boolean(verification?.verified && keyCheck?.ok),
+    lastTestedAt: verification ? new Date(verification.testedAtMs).toISOString() : null,
+    ...(verification?.verified ? { lastVerifiedModel: verification.model } : {}),
+    defaultModel: resolvedDefault.modelId,
+    activeModel: verification?.verified ? verification.model : resolvedDefault.modelId,
+    models: catalog.models,
+    freeModelsCount: catalog.freeModelsCount,
+    paidModelsCount: catalog.paidModelsCount,
+    latencyMs: verification?.latencyMs ?? keyCheck?.latencyMs ?? 0,
+    checkedAt: checkedAtIso,
+    ...(errorMsg ? { error: errorMsg } : {}),
+    errorLog: [...providerErrorLogs.openrouter],
+    source: catalog.source,
+  };
+}
+
+async function getAllProviderStatuses(
+  forceRefresh: boolean = false,
+  requestedGeminiModel?: string
+): Promise<{
+  providers: Record<AIProviderId, AIProviderStatusInfo>;
+  geminiProbeOk: boolean;
+  checkedAtIso: string;
+}> {
+  const [geminiRes, groqStatus, openRouterStatus] = await Promise.all([
+    getGeminiProviderStatus(forceRefresh, requestedGeminiModel),
+    getGroqProviderStatus(forceRefresh),
+    getOpenRouterProviderStatus(forceRefresh),
+  ]);
+
+  return {
+    providers: {
+      gemini: geminiRes.statusInfo,
+      groq: groqStatus,
+      openrouter: openRouterStatus,
+    },
+    geminiProbeOk: geminiRes.geminiProbeOk,
+    checkedAtIso: geminiRes.checkedAtIso,
+  };
+}
+
+interface OpenAIMessagePart {
+  type: 'text' | 'image_url';
+  text?: string;
+  image_url?: { url: string };
+}
+
+function buildOpenAICompatibleMessages(params: {
+  provider: 'groq' | 'openrouter';
+  modelId: string;
+  supportsVision: boolean;
+  systemInstruction: string;
+  messages?: any[];
+  currentTextPrompt: string;
+  imageData?: string;
+  imageMimeType?: string;
+}): Array<{ role: 'system' | 'user' | 'assistant'; content: string | OpenAIMessagePart[] }> {
+  if (params.imageData && !params.supportsVision) {
+    const err: any = new Error(
+      `The selected ${AI_PROVIDER_METADATA[params.provider].name} model (${params.modelId}) does not support image inputs. Choose a vision-capable model or switch to Google Gemini.`
+    );
+    err.status = 400;
+    throw err;
+  }
+
+  const out: Array<{ role: 'system' | 'user' | 'assistant'; content: string | OpenAIMessagePart[] }> = [
+    { role: 'system', content: params.systemInstruction },
+  ];
+
+  if (Array.isArray(params.messages)) {
+    for (const msg of params.messages.slice(-6)) {
+      if (!msg?.content || msg.isError) continue;
+      out.push({
+        role: msg.role === 'user' ? 'user' : 'assistant',
+        content: String(msg.content),
+      });
+    }
+  }
+
+  let finalContent: string | OpenAIMessagePart[] = params.currentTextPrompt;
+  if (params.imageData && typeof params.imageData === 'string') {
+    const imageUrl = params.imageData.startsWith('data:')
+      ? params.imageData
+      : `data:${params.imageMimeType || 'image/jpeg'};base64,${params.imageData}`;
+    finalContent = [
+      { type: 'image_url', image_url: { url: imageUrl } },
+      { type: 'text', text: params.currentTextPrompt },
+    ];
+  }
+
+  const last = out[out.length - 1];
+  if (
+    last &&
+    last.role === 'user' &&
+    typeof last.content === 'string' &&
+    last.content === params.currentTextPrompt &&
+    typeof finalContent === 'string'
+  ) {
+    out[out.length - 1] = { role: 'user', content: finalContent };
+  } else {
+    out.push({ role: 'user', content: finalContent });
+  }
+
+  return out;
+}
+
+function getOpenAICompatibleEndpointConfig(
+  provider: 'groq' | 'openrouter',
+  apiKey: string
+): { url: string; headers: Record<string, string> } {
+  if (provider === 'groq') {
+    return {
+      url: 'https://api.groq.com/openai/v1/chat/completions',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+    };
+  }
+  return {
+    url: 'https://openrouter.ai/api/v1/chat/completions',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+      'HTTP-Referer': process.env.APP_URL || 'https://aadesh-ai.vercel.app',
+      'X-Title': 'Aadesh AI',
+    },
+  };
+}
+
+async function callOpenAICompatibleCompletion(params: {
+  provider: 'groq' | 'openrouter';
+  apiKey: string;
+  model: string;
+  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string | OpenAIMessagePart[] }>;
+  temperature?: number;
+  jsonMode?: boolean;
+  timeoutMs?: number;
+  allowFreeRouterFallback?: boolean;
+}): Promise<{ text: string; modelUsed: string }> {
+  const { url, headers } = getOpenAICompatibleEndpointConfig(params.provider, params.apiKey);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), params.timeoutMs || 22000);
+
+  try {
+    const bodyPayload: Record<string, any> = {
+      model: params.model,
+      messages: params.messages,
+      temperature: params.temperature ?? 0.5,
+      stream: false,
+    };
+    if (params.jsonMode) {
+      bodyPayload.response_format = { type: 'json_object' };
+    }
+
+    let res = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(bodyPayload),
+      signal: controller.signal,
+    });
+
+    // Some OpenRouter models reject response_format json_object with HTTP 400; retry cleanly without json_object flag
+    if (!res.ok && res.status === 400 && params.jsonMode) {
+      delete bodyPayload.response_format;
+      res = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(bodyPayload),
+        signal: controller.signal,
+      });
+    }
+
+    // If a specific OpenRouter :free model has no upstream endpoints (HTTP 404), retry once with OpenRouter's free router
+    if (
+      !res.ok &&
+      res.status === 404 &&
+      params.provider === 'openrouter' &&
+      params.allowFreeRouterFallback &&
+      params.model !== 'openrouter/free'
+    ) {
+      bodyPayload.model = 'openrouter/free';
+      res = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(bodyPayload),
+        signal: controller.signal,
+      });
+    }
+
+    if (!res.ok) {
+      let errText = `${AI_PROVIDER_METADATA[params.provider].name} HTTP ${res.status}`;
+      try {
+        const errJson = await res.json();
+        errText = errJson?.error?.message || errJson?.message || errText;
+      } catch {}
+      const classified = classifyProviderError(params.provider, res.status, sanitizeErrorMessage(errText));
+      const err: any = new Error(classified.message);
+      err.status = classified.httpStatus;
+      err.providerCode = classified.code;
+      throw err;
+    }
+
+    const data = await res.json();
+    const contentRaw = data?.choices?.[0]?.message?.content;
+    const text =
+      typeof contentRaw === 'string'
+        ? contentRaw
+        : Array.isArray(contentRaw)
+        ? contentRaw.map((part: any) => (typeof part?.text === 'string' ? part.text : '')).join('')
+        : '';
+
+    if (!text.trim()) {
+      throw new Error(`${AI_PROVIDER_METADATA[params.provider].name} returned an empty response.`);
+    }
+
+    return {
+      text,
+      modelUsed: String(data?.model || params.model),
+    };
+  } catch (err: any) {
+    if (err?.name === 'AbortError') {
+      const timeoutErr: any = new Error(
+        `${AI_PROVIDER_METADATA[params.provider].name} request timed out. Please retry.`
+      );
+      timeoutErr.status = 504;
+      throw timeoutErr;
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function streamOpenAICompatibleCompletion(params: {
+  provider: 'groq' | 'openrouter';
+  apiKey: string;
+  model: string;
+  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string | OpenAIMessagePart[] }>;
+  temperature?: number;
+  allowFreeRouterFallback?: boolean;
+  onChunk: (chunk: string) => void;
+  isAborted: () => boolean;
+}): Promise<{ modelUsed: string; totalChars: number }> {
+  const { url, headers } = getOpenAICompatibleEndpointConfig(params.provider, params.apiKey);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 45000);
+
+  try {
+    let activeModel = params.model;
+    let res = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model: activeModel,
+        messages: params.messages,
+        temperature: params.temperature ?? 0.5,
+        stream: true,
+      }),
+      signal: controller.signal,
+    });
+
+    if (
+      (!res.ok || !res.body) &&
+      res.status === 404 &&
+      params.provider === 'openrouter' &&
+      params.allowFreeRouterFallback &&
+      activeModel !== 'openrouter/free'
+    ) {
+      activeModel = 'openrouter/free';
+      res = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          model: activeModel,
+          messages: params.messages,
+          temperature: params.temperature ?? 0.5,
+          stream: true,
+        }),
+        signal: controller.signal,
+      });
+    }
+
+    if (!res.ok || !res.body) {
+      let errText = `${AI_PROVIDER_METADATA[params.provider].name} HTTP ${res.status}`;
+      try {
+        const errJson = await res.json();
+        errText = errJson?.error?.message || errJson?.message || errText;
+      } catch {}
+      const classified = classifyProviderError(params.provider, res.status, sanitizeErrorMessage(errText));
+      const err: any = new Error(classified.message);
+      err.status = classified.httpStatus;
+      err.providerCode = classified.code;
+      throw err;
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let totalChars = 0;
+    let modelUsed = activeModel;
+
+    while (!params.isAborted()) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line || line.startsWith(':') || !line.startsWith('data:')) continue;
+        const payload = line.slice(5).trim();
+        if (payload === '[DONE]') {
+          return { modelUsed, totalChars };
+        }
+        try {
+          const parsed = JSON.parse(payload);
+          if (parsed?.error?.message) {
+            const classified = classifyProviderError(
+              params.provider,
+              Number(parsed.error.code) || 502,
+              sanitizeErrorMessage(parsed.error.message)
+            );
+            const streamErr: any = new Error(classified.message);
+            streamErr.status = classified.httpStatus;
+            throw streamErr;
+          }
+          if (typeof parsed?.model === 'string' && parsed.model.trim()) {
+            modelUsed = parsed.model.trim();
+          }
+          const delta = parsed?.choices?.[0]?.delta?.content;
+          if (typeof delta === 'string' && delta.length > 0) {
+            totalChars += delta.length;
+            params.onChunk(delta);
+          }
+        } catch (parseErr: any) {
+          if (parseErr?.status) throw parseErr;
+        }
+      }
+    }
+
+    return { modelUsed, totalChars };
+  } catch (err: any) {
+    if (err?.name === 'AbortError') {
+      const timeoutErr: any = new Error(
+        `${AI_PROVIDER_METADATA[params.provider].name} stream timed out. Please retry.`
+      );
+      timeoutErr.status = 504;
+      throw timeoutErr;
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// HEALTH & REAL-TIME MULTI-PROVIDER CONNECTION STATUS CHECK
+app.get('/api/health', async (req: Request, res: Response): Promise<void> => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  const forceRefresh = req.query.force === '1' || req.query.force === 'true';
+  const requestedProvider = normalizeAIProviderId(req.query.provider);
+  const requestedModelParam =
+    requestedProvider === 'gemini' && typeof req.query.model === 'string' && req.query.model.trim()
+      ? req.query.model.trim()
+      : undefined;
+  const { providers, geminiProbeOk, checkedAtIso } = await getAllProviderStatuses(
+    forceRefresh,
+    requestedModelParam
+  );
+
+  const activeInfo = providers[requestedProvider];
+  const providerSummary: Record<
+    AIProviderId,
+    Pick<
+      AIProviderStatusInfo,
+      | 'id'
+      | 'name'
+      | 'badge'
+      | 'envVarName'
+      | 'configured'
+      | 'status'
+      | 'generationVerified'
+      | 'lastTestedAt'
+      | 'lastVerifiedModel'
+      | 'defaultModel'
+      | 'activeModel'
+      | 'freeModelsCount'
+      | 'paidModelsCount'
+      | 'latencyMs'
+      | 'checkedAt'
+      | 'error'
+      | 'errorLog'
+    >
+  > = {
+    gemini: {
+      id: providers.gemini.id,
+      name: providers.gemini.name,
+      badge: providers.gemini.badge,
+      envVarName: providers.gemini.envVarName,
+      configured: providers.gemini.configured,
+      status: providers.gemini.status,
+      generationVerified: Boolean(providers.gemini.generationVerified),
+      lastTestedAt: providers.gemini.lastTestedAt ?? null,
+      ...(providers.gemini.lastVerifiedModel ? { lastVerifiedModel: providers.gemini.lastVerifiedModel } : {}),
+      defaultModel: providers.gemini.defaultModel,
+      activeModel: providers.gemini.activeModel,
+      freeModelsCount: providers.gemini.freeModelsCount,
+      paidModelsCount: providers.gemini.paidModelsCount,
+      latencyMs: providers.gemini.latencyMs,
+      checkedAt: providers.gemini.checkedAt,
+      ...(providers.gemini.error ? { error: providers.gemini.error } : {}),
+      errorLog: providers.gemini.errorLog || [],
+    },
+    groq: {
+      id: providers.groq.id,
+      name: providers.groq.name,
+      badge: providers.groq.badge,
+      envVarName: providers.groq.envVarName,
+      configured: providers.groq.configured,
+      status: providers.groq.status,
+      generationVerified: Boolean(providers.groq.generationVerified),
+      lastTestedAt: providers.groq.lastTestedAt ?? null,
+      ...(providers.groq.lastVerifiedModel ? { lastVerifiedModel: providers.groq.lastVerifiedModel } : {}),
+      defaultModel: providers.groq.defaultModel,
+      activeModel: providers.groq.activeModel,
+      freeModelsCount: providers.groq.freeModelsCount,
+      paidModelsCount: providers.groq.paidModelsCount,
+      latencyMs: providers.groq.latencyMs,
+      checkedAt: providers.groq.checkedAt,
+      ...(providers.groq.error ? { error: providers.groq.error } : {}),
+      errorLog: providers.groq.errorLog || [],
+    },
+    openrouter: {
+      id: providers.openrouter.id,
+      name: providers.openrouter.name,
+      badge: providers.openrouter.badge,
+      envVarName: providers.openrouter.envVarName,
+      configured: providers.openrouter.configured,
+      status: providers.openrouter.status,
+      generationVerified: Boolean(providers.openrouter.generationVerified),
+      lastTestedAt: providers.openrouter.lastTestedAt ?? null,
+      ...(providers.openrouter.lastVerifiedModel ? { lastVerifiedModel: providers.openrouter.lastVerifiedModel } : {}),
+      defaultModel: providers.openrouter.defaultModel,
+      activeModel: providers.openrouter.activeModel,
+      freeModelsCount: providers.openrouter.freeModelsCount,
+      paidModelsCount: providers.openrouter.paidModelsCount,
+      latencyMs: providers.openrouter.latencyMs,
+      checkedAt: providers.openrouter.checkedAt,
+      ...(providers.openrouter.error ? { error: providers.openrouter.error } : {}),
+      errorLog: providers.openrouter.errorLog || [],
+    },
+  };
 
   res.json({
     status: 'ok',
     authRequired: true,
     backendConnected: true,
-    geminiConnected: probe.ok,
-    aiService: probe.ok ? 'connected' : 'error',
-    isLiveAI: probe.ok,
-    model: probe.model,
-    fallbackModels: candidates.filter((m) => m !== probe.model),
-    checkedAt: checkedAtIso,
-    lastConnectedAt: lastSuccessfulGeminiConnectedAt,
-    latencyMs: probe.latencyMs,
-    ...(probe.error ? { error: probe.error } : {}),
-    cached: false,
-    version: '2.5.0',
+    activeProvider: requestedProvider,
+    activeProviderConfigured: activeInfo.configured,
+    activeProviderVerified: Boolean(activeInfo.generationVerified),
+    geminiConnected: geminiProbeOk,
+    aiService: activeInfo.status,
+    isLiveAI: activeInfo.status === 'connected' && Boolean(activeInfo.generationVerified),
+    model: activeInfo.activeModel,
+    fallbackModels: requestedProvider === 'gemini' ? getCandidateModels().filter((m) => m !== activeInfo.activeModel) : [],
+    providers: providerSummary,
+    connectionHistory: connectionHistory.slice(0, 30),
+    checkedAt: activeInfo.checkedAt || checkedAtIso,
+    lastConnectedAt:
+      lastSuccessfulProviderConnectedAt[requestedProvider] ||
+      (activeInfo.generationVerified ? activeInfo.lastTestedAt ?? null : null) ||
+      (requestedProvider === 'gemini' ? lastSuccessfulGeminiConnectedAt : null),
+    latencyMs: activeInfo.latencyMs ?? 0,
+    ...(activeInfo.error ? { error: activeInfo.error } : {}),
+    version: '2.6.0',
     platform: 'Aadesh AI',
   });
+});
+
+// FULL MULTI-PROVIDER STATUS & SUPPORTED MODEL CATALOGS (ZERO API KEYS EXPOSED)
+app.get('/api/providers/status', requireAuthenticatedUser, async (req: Request, res: Response): Promise<void> => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  const forceRefresh = req.query.force === '1' || req.query.force === 'true';
+  const { providers, checkedAtIso } = await getAllProviderStatuses(forceRefresh);
+  res.json({
+    ok: true,
+    defaultProvider: 'gemini' as AIProviderId,
+    providers,
+    connectionHistory: connectionHistory.slice(0, 30),
+    checkedAt: checkedAtIso,
+  });
+});
+
+// LAST 3 SPECIFIC ERROR MESSAGES PER AI PROVIDER (ZERO API KEYS EXPOSED)
+app.get('/api/providers/errors', requireAuthenticatedUser, (_req: Request, res: Response): void => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.json({
+    ok: true,
+    errors: {
+      gemini: providerErrorLogs.gemini.slice(0, 3),
+      groq: providerErrorLogs.groq.slice(0, 3),
+      openrouter: providerErrorLogs.openrouter.slice(0, 3),
+    },
+    checkedAt: new Date().toISOString(),
+  });
+});
+
+app.get('/api/providers/models', requireAuthenticatedUser, async (req: Request, res: Response): Promise<void> => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  const provider = normalizeAIProviderId(req.query.provider);
+  const forceRefresh = req.query.force === '1' || req.query.force === 'true';
+
+  if (provider === 'groq') {
+    const statusInfo = await getGroqProviderStatus(forceRefresh);
+    res.json({
+      ok: true,
+      provider,
+      configured: statusInfo.configured,
+      status: statusInfo.status,
+      defaultModel: statusInfo.defaultModel,
+      models: statusInfo.models,
+      freeModelsCount: statusInfo.freeModelsCount,
+      paidModelsCount: statusInfo.paidModelsCount,
+    });
+    return;
+  }
+
+  if (provider === 'openrouter') {
+    const statusInfo = await getOpenRouterProviderStatus(forceRefresh);
+    res.json({
+      ok: true,
+      provider,
+      configured: statusInfo.configured,
+      status: statusInfo.status,
+      defaultModel: statusInfo.defaultModel,
+      models: statusInfo.models,
+      freeModelsCount: statusInfo.freeModelsCount,
+      paidModelsCount: statusInfo.paidModelsCount,
+    });
+    return;
+  }
+
+  const geminiRes = await getGeminiProviderStatus(forceRefresh);
+  res.json({
+    ok: true,
+    provider: 'gemini',
+    configured: geminiRes.statusInfo.configured,
+    status: geminiRes.statusInfo.status,
+    generationVerified: Boolean(geminiRes.statusInfo.generationVerified),
+    defaultModel: geminiRes.statusInfo.defaultModel,
+    models: geminiRes.statusInfo.models,
+    freeModelsCount: geminiRes.statusInfo.freeModelsCount,
+    paidModelsCount: 0,
+  });
+});
+
+// REAL AI GENERATION CONNECTION TEST ENDPOINT (tests actual AI generation, not just key presence)
+app.post('/api/providers/test', requireAuthenticatedUser, async (req: Request, res: Response): Promise<void> => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  const provider = normalizeAIProviderId(req.body?.provider);
+  const requestedModel = typeof req.body?.model === 'string' ? req.body.model.trim() : '';
+  const meta = AI_PROVIDER_METADATA[provider];
+  const startMs = Date.now();
+
+  try {
+    if (provider === 'gemini') {
+      const ai = getGeminiClient();
+      if (!ai) {
+        const statusInfo = (await getGeminiProviderStatus(true)).statusInfo;
+        res.status(400).json({
+          ok: false,
+          provider,
+          configured: false,
+          status: 'not_configured',
+          generationVerified: false,
+          error: `${meta.name} is not configured on the server. Set ${meta.envVarName} in environment variables.`,
+          statusInfo,
+        });
+        return;
+      }
+
+      const resolved = resolveSafeModelForProvider('gemini', GEMINI_SUPPORTED_MODELS, requestedModel, {
+        allowPaidExplicit: false,
+      });
+      const targetModel = resolved.modelId;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 10000);
+      let testResult: any = null;
+      try {
+        const thinkingCfg = getGeminiThinkingConfig(targetModel, ThinkingLevel.MINIMAL);
+        testResult = await ai.models.generateContent({
+          model: targetModel,
+          contents: 'Reply with only the single word: OK',
+          config: {
+            ...thinkingCfg,
+            abortSignal: controller.signal,
+          },
+        });
+      } catch (err: any) {
+        if (err?.name === 'AbortError') {
+          const timeoutErr: any = new Error(`Google Gemini (${targetModel}) request timed out after 10s.`);
+          timeoutErr.status = 504;
+          throw timeoutErr;
+        }
+        throw err;
+      } finally {
+        clearTimeout(timer);
+      }
+
+      const usedModel = targetModel;
+      const replyPreview = String(testResult?.text || '').trim().slice(0, 80);
+      if (!replyPreview) {
+        throw new Error(`Google Gemini (${targetModel}) returned an empty test response.`);
+      }
+
+      const latencyMs = Date.now() - startMs;
+      recordProviderGenerationResult('gemini', {
+        verified: true,
+        model: usedModel,
+        latencyMs,
+        source: 'test',
+      });
+      defaultKeyHealthCache = {
+        checkedAtMs: Date.now(),
+        geminiConnected: true,
+        model: usedModel,
+        latencyMs,
+      };
+      lastSuccessfulGeminiConnectedAt = new Date().toISOString();
+      const statusInfo = (await getGeminiProviderStatus(false)).statusInfo;
+      res.json({
+        ok: true,
+        provider,
+        configured: true,
+        status: 'connected',
+        generationVerified: true,
+        modelUsed: usedModel,
+        latencyMs,
+        replyPreview,
+        message: `Verified real ${meta.name} generation on ${usedModel} (${latencyMs} ms).`,
+        statusInfo,
+        connectionHistory: connectionHistory.slice(0, 30),
+      });
+      return;
+    }
+
+    const apiKey = provider === 'groq' ? getGroqApiKey() : getOpenRouterApiKey();
+    if (!apiKey) {
+      const errMsg = `${meta.name} is not configured on the server. Set ${meta.envVarName} in environment variables.`;
+      recordProviderGenerationResult(provider, {
+        verified: false,
+        model: requestedModel || meta.defaultModel,
+        latencyMs: Date.now() - startMs,
+        error: errMsg,
+        code: 'MISSING_API_KEY',
+        source: 'test',
+      });
+      const statusInfo =
+        provider === 'groq'
+          ? await getGroqProviderStatus(true)
+          : await getOpenRouterProviderStatus(true);
+      res.status(400).json({
+        ok: false,
+        provider,
+        configured: false,
+        status: 'not_configured',
+        generationVerified: false,
+        error: errMsg,
+        statusInfo,
+        connectionHistory: connectionHistory.slice(0, 30),
+      });
+      return;
+    }
+
+    let catalogModels: AIModelOption[];
+    let catalogSource: 'live' | 'catalog';
+
+    if (provider === 'groq') {
+      const groqProbe = await fetchGroqModelsCached(apiKey, true);
+      if (!groqProbe.ok) {
+        const latencyMs = Date.now() - startMs;
+        const errMsg = groqProbe.error || `${meta.name} model endpoint failed.`;
+        recordProviderGenerationResult(provider, {
+          verified: false,
+          model: requestedModel || meta.defaultModel,
+          latencyMs,
+          error: errMsg,
+          code: 'PROVIDER_ERROR',
+          source: 'test',
+        });
+        const statusInfo = await getGroqProviderStatus(false);
+        res.status(400).json({
+          ok: false,
+          provider,
+          configured: true,
+          status: 'error',
+          generationVerified: false,
+          latencyMs,
+          error: errMsg,
+          statusInfo,
+          connectionHistory: connectionHistory.slice(0, 30),
+        });
+        return;
+      }
+      catalogModels = groqProbe.models;
+      catalogSource = groqProbe.source;
+    } else {
+      const orCatalog = await fetchOpenRouterCatalogCached(true);
+      catalogModels = orCatalog.models;
+      catalogSource = orCatalog.source;
+    }
+
+    const resolvedModel = resolveSafeModelForProvider(
+      provider,
+      catalogModels,
+      requestedModel,
+      {
+        allowPaidExplicit: Boolean(requestedModel),
+        requireInCatalog: catalogSource === 'live',
+      }
+    );
+
+    const { text, modelUsed } = await callOpenAICompatibleCompletion({
+      provider,
+      apiKey,
+      model: resolvedModel.modelId,
+      messages: [
+        { role: 'system', content: 'Respond concisely.' },
+        { role: 'user', content: 'Reply with only the single word: OK' },
+      ],
+      temperature: 0,
+      jsonMode: false,
+      timeoutMs: 14000,
+      allowFreeRouterFallback: provider === 'openrouter' && resolvedModel.isFree,
+    });
+
+    const latencyMs = Date.now() - startMs;
+    recordProviderGenerationResult(provider, {
+      verified: true,
+      model: modelUsed,
+      latencyMs,
+      source: 'test',
+    });
+    const statusInfo =
+      provider === 'groq'
+        ? await getGroqProviderStatus(false)
+        : await getOpenRouterProviderStatus(false);
+
+    res.json({
+      ok: true,
+      provider,
+      configured: true,
+      status: 'connected',
+      generationVerified: true,
+      modelUsed,
+      latencyMs,
+      replyPreview: text.trim().slice(0, 80),
+      message: `Verified real ${meta.name} generation on ${modelUsed} (${latencyMs} ms).`,
+      statusInfo,
+      connectionHistory: connectionHistory.slice(0, 30),
+    });
+  } catch (err: any) {
+    const latencyMs = Date.now() - startMs;
+    const safeError = sanitizeErrorMessage(err);
+    const classified = classifyProviderError(provider, Number(err?.status) || 502, safeError);
+    recordProviderGenerationResult(provider, {
+      verified: false,
+      model: requestedModel || meta.defaultModel,
+      latencyMs,
+      error: classified.message,
+      code: classified.code,
+      source: 'test',
+    });
+    const statusInfo =
+      provider === 'gemini'
+        ? (await getGeminiProviderStatus(false)).statusInfo
+        : provider === 'groq'
+        ? await getGroqProviderStatus(false)
+        : await getOpenRouterProviderStatus(false);
+
+    res.status(classified.httpStatus).json({
+      ok: false,
+      provider,
+      configured: true,
+      status: 'error',
+      generationVerified: false,
+      code: classified.code,
+      latencyMs,
+      error: classified.message,
+      statusInfo,
+      connectionHistory: connectionHistory.slice(0, 30),
+    });
+  }
 });
 
 // AUTHENTICATED SESSION VERIFICATION ENDPOINT
@@ -628,9 +2271,18 @@ app.get('/api/auth/session', requireAuthenticatedUser, (req: Request, res: Respo
   });
 });
 
-// 1. CHAT & MULTIMODAL ENDPOINT (Live Google Gemini SDK)
+// 1. CHAT & MULTIMODAL ENDPOINT (Google Gemini, Groq, OpenRouter)
 app.post('/api/chat', requireAuthenticatedUser, async (req: Request, res: Response): Promise<void> => {
   const startTime = Date.now();
+  const requestedProvider = normalizeAIProviderId(req.body?.aiProvider);
+  const requestedModel = typeof req.body?.aiModel === 'string' ? req.body.aiModel.trim() : '';
+
+  const payloadCheck = validateChatPayloadBounds(req.body);
+  if (!payloadCheck.ok) {
+    res.status(400).json({ ok: false, code: 'INVALID_INPUT', error: payloadCheck.error, isLiveAI: false, retryable: false });
+    return;
+  }
+
   try {
     const {
       messages = [],
@@ -639,7 +2291,11 @@ app.post('/api/chat', requireAuthenticatedUser, async (req: Request, res: Respon
       imageMimeType = 'image/jpeg',
       attachmentName,
       attachmentContent,
-      targetLanguage = 'ne',
+      targetLanguage = 'en',
+      aiResponseLanguage,
+      autoDetectInputLanguage = false,
+      translationEnabled = false,
+      translationLanguage = 'ne',
       userLanguage = 'en',
       voicePersona = 'friendly',
       responseMode = 'balanced',
@@ -647,43 +2303,180 @@ app.post('/api/chat', requireAuthenticatedUser, async (req: Request, res: Respon
       memoryContext,
     } = req.body;
 
-    const customKey = (req.headers['x-gemini-api-key'] as string) || req.body.customApiKey;
-    const ai = getGeminiClient(customKey);
+    const effectiveResponseLang =
+      typeof aiResponseLanguage === 'string' && aiResponseLanguage.trim()
+        ? aiResponseLanguage.trim()
+        : String(targetLanguage || 'en').trim() || 'en';
+    const targetLangName = LANGUAGE_NAMES[effectiveResponseLang] || effectiveResponseLang;
+    const translationLangCode =
+      typeof translationLanguage === 'string' && translationLanguage.trim()
+        ? translationLanguage.trim()
+        : 'ne';
+    const translationLangName = LANGUAGE_NAMES[translationLangCode] || translationLangCode;
+    const shouldGenerateTranslation = Boolean(translationEnabled);
+    const shouldAutoDetectInput = Boolean(autoDetectInputLanguage);
 
-    if (!ai) {
-      res.status(400).json({
-        error: 'Gemini API key is not configured. Please set GEMINI_API_KEY in .env or connect your key in Settings.',
-        isLiveAI: false,
-        retryable: true,
-      });
-      return;
-    }
-
-    const targetLangName = LANGUAGE_NAMES[targetLanguage] || targetLanguage;
     const userLangName = LANGUAGE_NAMES[userLanguage] || userLanguage;
     const personaInstruction = PERSONA_TONES[voicePersona] || PERSONA_TONES.friendly;
     const memoryBlock = buildMemoryBlock(memoryContext);
+    const isVoiceRequest = Boolean(req.body.isVoice);
     const modeDirective =
-      responseMode === 'fast'
+      isVoiceRequest
+        ? 'RESPONSE MODE (VOICE ASSISTANT FAST): Provide a concise, clear, natural spoken response (1 to 3 short sentences max) that can be read aloud fast within 1-2 seconds. Do not use code blocks, large tables, or long lists.'
+        : responseMode === 'fast'
         ? 'RESPONSE MODE (FAST): Be crisp, direct, and concise. Give the exact answer immediately with minimal filler.'
         : responseMode === 'detailed'
         ? 'RESPONSE MODE (DETAILED): Provide thorough, structured, step-by-step explanations with clear examples, edge cases, and key takeaways.'
         : 'RESPONSE MODE (BALANCED): Be well-structured, natural, and appropriately thorough without unnecessary verbosity.';
 
+    const strictLanguageInstruction = shouldAutoDetectInput
+      ? `LANGUAGE RULE (AUTO-DETECT INPUT): Automatically detect the language of the user's message and reply naturally in that same language unless they explicitly ask for a different language. If uncertain, default to ${targetLangName} (${effectiveResponseLang}). Preserve clean Markdown formatting and programming code blocks without translating code keywords.`
+      : `STRICT LANGUAGE COMPLIANCE RULE: You MUST write your entire conversational response strictly in ${targetLangName} (${effectiveResponseLang}). If selected language is English ('en'), write in English. If Nepali ('ne'), write in natural, fluent Nepali. Never unexpectedly reply in another language unless the user explicitly asks you to translate or write in another language. Preserve clean Markdown formatting and do not translate code syntax or technical identifiers.`;
+
     const systemInstruction = `You are Aadesh AI ("One AI. Endless Possibilities.", created by Aadesh Jaisi), a professional global all-in-one AI assistant.
 Provide accurate, natural, helpful answers including step-by-step explanations, programming assistance with clean markdown code blocks, study guidance, multilingual help, and image analysis.
+${strictLanguageInstruction}
 ${modeDirective}
 
 SUGGESTION RULE: For "suggestedQuestions", provide 3 short, context-aware follow-up action buttons tailored to this conversation (e.g., "Explain in more detail", "Give an example", "Summarize", or a specific follow-up).
 
 User UI language: ${userLangName} (${userLanguage}).
-Target translation language: ${targetLangName} (${targetLanguage}).
+Primary AI response language: ${targetLangName} (${effectiveResponseLang}).
+${shouldGenerateTranslation ? `Secondary translation target language: ${translationLangName} (${translationLangCode}).` : ''}
 ${location?.name ? `Current Geotag location: ${location.name} (${location.lat ?? 'N/A'}, ${location.lng ?? 'N/A'}).` : ''}
 Tone requirement: ${personaInstruction}${memoryBlock}`;
 
-    const contents: Array<{ role: 'user' | 'model'; parts: Array<Record<string, any>> }> = [];
+    let promptText =
+      (typeof currentMessage === 'string' && currentMessage.trim()) ||
+      (imageData
+        ? 'Please inspect and analyze this image, translate visible text, and describe the scene.'
+        : attachmentName
+          ? `Please analyze the attached file (${attachmentName}).`
+          : 'Hello');
 
-    // Cap history to last 6 turns to avoid bloated prompts
+    if (attachmentName && typeof attachmentContent === 'string' && attachmentContent.trim()) {
+      const safeAttachment = attachmentContent.slice(0, 24000);
+      promptText += `\n\n[Attached File: ${String(attachmentName).slice(0, 120)}]\n\`\`\`\n${safeAttachment}\n\`\`\``;
+    }
+
+    if (location?.name) {
+      promptText += `\n[Geotag Location Context: ${location.name}]`;
+    }
+
+    // ---- Groq & OpenRouter official API dispatch (never falls back across providers) ----
+    if (requestedProvider === 'groq' || requestedProvider === 'openrouter') {
+      const apiKey = requestedProvider === 'groq' ? getGroqApiKey() : getOpenRouterApiKey();
+      const meta = AI_PROVIDER_METADATA[requestedProvider];
+      if (!apiKey) {
+        res.status(400).json({
+          error: `${meta.name} is not configured on the server. Set ${meta.envVarName} in environment variables.`,
+          provider: requestedProvider,
+          providerNotConfigured: true,
+          isLiveAI: false,
+          retryable: false,
+        });
+        return;
+      }
+
+      const catalogResult =
+        requestedProvider === 'groq'
+          ? await fetchGroqModelsCached(apiKey)
+          : await fetchOpenRouterCatalogCached();
+      const resolvedModel = resolveSafeModelForProvider(requestedProvider, catalogResult.models, requestedModel, {
+        allowPaidExplicit: true,
+        requireInCatalog: catalogResult.source === 'live',
+      });
+      const supportsVision = Boolean(
+        resolvedModel.modelInfo?.supportsVision ||
+          /vision|vl|scout|maverick|gemma-3|gemma-4|mistral-small-3|gemini|gpt-4o|claude-3|claude-4|openrouter\/free/i.test(resolvedModel.modelId)
+      );
+
+      const jsonSystemInstruction = `${systemInstruction}
+
+Return valid JSON matching this schema:
+{
+  "reply": "Accurate, helpful response in clean markdown.",
+  "translation": ${shouldGenerateTranslation ? `"Natural translation of reply into ${translationLangName}."` : '""'},
+  "detectedLanguage": "ISO 639-1 code of user input (e.g. en, ne, hi, es)",
+  "sentiment": "positive | curious | inquiry | urgent | neutral",
+  "suggestedQuestions": ["short follow-up 1", "short follow-up 2", "short follow-up 3"]
+}`;
+
+      const oaiMessages = buildOpenAICompatibleMessages({
+        provider: requestedProvider,
+        modelId: resolvedModel.modelId,
+        supportsVision,
+        systemInstruction: jsonSystemInstruction,
+        messages,
+        currentTextPrompt: promptText,
+        imageData,
+        imageMimeType,
+      });
+
+      const { text: rawText, modelUsed } = await callOpenAICompatibleCompletion({
+        provider: requestedProvider,
+        apiKey,
+        model: resolvedModel.modelId,
+        messages: oaiMessages,
+        jsonMode: true,
+        timeoutMs: 25000,
+        allowFreeRouterFallback: requestedProvider === 'openrouter' && resolvedModel.isFree,
+      });
+
+      const latencyMs = Date.now() - startTime;
+      recordProviderGenerationResult(requestedProvider, {
+        verified: true,
+        model: modelUsed,
+        latencyMs,
+        source: 'chat',
+      });
+      try {
+        const parsed = extractJsonText(rawText);
+        res.json({
+          reply: parsed.reply || rawText,
+          translation: shouldGenerateTranslation ? (parsed.translation || '') : '',
+          detectedLanguage: parsed.detectedLanguage || effectiveResponseLang,
+          sentiment: parsed.sentiment || 'positive',
+          suggestedQuestions:
+            Array.isArray(parsed.suggestedQuestions) && parsed.suggestedQuestions.length > 0
+              ? parsed.suggestedQuestions
+              : ['Explain in more detail', 'Give a practical example', 'Summarize the key points'],
+          geotagInsights: parsed.geotagInsights || undefined,
+          latencyMs,
+          isLiveAI: true,
+          provider: requestedProvider,
+          modelUsed,
+        });
+      } catch {
+        res.json({
+          reply: rawText || 'Response received.',
+          translation: '',
+          detectedLanguage: effectiveResponseLang,
+          sentiment: 'neutral',
+          suggestedQuestions: ['Explain in more detail', 'Give a practical example', 'Summarize the key points'],
+          latencyMs,
+          isLiveAI: true,
+          provider: requestedProvider,
+          modelUsed,
+        });
+      }
+      return;
+    }
+
+    // ---- Default: Google Gemini dispatch ----
+    const ai = getGeminiClient();
+    if (!ai) {
+      res.status(400).json({
+        error: 'Google Gemini is not configured on the server. Set GEMINI_API_KEY in environment variables.',
+        provider: 'gemini',
+        providerNotConfigured: true,
+        isLiveAI: false,
+        retryable: false,
+      });
+      return;
+    }
+
+    const contents: Array<{ role: 'user' | 'model'; parts: Array<Record<string, any>> }> = [];
     if (Array.isArray(messages)) {
       for (const msg of messages.slice(-6)) {
         if (!msg?.content || msg.isError) continue;
@@ -706,26 +2499,8 @@ Tone requirement: ${personaInstruction}${memoryBlock}`;
         },
       });
     }
-
-    let promptText =
-      (typeof currentMessage === 'string' && currentMessage.trim()) ||
-      (imageData
-        ? 'Please inspect and analyze this image, translate visible text, and describe the scene.'
-        : attachmentName
-          ? `Please analyze the attached file (${attachmentName}).`
-          : 'Hello');
-
-    if (attachmentName && typeof attachmentContent === 'string' && attachmentContent.trim()) {
-      const safeAttachment = attachmentContent.slice(0, 24000);
-      promptText += `\n\n[Attached File: ${String(attachmentName).slice(0, 120)}]\n\`\`\`\n${safeAttachment}\n\`\`\``;
-    }
-
-    if (location?.name) {
-      promptText += `\n[Geotag Location Context: ${location.name}]`;
-    }
     currentParts.push({ text: promptText });
 
-    // Ensure final turn is user (avoid consecutive duplicate user turn if already included in messages)
     const lastContent = contents[contents.length - 1];
     if (
       lastContent &&
@@ -738,101 +2513,197 @@ Tone requirement: ${personaInstruction}${memoryBlock}`;
     }
 
     const chatThinkingLevel =
-      responseMode === 'detailed' ? ThinkingLevel.MEDIUM : ThinkingLevel.MINIMAL;
+      isVoiceRequest || responseMode === 'fast'
+        ? ThinkingLevel.MINIMAL
+        : responseMode === 'detailed'
+        ? ThinkingLevel.MEDIUM
+        : ThinkingLevel.MINIMAL;
 
-    const { response, modelUsed } = await generateWithModelFallback(
-      ai,
-      (model) => ({
-        model,
+    const configuredModel = sanitizeModelName(
+      requestedModel || process.env.GEMINI_MODEL || GEMINI_RELIABLE_OVERLOAD_MODEL
+    );
+    const chatController = new AbortController();
+    const chatTimer = setTimeout(() => chatController.abort(), 20000);
+    req.on('close', () => chatController.abort());
+
+    const schemaProperties: Record<string, any> = {
+      reply: {
+        type: Type.STRING,
+        description: 'Accurate, helpful response in clean markdown.',
+      },
+      detectedLanguage: {
+        type: Type.STRING,
+        description: 'ISO 639-1 code of the user input (e.g. en, ne, hi, es).',
+      },
+      sentiment: {
+        type: Type.STRING,
+        description: 'One of: positive, curious, inquiry, urgent, neutral.',
+      },
+      suggestedQuestions: {
+        type: Type.ARRAY,
+        items: { type: Type.STRING },
+        description: '2 or 3 short relevant follow-up questions.',
+      },
+      geotagInsights: {
+        type: Type.STRING,
+        description: 'Optional brief note if location or photo context is relevant.',
+      },
+    };
+    const requiredFields = ['reply', 'detectedLanguage', 'sentiment', 'suggestedQuestions'];
+    if (shouldGenerateTranslation) {
+      schemaProperties.translation = {
+        type: Type.STRING,
+        description: `Natural translation of reply into ${translationLangName}.`,
+      };
+      requiredFields.push('translation');
+    }
+
+    const executeChatWithModel = (targetModel: string) =>
+      ai.models.generateContent({
+        model: targetModel,
         contents,
         config: {
           systemInstruction,
-          ...(model.startsWith('gemini-4') || model.startsWith('gemini-3')
-            ? { thinkingConfig: { thinkingLevel: chatThinkingLevel } }
-            : {}),
+          ...getGeminiThinkingConfig(targetModel, chatThinkingLevel),
+          abortSignal: chatController.signal,
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,
-            properties: {
-              reply: {
-                type: Type.STRING,
-                description: 'Accurate, helpful response in clean markdown.',
-              },
-              translation: {
-                type: Type.STRING,
-                description: `Natural translation of reply into ${targetLangName}.`,
-              },
-              detectedLanguage: {
-                type: Type.STRING,
-                description: 'ISO 639-1 code of the user input (e.g. en, ne, hi, es).',
-              },
-              sentiment: {
-                type: Type.STRING,
-                description: 'One of: positive, curious, inquiry, urgent, neutral.',
-              },
-              suggestedQuestions: {
-                type: Type.ARRAY,
-                items: { type: Type.STRING },
-                description: '2 or 3 short relevant follow-up questions.',
-              },
-              geotagInsights: {
-                type: Type.STRING,
-                description: 'Optional brief note if location or photo context is relevant.',
-              },
-            },
-            required: ['reply', 'translation', 'detectedLanguage', 'sentiment', 'suggestedQuestions'],
+            properties: schemaProperties,
+            required: requiredFields,
           },
         },
-      })
-    );
+      });
+
+    let modelUsed = configuredModel;
+    let fallbackUsed = false;
+    let fallbackFromModel: string | undefined = undefined;
+    let fallbackReason: 'quota' | 'overload' | undefined = undefined;
+    let response: Awaited<ReturnType<typeof ai.models.generateContent>>;
+    try {
+      try {
+        response = await executeChatWithModel(configuredModel);
+      } catch (primaryErr: any) {
+        if (isNonFallbackClientError(primaryErr)) {
+          throw primaryErr;
+        }
+        const isQuotaErr = isGeminiQuotaOrRateLimitError(primaryErr);
+        const isOverloadErr = isTransientOverloadError(primaryErr);
+
+        if (
+          configuredModel !== GEMINI_QUOTA_FALLBACK_MODEL &&
+          (isQuotaErr || isOverloadErr) &&
+          !chatController.signal.aborted
+        ) {
+          await sleepAbortable(250, chatController.signal);
+          modelUsed = GEMINI_QUOTA_FALLBACK_MODEL;
+          fallbackUsed = true;
+          fallbackFromModel = configuredModel;
+          fallbackReason = isQuotaErr ? 'quota' : 'overload';
+          response = await executeChatWithModel(GEMINI_QUOTA_FALLBACK_MODEL);
+        } else if (
+          configuredModel === GEMINI_QUOTA_FALLBACK_MODEL &&
+          (isQuotaErr || isOverloadErr) &&
+          !chatController.signal.aborted
+        ) {
+          await sleepAbortable(350, chatController.signal);
+          response = await executeChatWithModel(GEMINI_QUOTA_FALLBACK_MODEL);
+        } else {
+          throw primaryErr;
+        }
+      }
+    } catch (err: any) {
+      if (err?.name === 'AbortError') {
+        const timeoutErr: any = new Error(`Google Gemini (${modelUsed}) request timed out.`);
+        timeoutErr.status = 504;
+        throw timeoutErr;
+      }
+      throw err;
+    } finally {
+      clearTimeout(chatTimer);
+    }
 
     const latencyMs = Date.now() - startTime;
     const rawText = response.text || '';
+    recordProviderGenerationResult('gemini', {
+      verified: true,
+      model: modelUsed,
+      latencyMs,
+      source: 'chat',
+    });
 
     try {
       const parsed = extractJsonText(rawText);
       res.json({
         reply: parsed.reply || rawText,
-        translation: parsed.translation || '',
-        detectedLanguage: parsed.detectedLanguage || 'en',
+        translation: shouldGenerateTranslation ? (parsed.translation || '') : '',
+        detectedLanguage: parsed.detectedLanguage || effectiveResponseLang,
         sentiment: parsed.sentiment || 'positive',
         suggestedQuestions:
           Array.isArray(parsed.suggestedQuestions) && parsed.suggestedQuestions.length > 0
             ? parsed.suggestedQuestions
-            : ['नेपालीमा अनुवाद गर्नुहोस् (Translate to Nepali)', 'Explain step by step in English'],
+            : ['Explain in more detail', 'Give a practical example', 'Summarize the key points'],
         geotagInsights: parsed.geotagInsights || undefined,
         latencyMs,
         isLiveAI: true,
+        provider: 'gemini',
         modelUsed,
+        ...(fallbackUsed ? { fallbackUsed: true, fallbackFromModel, fallbackReason } : {}),
       });
     } catch {
       res.json({
         reply: rawText || 'Response received.',
         translation: '',
-        detectedLanguage: 'en',
+        detectedLanguage: effectiveResponseLang,
         sentiment: 'neutral',
-        suggestedQuestions: ['नेपालीमा अनुवाद गर्नुहोस् (Translate to Nepali)', 'Explain step by step in English'],
+        suggestedQuestions: ['Explain in more detail', 'Give a practical example', 'Summarize the key points'],
         latencyMs,
         isLiveAI: true,
+        provider: 'gemini',
         modelUsed,
+        ...(fallbackUsed ? { fallbackUsed: true, fallbackFromModel, fallbackReason } : {}),
       });
     }
   } catch (err: any) {
     const safeError = sanitizeErrorMessage(err);
     recordServerError('/api/chat', safeError);
-    console.error('Error in /api/chat:', safeError);
-    const statusCode = isAuthFailure(err) ? 401 : 502;
-    res.status(statusCode).json({
-      error: safeError,
+    console.error(`Error in /api/chat (${requestedProvider}):`, safeError);
+    const classified = classifyProviderError(
+      requestedProvider,
+      Number(err?.status) || 502,
+      safeError
+    );
+    recordProviderGenerationResult(requestedProvider, {
+      verified: false,
+      model: requestedModel || AI_PROVIDER_METADATA[requestedProvider].defaultModel,
+      latencyMs: Date.now() - startTime,
+      error: classified.message,
+      code: classified.code,
+      source: 'chat',
+    });
+    res.status(classified.httpStatus).json({
+      error: classified.message,
+      code: classified.code,
+      provider: requestedProvider,
       latencyMs: Date.now() - startTime,
       isLiveAI: false,
-      retryable: true,
+      retryable: classified.httpStatus >= 500 || classified.httpStatus === 429,
     });
   }
 });
 
-// 1B. STREAMING CHAT ENDPOINT (SSE via Gemini generateContentStream)
+// 1B. STREAMING CHAT ENDPOINT (SSE for Google Gemini, Groq, and OpenRouter)
 app.post('/api/chat/stream', requireAuthenticatedUser, async (req: Request, res: Response): Promise<void> => {
+  const startTime = Date.now();
+  const requestedProvider = normalizeAIProviderId(req.body?.aiProvider);
+  const requestedModel = typeof req.body?.aiModel === 'string' ? req.body.aiModel.trim() : '';
+
+  const payloadCheck = validateChatPayloadBounds(req.body);
+  if (!payloadCheck.ok) {
+    res.status(400).json({ ok: false, code: 'INVALID_INPUT', error: payloadCheck.error, provider: requestedProvider });
+    return;
+  }
+
   try {
     const {
       messages = [],
@@ -841,7 +2712,9 @@ app.post('/api/chat/stream', requireAuthenticatedUser, async (req: Request, res:
       imageMimeType = 'image/jpeg',
       attachmentName,
       attachmentContent,
-      targetLanguage = 'ne',
+      targetLanguage = 'en',
+      aiResponseLanguage,
+      autoDetectInputLanguage = false,
       userLanguage = 'en',
       voicePersona = 'friendly',
       responseMode = 'balanced',
@@ -849,12 +2722,137 @@ app.post('/api/chat/stream', requireAuthenticatedUser, async (req: Request, res:
       memoryContext,
     } = req.body;
 
-    const customKey = (req.headers['x-gemini-api-key'] as string) || req.body.customApiKey;
-    const ai = getGeminiClient(customKey);
+    const effectiveResponseLang =
+      typeof aiResponseLanguage === 'string' && aiResponseLanguage.trim()
+        ? aiResponseLanguage.trim()
+        : String(targetLanguage || 'en').trim() || 'en';
+    const targetLangName = LANGUAGE_NAMES[effectiveResponseLang] || effectiveResponseLang;
+    const userLangName = LANGUAGE_NAMES[userLanguage] || userLanguage;
+    const shouldAutoDetectInput = Boolean(autoDetectInputLanguage);
+    const personaInstruction = PERSONA_TONES[voicePersona] || PERSONA_TONES.friendly;
+    const memoryBlock = buildMemoryBlock(memoryContext);
+    const isVoiceRequest = Boolean(req.body.isVoice);
+    const modeDirective =
+      isVoiceRequest
+        ? 'Mode: VOICE ASSISTANT FAST. Provide a short, direct spoken answer (1-3 sentences max) ready for instant speech synthesis. Avoid code blocks and markdown tables.'
+        : responseMode === 'fast'
+        ? 'Mode: FAST & concise. Answer directly with crisp clarity.'
+        : responseMode === 'detailed'
+        ? 'Mode: DETAILED & deep. Provide comprehensive step-by-step reasoning and examples.'
+        : 'Mode: BALANCED. Natural, clear, well-structured answers.';
 
+    const strictLanguageInstruction = shouldAutoDetectInput
+      ? `LANGUAGE RULE (AUTO-DETECT INPUT): Automatically detect the language of the user's message and reply naturally in that same language unless they explicitly ask for a different language. If uncertain, default to ${targetLangName} (${effectiveResponseLang}). Preserve clean Markdown formatting and programming code blocks without translating code syntax.`
+      : `STRICT LANGUAGE COMPLIANCE RULE: You MUST output your conversational response strictly in ${targetLangName} (${effectiveResponseLang}). If selected language is English ('en'), write in English. If Nepali ('ne'), write in natural, fluent Nepali. Never unexpectedly reply in another language unless explicitly requested by the user. Preserve clean Markdown formatting and do not translate programming code syntax or technical identifiers unnecessarily.`;
+
+    const systemInstruction = `You are Aadesh AI ("One AI. Endless Possibilities.", built by Aadesh Jaisi).
+Answer naturally and clearly in clean Markdown.
+${strictLanguageInstruction}
+${modeDirective}
+User UI language: ${userLangName} (${userLanguage}).
+Primary AI response language: ${targetLangName} (${effectiveResponseLang}).
+${location?.name ? `Location context: ${location.name}.` : ''}
+Tone: ${personaInstruction}${memoryBlock}`;
+
+    let promptText =
+      (typeof currentMessage === 'string' && currentMessage.trim()) ||
+      (imageData ? 'Inspect and explain this image clearly.' : attachmentName ? `Analyze ${attachmentName}.` : 'Hello');
+
+    if (attachmentName && typeof attachmentContent === 'string' && attachmentContent.trim()) {
+      promptText += `\n\n[Attached File: ${String(attachmentName).slice(0, 120)}]\n\`\`\`\n${attachmentContent.slice(0, 24000)}\n\`\`\``;
+    }
+    if (location?.name) promptText += `\n[Geotag: ${location.name}]`;
+
+    // Pre-flight server configuration check BEFORE switching headers to SSE
+    if (requestedProvider === 'groq' || requestedProvider === 'openrouter') {
+      const apiKey = requestedProvider === 'groq' ? getGroqApiKey() : getOpenRouterApiKey();
+      const meta = AI_PROVIDER_METADATA[requestedProvider];
+      if (!apiKey) {
+        res.status(400).json({
+          error: `${meta.name} is not configured on the server. Set ${meta.envVarName} in environment variables.`,
+          provider: requestedProvider,
+          providerNotConfigured: true,
+          isLiveAI: false,
+        });
+        return;
+      }
+
+      const catalogResult =
+        requestedProvider === 'groq'
+          ? await fetchGroqModelsCached(apiKey)
+          : await fetchOpenRouterCatalogCached();
+      const resolvedModel = resolveSafeModelForProvider(requestedProvider, catalogResult.models, requestedModel, {
+        allowPaidExplicit: true,
+        requireInCatalog: catalogResult.source === 'live',
+      });
+      const supportsVision = Boolean(
+        resolvedModel.modelInfo?.supportsVision ||
+          /vision|vl|scout|maverick|gemma-3|gemma-4|mistral-small-3|gemini|gpt-4o|claude-3|claude-4|openrouter\/free/i.test(resolvedModel.modelId)
+      );
+
+      const oaiMessages = buildOpenAICompatibleMessages({
+        provider: requestedProvider,
+        modelId: resolvedModel.modelId,
+        supportsVision,
+        systemInstruction,
+        messages,
+        currentTextPrompt: promptText,
+        imageData,
+        imageMimeType,
+      });
+
+      let clientAborted = false;
+      req.on('close', () => {
+        clientAborted = true;
+      });
+
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache, no-transform');
+      res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-Accel-Buffering', 'no');
+      res.flushHeaders?.();
+
+      const { modelUsed, totalChars } = await streamOpenAICompatibleCompletion({
+        provider: requestedProvider,
+        apiKey,
+        model: resolvedModel.modelId,
+        messages: oaiMessages,
+        allowFreeRouterFallback: requestedProvider === 'openrouter' && resolvedModel.isFree,
+        onChunk: (chunk) => {
+          if (!clientAborted) {
+            res.write(`data: ${JSON.stringify({ chunk })}\n\n`);
+          }
+        },
+        isAborted: () => clientAborted,
+      });
+
+      if (clientAborted) {
+        res.end();
+        return;
+      }
+
+      if (totalChars === 0) {
+        throw new Error(`${meta.name} returned an empty stream response.`);
+      }
+
+      recordProviderGenerationResult(requestedProvider, {
+        verified: true,
+        model: modelUsed,
+        latencyMs: Date.now() - startTime,
+        source: 'chat',
+      });
+      res.write(`data: ${JSON.stringify({ done: true, modelUsed, provider: requestedProvider })}\n\n`);
+      res.end();
+      return;
+    }
+
+    // ---- Default: Google Gemini Streaming ----
+    const ai = getGeminiClient();
     if (!ai) {
       res.status(400).json({
-        error: 'Gemini API key is not configured. Please set GEMINI_API_KEY in .env or connect your key in Settings.',
+        error: 'Google Gemini is not configured on the server. Set GEMINI_API_KEY in environment variables.',
+        provider: 'gemini',
+        providerNotConfigured: true,
         isLiveAI: false,
       });
       return;
@@ -870,25 +2868,6 @@ app.post('/api/chat/stream', requireAuthenticatedUser, async (req: Request, res:
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no');
     res.flushHeaders?.();
-
-    const targetLangName = LANGUAGE_NAMES[targetLanguage] || targetLanguage;
-    const userLangName = LANGUAGE_NAMES[userLanguage] || userLanguage;
-    const personaInstruction = PERSONA_TONES[voicePersona] || PERSONA_TONES.friendly;
-    const memoryBlock = buildMemoryBlock(memoryContext);
-    const modeDirective =
-      responseMode === 'fast'
-        ? 'Mode: FAST & concise. Answer directly with crisp clarity.'
-        : responseMode === 'detailed'
-        ? 'Mode: DETAILED & deep. Provide comprehensive step-by-step reasoning and examples.'
-        : 'Mode: BALANCED. Natural, clear, well-structured answers.';
-
-    const systemInstruction = `You are Aadesh AI ("One AI. Endless Possibilities.", built by Aadesh Jaisi).
-Answer naturally and clearly in clean Markdown. Match the user's language (English, Nepali, or any requested language).
-${modeDirective}
-User UI language: ${userLangName} (${userLanguage}).
-Target translation preference: ${targetLangName} (${targetLanguage}).
-${location?.name ? `Location context: ${location.name}.` : ''}
-Tone: ${personaInstruction}${memoryBlock}`;
 
     const contents: Array<{ role: 'user' | 'model'; parts: Array<Record<string, any>> }> = [];
     if (Array.isArray(messages)) {
@@ -908,15 +2887,6 @@ Tone: ${personaInstruction}${memoryBlock}`;
       const cleanBase64 = imageData.replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, '');
       currentParts.push({ inlineData: { mimeType: detectedMime, data: cleanBase64 } });
     }
-
-    let promptText =
-      (typeof currentMessage === 'string' && currentMessage.trim()) ||
-      (imageData ? 'Inspect and explain this image clearly.' : attachmentName ? `Analyze ${attachmentName}.` : 'Hello');
-
-    if (attachmentName && typeof attachmentContent === 'string' && attachmentContent.trim()) {
-      promptText += `\n\n[Attached File: ${String(attachmentName).slice(0, 120)}]\n\`\`\`\n${attachmentContent.slice(0, 24000)}\n\`\`\``;
-    }
-    if (location?.name) promptText += `\n[Geotag: ${location.name}]`;
     currentParts.push({ text: promptText });
 
     const lastContent = contents[contents.length - 1];
@@ -927,72 +2897,108 @@ Tone: ${personaInstruction}${memoryBlock}`;
     }
 
     const streamThinkingLevel =
-      responseMode === 'detailed' ? ThinkingLevel.MEDIUM : ThinkingLevel.MINIMAL;
-    const candidates = getCandidateModels();
+      isVoiceRequest || responseMode === 'fast'
+        ? ThinkingLevel.MINIMAL
+        : responseMode === 'detailed'
+        ? ThinkingLevel.MEDIUM
+        : ThinkingLevel.MINIMAL;
+    const configuredModel = sanitizeModelName(
+      requestedModel || process.env.GEMINI_MODEL || GEMINI_RELIABLE_OVERLOAD_MODEL
+    );
+    const streamAbortController = new AbortController();
+    const streamTimer = setTimeout(() => streamAbortController.abort(), 25000);
+    req.on('close', () => {
+      clientAborted = true;
+      streamAbortController.abort();
+    });
+
     let streamed = false;
     let totalStreamedChars = 0;
-    let usedModel = candidates[0];
-    let lastErr: unknown = null;
+    let usedModel = configuredModel;
+    let fallbackUsed = false;
+    let fallbackFromModel: string | undefined = undefined;
+    let fallbackReason: 'quota' | 'overload' | undefined = undefined;
 
-    for (const model of candidates) {
-      if (clientAborted) break;
-      try {
-        const stream = await ai.models.generateContentStream({
-          model,
-          contents,
-          config: {
-            systemInstruction,
-            ...(model.startsWith('gemini-4') || model.startsWith('gemini-3')
-              ? { thinkingConfig: { thinkingLevel: streamThinkingLevel } }
-              : {}),
-          },
-        });
-        usedModel = model;
-        for await (const chunk of stream) {
-          if (clientAborted) break;
-          const text = chunk.text || '';
-          if (text) {
-            totalStreamedChars += text.length;
-            res.write(`data: ${JSON.stringify({ chunk: text })}\n\n`);
-          }
+    const runStreamWithModel = async (targetModel: string) => {
+      const stream = await ai.models.generateContentStream({
+        model: targetModel,
+        contents,
+        config: {
+          systemInstruction,
+          ...getGeminiThinkingConfig(targetModel, streamThinkingLevel),
+          abortSignal: streamAbortController.signal,
+        },
+      });
+      for await (const chunk of stream) {
+        if (clientAborted) break;
+        const text = chunk.text || '';
+        if (text) {
+          totalStreamedChars += text.length;
+          res.write(`data: ${JSON.stringify({ chunk: text })}\n\n`);
         }
-        if (totalStreamedChars > 0 || clientAborted) {
-          streamed = true;
-          break;
-        }
-      } catch (err) {
-        lastErr = err;
-        if (isAuthFailure(err)) throw err;
       }
-    }
+    };
 
-    // Fallback to standard generateContent if stream yielded zero text chunks
-    if (!streamed && !clientAborted) {
+    try {
       try {
-        const fallback = await generateWithModelFallback(
-          ai,
-          (model) => ({
-            model,
-            contents,
-            config: {
-              systemInstruction,
-              ...(model.startsWith('gemini-4') || model.startsWith('gemini-3')
-                ? { thinkingConfig: { thinkingLevel: streamThinkingLevel } }
-                : {}),
-            },
-          }),
-          10000,
-          16000
-        );
-        const fallbackText = fallback.response.text || '';
-        if (fallbackText.trim() && !clientAborted) {
-          usedModel = fallback.modelUsed;
-          res.write(`data: ${JSON.stringify({ chunk: fallbackText })}\n\n`);
-          streamed = true;
+        await runStreamWithModel(configuredModel);
+      } catch (primaryErr: any) {
+        if (isNonFallbackClientError(primaryErr)) {
+          throw primaryErr;
         }
-      } catch (fallbackErr) {
-        lastErr = fallbackErr;
+        const isQuotaErr = isGeminiQuotaOrRateLimitError(primaryErr);
+        const isOverloadErr = isTransientOverloadError(primaryErr);
+
+        if (
+          !clientAborted &&
+          totalStreamedChars === 0 &&
+          configuredModel !== GEMINI_QUOTA_FALLBACK_MODEL &&
+          (isQuotaErr || isOverloadErr) &&
+          !streamAbortController.signal.aborted
+        ) {
+          await sleepAbortable(250, streamAbortController.signal);
+          usedModel = GEMINI_QUOTA_FALLBACK_MODEL;
+          fallbackUsed = true;
+          fallbackFromModel = configuredModel;
+          fallbackReason = isQuotaErr ? 'quota' : 'overload';
+          res.write(
+            `data: ${JSON.stringify({
+              fallbackSwitched: true,
+              fallbackFromModel,
+              fallbackReason,
+              modelUsed: usedModel,
+            })}\n\n`
+          );
+          await runStreamWithModel(GEMINI_QUOTA_FALLBACK_MODEL);
+        } else if (
+          !clientAborted &&
+          totalStreamedChars === 0 &&
+          configuredModel === GEMINI_QUOTA_FALLBACK_MODEL &&
+          (isQuotaErr || isOverloadErr) &&
+          !streamAbortController.signal.aborted
+        ) {
+          await sleepAbortable(350, streamAbortController.signal);
+          await runStreamWithModel(GEMINI_QUOTA_FALLBACK_MODEL);
+        } else {
+          throw primaryErr;
+        }
       }
+      if (totalStreamedChars > 0) {
+        streamed = true;
+      }
+    } catch (err: any) {
+      if (clientAborted) {
+        res.end();
+        return;
+      }
+      if (err?.name === 'AbortError') {
+        const timeoutErr: any = new Error(`Google Gemini (${usedModel}) stream timed out.`);
+        timeoutErr.status = 504;
+        throw timeoutErr;
+      }
+      throw err;
+    } finally {
+      clearTimeout(streamTimer);
     }
 
     if (clientAborted) {
@@ -1001,19 +3007,46 @@ Tone: ${personaInstruction}${memoryBlock}`;
     }
 
     if (!streamed) {
-      throw lastErr || new Error('Gemini returned an empty response across models');
+      throw new Error(`Google Gemini (${usedModel}) returned an empty stream response.`);
     }
 
-    res.write(`data: ${JSON.stringify({ done: true, modelUsed: usedModel })}\n\n`);
+    recordProviderGenerationResult('gemini', {
+      verified: true,
+      model: usedModel,
+      latencyMs: Date.now() - startTime,
+      source: 'chat',
+    });
+
+    res.write(
+      `data: ${JSON.stringify({
+        done: true,
+        modelUsed: usedModel,
+        provider: 'gemini',
+        ...(fallbackUsed ? { fallbackUsed: true, fallbackFromModel, fallbackReason } : {}),
+      })}\n\n`
+    );
     res.end();
   } catch (err: any) {
     const safeError = sanitizeErrorMessage(err);
     recordServerError('/api/chat/stream', safeError);
+    const classified = classifyProviderError(
+      requestedProvider,
+      Number(err?.status) || 502,
+      safeError
+    );
+    recordProviderGenerationResult(requestedProvider, {
+      verified: false,
+      model: requestedModel || AI_PROVIDER_METADATA[requestedProvider].defaultModel,
+      latencyMs: Date.now() - startTime,
+      error: classified.message,
+      code: classified.code,
+      source: 'chat',
+    });
     if (res.headersSent) {
-      res.write(`data: ${JSON.stringify({ error: safeError, done: true })}\n\n`);
+      res.write(`data: ${JSON.stringify({ error: classified.message, provider: requestedProvider, done: true })}\n\n`);
       res.end();
     } else {
-      res.status(isAuthFailure(err) ? 401 : 502).json({ error: safeError });
+      res.status(classified.httpStatus).json({ error: classified.message, code: classified.code, provider: requestedProvider });
     }
   }
 });
@@ -1021,32 +3054,88 @@ Tone: ${personaInstruction}${memoryBlock}`;
 // 1C. CONTEXT-AWARE SUGGESTED REPLIES ENDPOINT
 app.post('/api/chat/suggested-replies', requireAuthenticatedUser, async (req: Request, res: Response): Promise<void> => {
   const startTime = Date.now();
+  const requestedProvider = normalizeAIProviderId(req.body?.aiProvider);
+  const requestedModel = typeof req.body?.aiModel === 'string' ? req.body.aiModel.trim() : '';
   const {
     userMessage = '',
     aiReply = '',
     recentMessages = [],
-    targetLanguage = 'ne',
+    targetLanguage = 'en',
     userLanguage = 'en',
     location,
     hasImage = false,
+    preferredSuggestionPatterns,
   } = req.body || {};
 
   const trimmedReply = String(aiReply || '').trim();
   const trimmedUserMsg = String(userMessage || '').trim();
 
+  const sanitizedTopCategories: Array<{ category: string; totalClicks: number }> = Array.isArray(
+    preferredSuggestionPatterns?.topCategories
+  )
+    ? preferredSuggestionPatterns.topCategories
+        .filter((c: any) => c && typeof c.category === 'string' && Number(c.totalClicks) > 0)
+        .slice(0, 4)
+        .map((c: any) => ({
+          category: String(c.category).slice(0, 32),
+          totalClicks: Math.max(1, Math.floor(Number(c.totalClicks) || 1)),
+        }))
+    : [];
+
+  const sanitizedTopClicked: Array<{ text: string; category: string; clickCount: number }> = Array.isArray(
+    preferredSuggestionPatterns?.topClickedSuggestions
+  )
+    ? preferredSuggestionPatterns.topClickedSuggestions
+        .filter((s: any) => s && typeof s.text === 'string' && s.text.trim().length > 0)
+        .slice(0, 4)
+        .map((s: any) => ({
+          text: String(s.text).trim().slice(0, 80),
+          category: String(s.category || 'general').slice(0, 32),
+          clickCount: Math.max(1, Math.floor(Number(s.clickCount) || 1)),
+        }))
+    : [];
+
+  const CATEGORY_FALLBACK_MAP: Record<string, string> = {
+    deep_dive: 'Explain in more detail',
+    examples: 'Give a practical example',
+    summary: 'Summarize the key points',
+    action_steps: 'Show step-by-step action plan',
+    compare: 'Compare options and trade-offs',
+    translate:
+      targetLanguage && targetLanguage !== 'en'
+        ? `Explain in ${LANGUAGE_NAMES[targetLanguage] || targetLanguage}`
+        : 'Explain in Nepali',
+    explore_local: location?.name
+      ? `Explore more about ${String(location.name).slice(0, 32)}`
+      : 'Explore real-world context',
+    visual: hasImage ? 'Analyze details in the image' : 'Describe visually with a diagram',
+  };
+
   const buildFallbackSuggestions = (): string[] => {
-    const suggestions: string[] = [
+    const suggestions: string[] = [];
+    for (const cat of sanitizedTopCategories) {
+      const candidate = CATEGORY_FALLBACK_MAP[cat.category];
+      if (candidate && !suggestions.includes(candidate)) {
+        suggestions.push(candidate);
+      }
+    }
+    const defaults = [
       'Explain in more detail',
       'Give a practical example',
       'Summarize the key points',
     ];
+    for (const d of defaults) {
+      if (!suggestions.includes(d)) suggestions.push(d);
+    }
     if (location?.name) {
-      suggestions.push(`Explore more about ${String(location.name).slice(0, 32)}`);
-    } else if (hasImage) {
+      const locPrompt = `Explore more about ${String(location.name).slice(0, 32)}`;
+      if (!suggestions.includes(locPrompt)) suggestions.push(locPrompt);
+    } else if (hasImage && !suggestions.includes('Analyze details in the image')) {
       suggestions.push('Analyze details in the image');
     } else if (targetLanguage && targetLanguage !== 'en') {
       const targetLangName = LANGUAGE_NAMES[targetLanguage] || targetLanguage;
-      suggestions.push(`Explain in ${targetLangName}`);
+      const langPrompt = `Explain in ${targetLangName}`;
+      if (!suggestions.includes(langPrompt)) suggestions.push(langPrompt);
     }
     return suggestions.slice(0, 4);
   };
@@ -1061,19 +3150,6 @@ app.post('/api/chat/suggested-replies', requireAuthenticatedUser, async (req: Re
   }
 
   try {
-    const customKey = (req.headers['x-gemini-api-key'] as string) || req.body?.customApiKey;
-    const ai = getGeminiClient(customKey);
-
-    if (!ai) {
-      res.json({
-        suggestedReplies: buildFallbackSuggestions(),
-        latencyMs: Date.now() - startTime,
-        isLiveAI: false,
-        isFallback: true,
-      });
-      return;
-    }
-
     const userLangName = LANGUAGE_NAMES[userLanguage] || userLanguage;
     const targetLangName = LANGUAGE_NAMES[targetLanguage] || targetLanguage;
     const historySnippet = Array.isArray(recentMessages)
@@ -1084,12 +3160,25 @@ app.post('/api/chat/suggested-replies', requireAuthenticatedUser, async (req: Re
           .join('\n')
       : '';
 
+    const engagementGuidance =
+      sanitizedTopCategories.length > 0 || sanitizedTopClicked.length > 0
+        ? `- Personalization signal from user's past Suggested Reply clicks: prefer follow-up intents like [${sanitizedTopCategories
+            .map((c) => `${c.category} (${c.totalClicks}x)`)
+            .join(', ')}]${
+            sanitizedTopClicked.length > 0
+              ? ` and match the concise tone of frequently clicked prompts (${sanitizedTopClicked
+                  .map((s) => `"${s.text}"`)
+                  .join(', ')})`
+              : ''
+          } when relevant to the current turn.\n`
+        : '';
+
     const prompt = `Generate 3 to 4 short, clickable follow-up reply buttons that the user can tap right beneath the AI assistant's latest message.
 Rules:
 - Each suggestion MUST be a concise natural button label/prompt (2 to 7 words max, no numbering or quotes).
 - Tailor them specifically to the topic of the user's message and the assistant's reply (such as expanding a specific concept, giving a concrete example, summarizing, comparing alternatives, or exploring the location/image context if active).
 - Write suggestions primarily in ${userLangName} (matching the user's language; if appropriate, one may offer ${targetLangName} translation/explanation).
-${location?.name ? `- Active Geotag Location Context: ${String(location.name).slice(0, 80)}\n` : ''}${hasImage ? '- An image was shared in this turn.\n' : ''}${historySnippet ? `Recent context:\n${historySnippet}\n` : ''}
+${engagementGuidance}${location?.name ? `- Active Geotag Location Context: ${String(location.name).slice(0, 80)}\n` : ''}${hasImage ? '- An image was shared in this turn.\n' : ''}${historySnippet ? `Recent context:\n${historySnippet}\n` : ''}
 Latest User Message:
 """
 ${trimmedUserMsg.slice(0, 800)}
@@ -1100,63 +3189,130 @@ Latest AI Reply:
 ${trimmedReply.slice(0, 1600)}
 """`;
 
-    const fastModels: Array<{ model: string; thinkingLevel: ThinkingLevel }> = [
-      { model: 'gemini-3.1-flash-lite', thinkingLevel: ThinkingLevel.MINIMAL },
-      { model: 'gemini-4-hydrogen', thinkingLevel: ThinkingLevel.LOW },
-      { model: 'gemini-3.5-flash', thinkingLevel: ThinkingLevel.MINIMAL },
-    ];
+    if (requestedProvider === 'groq' || requestedProvider === 'openrouter') {
+      const apiKey = requestedProvider === 'groq' ? getGroqApiKey() : getOpenRouterApiKey();
+      if (!apiKey) {
+        res.json({
+          suggestedReplies: buildFallbackSuggestions(),
+          latencyMs: Date.now() - startTime,
+          isLiveAI: false,
+          isFallback: true,
+        });
+        return;
+      }
 
-    let parsedReplies: string[] = [];
-    let modelUsed = '';
+      const catalogResult =
+        requestedProvider === 'groq'
+          ? await fetchGroqModelsCached(apiKey)
+          : await fetchOpenRouterCatalogCached();
+      const resolved = resolveSafeModelForProvider(requestedProvider, catalogResult.models, requestedModel, {
+        allowPaidExplicit: true,
+        requireInCatalog: catalogResult.source === 'live',
+      });
 
-    for (const candidate of fastModels) {
-      try {
-        const config: Record<string, any> = {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              suggestedReplies: {
-                type: Type.ARRAY,
-                items: { type: Type.STRING },
-                description: '3 to 4 concise, context-aware suggested follow-up reply buttons (each 2 to 7 words).',
-              },
-            },
-            required: ['suggestedReplies'],
+      const oaiRes = await callOpenAICompatibleCompletion({
+        provider: requestedProvider,
+        apiKey,
+        model: resolved.modelId,
+        messages: [
+          {
+            role: 'system',
+            content: 'Return ONLY JSON: {"suggestedReplies": ["string 1", "string 2", "string 3"]}',
           },
-        };
-        if (candidate.model.startsWith('gemini-4') || candidate.model.startsWith('gemini-3')) {
-          config.thinkingConfig = { thinkingLevel: candidate.thinkingLevel };
-        }
+          { role: 'user', content: prompt },
+        ],
+        jsonMode: true,
+        timeoutMs: 9000,
+        allowFreeRouterFallback: requestedProvider === 'openrouter' && resolved.isFree,
+      });
 
-        const response = await withTimeout(
-          ai.models.generateContent({
-            model: candidate.model,
-            contents: prompt,
-            config,
-          }),
-          6500
-        );
-        const parsed = extractJsonText(response.text);
+      let parsedReplies: string[] = [];
+      try {
+        const parsed = extractJsonText(oaiRes.text);
         if (Array.isArray(parsed?.suggestedReplies)) {
-          const cleaned = parsed.suggestedReplies
+          parsedReplies = parsed.suggestedReplies
             .filter((item: unknown): item is string => typeof item === 'string' && item.trim().length > 1)
             .map((item: string) => item.trim().slice(0, 72))
             .slice(0, 4);
-          if (cleaned.length > 0) {
-            parsedReplies = cleaned;
-            modelUsed = candidate.model;
-            break;
-          }
         }
-      } catch (err) {
-        if (isAuthFailure(err)) break;
+      } catch {}
+
+      res.json({
+        suggestedReplies: parsedReplies.length > 0 ? parsedReplies : buildFallbackSuggestions(),
+        modelUsed: oaiRes.modelUsed,
+        provider: requestedProvider,
+        isLiveAI: parsedReplies.length > 0,
+        isFallback: parsedReplies.length === 0,
+        latencyMs: Date.now() - startTime,
+      });
+      return;
+    }
+
+    const ai = getGeminiClient();
+    if (!ai) {
+      res.json({
+        suggestedReplies: buildFallbackSuggestions(),
+        latencyMs: Date.now() - startTime,
+        isLiveAI: false,
+        isFallback: true,
+      });
+      return;
+    }
+
+    const configuredSuggestModel = sanitizeModelName(
+      typeof req.body?.aiModel === 'string' && req.body.aiModel.trim()
+        ? req.body.aiModel
+        : process.env.GEMINI_MODEL || GEMINI_RELIABLE_OVERLOAD_MODEL
+    );
+    const suggestController = new AbortController();
+    const suggestTimer = setTimeout(() => suggestController.abort(), 5000);
+    let parsedReplies: string[] = [];
+    let modelUsed = '';
+
+    try {
+      const config: Record<string, any> = {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            suggestedReplies: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+              description: '3 to 4 concise, context-aware suggested follow-up reply buttons (each 2 to 7 words).',
+            },
+          },
+          required: ['suggestedReplies'],
+        },
+        abortSignal: suggestController.signal,
+        ...getGeminiThinkingConfig(configuredSuggestModel, ThinkingLevel.MINIMAL),
+      };
+
+      const response = await ai.models.generateContent({
+        model: configuredSuggestModel,
+        contents: prompt,
+        config,
+      });
+      const parsed = extractJsonText(response.text);
+      if (Array.isArray(parsed?.suggestedReplies)) {
+        const cleaned = parsed.suggestedReplies
+          .filter((item: unknown): item is string => typeof item === 'string' && item.trim().length > 1)
+          .map((item: string) => item.trim().slice(0, 72))
+          .slice(0, 4);
+        if (cleaned.length > 0) {
+          parsedReplies = cleaned;
+          modelUsed = configuredSuggestModel;
+        }
       }
+    } catch {
+      // Fall back quietly to deterministic contextual suggestions
+    } finally {
+      clearTimeout(suggestTimer);
     }
 
     res.json({
       suggestedReplies: parsedReplies.length > 0 ? parsedReplies : buildFallbackSuggestions(),
       modelUsed: modelUsed || undefined,
+      provider: 'gemini',
       isLiveAI: parsedReplies.length > 0,
       isFallback: parsedReplies.length === 0,
       latencyMs: Date.now() - startTime,
@@ -1171,48 +3327,11 @@ ${trimmedReply.slice(0, 1600)}
   }
 });
 
-// Key validation route to verify a user-provided or environment API key
-app.post('/api/gemini/verify-key', requireAuthenticatedUser, async (req: Request, res: Response): Promise<void> => {
-  try {
-    const customKey = (req.body?.apiKey as string) || (req.headers['x-gemini-api-key'] as string);
-    const ai = getGeminiClient(customKey);
-    if (!ai) {
-      res.status(400).json({ valid: false, error: 'No API key provided' });
-      return;
-    }
-
-    const { response, modelUsed } = await generateWithModelFallback(
-      ai,
-      (model) => ({
-        model,
-        contents: 'Reply with {"status":"ok"}',
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              status: { type: Type.STRING },
-            },
-            required: ['status'],
-          },
-        },
-      }),
-      12000,
-      15000
-    );
-
-    res.json({ valid: true, model: modelUsed, response: response.text });
-  } catch (err: any) {
-    res.status(400).json({
-      valid: false,
-      error: sanitizeErrorMessage(err) || 'Failed to authenticate with Gemini API',
-    });
-  }
-});
-
 // 2. DEDICATED REAL-TIME TRANSLATION & GRAMMAR ENDPOINT
 app.post('/api/translate', requireAuthenticatedUser, async (req: Request, res: Response): Promise<void> => {
   const startTime = Date.now();
+  const requestedProvider = normalizeAIProviderId(req.body?.aiProvider);
+  const requestedModel = typeof req.body?.aiModel === 'string' ? req.body.aiModel.trim() : '';
   const {
     text,
     sourceLang = 'auto',
@@ -1229,17 +3348,6 @@ app.post('/api/translate', requireAuthenticatedUser, async (req: Request, res: R
   }
 
   try {
-    const customKey = (req.headers['x-gemini-api-key'] as string) || req.body?.customApiKey;
-    const ai = getGeminiClient(customKey);
-
-    if (!ai) {
-      res.status(400).json({
-        error: 'Gemini API key is not configured. Please connect your key in Settings.',
-        latencyMs: Date.now() - startTime,
-      });
-      return;
-    }
-
     const modeInstructions =
       mode === 'grammar'
         ? `Check grammar, spelling, and natural phrasing of the source text, provide the corrected version in "correctedText", explain key corrections concisely in "grammarNotes", and also translate the corrected text into ${targetLangName} in "translatedText".`
@@ -1255,15 +3363,88 @@ Text:
 ${String(text).slice(0, 18000)}
 """`;
 
+    if (requestedProvider === 'groq' || requestedProvider === 'openrouter') {
+      const apiKey = requestedProvider === 'groq' ? getGroqApiKey() : getOpenRouterApiKey();
+      const meta = AI_PROVIDER_METADATA[requestedProvider];
+      if (!apiKey) {
+        res.status(400).json({
+          error: `${meta.name} is not configured on the server. Set ${meta.envVarName} in environment variables.`,
+          latencyMs: Date.now() - startTime,
+        });
+        return;
+      }
+
+      const catalogResult =
+        requestedProvider === 'groq'
+          ? await fetchGroqModelsCached(apiKey)
+          : await fetchOpenRouterCatalogCached();
+      const resolved = resolveSafeModelForProvider(requestedProvider, catalogResult.models, requestedModel, {
+        allowPaidExplicit: true,
+        requireInCatalog: catalogResult.source === 'live',
+      });
+
+      const { text: rawOut, modelUsed } = await callOpenAICompatibleCompletion({
+        provider: requestedProvider,
+        apiKey,
+        model: resolved.modelId,
+        messages: [
+          {
+            role: 'system',
+            content:
+              'Return valid JSON matching {"translatedText":"string","detectedSourceLang":"string","pronunciation":"string","culturalNote":"string","correctedText":"string","grammarNotes":["string"]}.',
+          },
+          { role: 'user', content: prompt },
+        ],
+        jsonMode: true,
+        timeoutMs: 18000,
+        allowFreeRouterFallback: requestedProvider === 'openrouter' && resolved.isFree,
+      });
+
+      try {
+        const parsed = extractJsonText(rawOut);
+        res.json({
+          translatedText: parsed.translatedText || rawOut || text,
+          detectedSourceLang: parsed.detectedSourceLang || 'en',
+          pronunciation: parsed.pronunciation || '',
+          culturalNote: parsed.culturalNote || '',
+          correctedText: parsed.correctedText || '',
+          grammarNotes: Array.isArray(parsed.grammarNotes) ? parsed.grammarNotes : [],
+          provider: requestedProvider,
+          modelUsed,
+          latencyMs: Date.now() - startTime,
+        });
+      } catch {
+        res.json({
+          translatedText: rawOut || text,
+          detectedSourceLang: 'en',
+          pronunciation: '',
+          culturalNote: '',
+          correctedText: '',
+          grammarNotes: [],
+          provider: requestedProvider,
+          modelUsed,
+          latencyMs: Date.now() - startTime,
+        });
+      }
+      return;
+    }
+
+    const ai = getGeminiClient();
+    if (!ai) {
+      res.status(400).json({
+        error: 'Google Gemini API key is not configured on the server.',
+        latencyMs: Date.now() - startTime,
+      });
+      return;
+    }
+
     const { response, modelUsed } = await generateWithModelFallback(
       ai,
       (model) => ({
         model,
         contents: prompt,
         config: {
-          ...(model.startsWith('gemini-4') || model.startsWith('gemini-3')
-            ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
-            : {}),
+          ...getGeminiThinkingConfig(model, ThinkingLevel.LOW),
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,
@@ -1283,7 +3464,8 @@ ${String(text).slice(0, 18000)}
         },
       }),
       10000,
-      14000
+      14000,
+      requestedModel || undefined
     );
 
     const parsed = extractJsonText(response.text);
@@ -1294,14 +3476,20 @@ ${String(text).slice(0, 18000)}
       culturalNote: parsed.culturalNote || '',
       correctedText: parsed.correctedText || '',
       grammarNotes: Array.isArray(parsed.grammarNotes) ? parsed.grammarNotes : [],
+      provider: 'gemini',
       modelUsed,
       latencyMs: Date.now() - startTime,
     });
   } catch (err: any) {
     const safeError = sanitizeErrorMessage(err);
     console.error('Error in /api/translate:', safeError);
-    res.status(isAuthFailure(err) ? 401 : 502).json({
-      error: safeError,
+    const classified = classifyProviderError(
+      requestedProvider,
+      Number(err?.status) || 502,
+      safeError
+    );
+    res.status(classified.httpStatus).json({
+      error: classified.message,
       latencyMs: Date.now() - startTime,
     });
   }
@@ -1310,6 +3498,8 @@ ${String(text).slice(0, 18000)}
 // 2B. CONCISE MESSAGE SUMMARIZER ENDPOINT (For Quick Context menu)
 app.post('/api/summarize', requireAuthenticatedUser, async (req: Request, res: Response): Promise<void> => {
   const startTime = Date.now();
+  const requestedProvider = normalizeAIProviderId(req.body?.aiProvider);
+  const requestedModel = typeof req.body?.aiModel === 'string' ? req.body.aiModel.trim() : '';
   const rawText = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
   const targetLang = typeof req.body?.targetLanguage === 'string' ? req.body.targetLanguage.trim() : '';
 
@@ -1321,17 +3511,6 @@ app.post('/api/summarize', requireAuthenticatedUser, async (req: Request, res: R
   const clippedText = rawText.slice(0, 16000);
 
   try {
-    const customKey = (req.headers['x-gemini-api-key'] as string) || req.body?.customApiKey;
-    const ai = getGeminiClient(customKey);
-
-    if (!ai) {
-      res.status(400).json({
-        error: 'Gemini API key is not configured. Please connect your key in Settings.',
-        latencyMs: Date.now() - startTime,
-      });
-      return;
-    }
-
     const langHint = targetLang && LANGUAGE_NAMES[targetLang]
       ? `Write the summary in the primary language of the message (or provide clear clarity for a ${LANGUAGE_NAMES[targetLang]} reader if appropriate, while preserving exact key facts).`
       : 'Write the summary in the same language as the original message.';
@@ -1342,6 +3521,74 @@ Message to summarize:
 """
 ${clippedText}
 """`;
+
+    if (requestedProvider === 'groq' || requestedProvider === 'openrouter') {
+      const apiKey = requestedProvider === 'groq' ? getGroqApiKey() : getOpenRouterApiKey();
+      const meta = AI_PROVIDER_METADATA[requestedProvider];
+      if (!apiKey) {
+        res.status(400).json({
+          error: `${meta.name} is not configured on the server.`,
+          latencyMs: Date.now() - startTime,
+        });
+        return;
+      }
+
+      const catalogResult =
+        requestedProvider === 'groq'
+          ? await fetchGroqModelsCached(apiKey)
+          : await fetchOpenRouterCatalogCached();
+      const resolved = resolveSafeModelForProvider(requestedProvider, catalogResult.models, requestedModel, {
+        allowPaidExplicit: true,
+        requireInCatalog: catalogResult.source === 'live',
+      });
+
+      const { text: rawOut, modelUsed } = await callOpenAICompatibleCompletion({
+        provider: requestedProvider,
+        apiKey,
+        model: resolved.modelId,
+        messages: [
+          {
+            role: 'system',
+            content: 'Return valid JSON matching {"summary":"1-3 sentence concise summary","keyPoints":["point 1","point 2"]}.',
+          },
+          { role: 'user', content: prompt },
+        ],
+        jsonMode: true,
+        timeoutMs: 18000,
+        allowFreeRouterFallback: requestedProvider === 'openrouter' && resolved.isFree,
+      });
+
+      let summary = rawOut;
+      let keyPoints: string[] = [];
+      try {
+        const parsed = extractJsonText(rawOut);
+        if (typeof parsed.summary === 'string' && parsed.summary.trim()) {
+          summary = parsed.summary.trim();
+        }
+        if (Array.isArray(parsed.keyPoints)) {
+          keyPoints = parsed.keyPoints.filter((p: unknown) => typeof p === 'string' && p.trim()).slice(0, 5);
+        }
+      } catch {}
+
+      res.json({
+        summary,
+        keyPoints,
+        provider: requestedProvider,
+        modelUsed,
+        latencyMs: Date.now() - startTime,
+        originalChars: rawText.length,
+      });
+      return;
+    }
+
+    const ai = getGeminiClient();
+    if (!ai) {
+      res.status(400).json({
+        error: 'Google Gemini API key is not configured on the server.',
+        latencyMs: Date.now() - startTime,
+      });
+      return;
+    }
 
     const { response, modelUsed } = await generateWithModelFallback(
       ai,
@@ -1368,7 +3615,8 @@ ${clippedText}
         },
       }),
       10000,
-      14000
+      14000,
+      requestedModel || undefined
     );
 
     const parsed = extractJsonText(response.text);
@@ -1383,6 +3631,7 @@ ${clippedText}
     res.json({
       summary,
       keyPoints,
+      provider: 'gemini',
       modelUsed,
       latencyMs: Date.now() - startTime,
       originalChars: rawText.length,
@@ -1390,8 +3639,13 @@ ${clippedText}
   } catch (err: any) {
     const safeError = sanitizeErrorMessage(err);
     console.error('Error in /api/summarize:', safeError);
-    res.status(isAuthFailure(err) ? 401 : 502).json({
-      error: safeError,
+    const classified = classifyProviderError(
+      requestedProvider,
+      Number(err?.status) || 502,
+      safeError
+    );
+    res.status(classified.httpStatus).json({
+      error: classified.message,
       latencyMs: Date.now() - startTime,
     });
   }
@@ -1406,11 +3660,10 @@ app.post('/api/analyze-geotag', requireAuthenticatedUser, async (req: Request, r
       return;
     }
 
-    const customKey = (req.headers['x-gemini-api-key'] as string) || req.body?.customApiKey;
-    const ai = getGeminiClient(customKey);
+    const ai = getGeminiClient();
     if (!ai) {
       res.status(400).json({
-        error: 'Gemini API key is not configured. Please connect your key in Settings.',
+        error: 'Gemini API key is not configured on the server.',
       });
       return;
     }
@@ -1659,11 +3912,7 @@ Rules:
           model,
           contents: svgPrompt,
           config: {
-            ...(model === 'gemini-3.1-flash-lite'
-              ? { thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL } }
-              : model.includes('gemini-4')
-              ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
-              : {}),
+            ...getGeminiThinkingConfig(model, ThinkingLevel.LOW),
           },
         }),
         20000
@@ -1710,7 +3959,6 @@ async function generateRasterImageWithGemini(params: {
   aspectRatio?: string;
   resolution?: string;
   model?: string;
-  hasCustomKey?: boolean;
 }) {
   const startTime = Date.now();
   const cleanPrompt = String(params.prompt || '').trim().slice(0, 1500);
@@ -1758,7 +4006,7 @@ async function generateRasterImageWithGemini(params: {
       ? requestedAspect
       : '1:1';
 
-    if (!params.hasCustomKey && (rasterQuotaCooldownUntil.get(modelId) ?? 0) > Date.now()) {
+    if ((rasterQuotaCooldownUntil.get(modelId) ?? 0) > Date.now()) {
       lastClassified = {
         status: 429,
         message: 'Gemini image generation quota or rate limit reached for raster model.',
@@ -1833,7 +4081,7 @@ async function generateRasterImageWithGemini(params: {
       };
     } catch (err: any) {
       lastClassified = classifyImageGenError(err);
-      if (!params.hasCustomKey && (lastClassified.status === 429 || lastClassified.status === 403)) {
+      if (lastClassified.status === 429 || lastClassified.status === 403) {
         rasterQuotaCooldownUntil.set(modelId, Date.now() + MODEL_COOLDOWN_MS);
       }
       console.warn(`Raster image model ${modelId} unavailable (${lastClassified.status}): ${lastClassified.message}`);
@@ -1882,12 +4130,11 @@ app.get('/api/images/models', requireAuthenticatedUser, (_req: Request, res: Res
 });
 
 app.post('/api/images/generate', requireAuthenticatedUser, async (req: Request, res: Response): Promise<void> => {
-  const customKey = (req.headers['x-gemini-api-key'] as string) || req.body?.customApiKey;
-  const ai = getGeminiClient(customKey);
+  const ai = getGeminiClient();
   if (!ai) {
     res.status(400).json({
       ok: false,
-      error: 'Gemini API key is not configured on the server or in Settings.',
+      error: 'Gemini API key is not configured on the server.',
     });
     return;
   }
@@ -1899,7 +4146,6 @@ app.post('/api/images/generate', requireAuthenticatedUser, async (req: Request, 
     aspectRatio: req.body?.aspectRatio,
     resolution: req.body?.resolution,
     model: req.body?.model,
-    hasCustomKey: Boolean(typeof customKey === 'string' && customKey.trim()),
   });
 
   if (!result.ok) {
@@ -1929,8 +4175,7 @@ app.post('/api/studio/image', requireAuthenticatedUser, async (req: Request, res
       model,
     } = req.body;
 
-    const customKey = (req.headers['x-gemini-api-key'] as string) || req.body?.customApiKey;
-    const ai = getGeminiClient(customKey);
+    const ai = getGeminiClient();
     if (!ai) {
       res.status(400).json({ error: 'Gemini API key is not configured.' });
       return;
@@ -1944,7 +4189,6 @@ app.post('/api/studio/image', requireAuthenticatedUser, async (req: Request, res
         aspectRatio,
         resolution,
         model,
-        hasCustomKey: Boolean(typeof customKey === 'string' && customKey.trim()),
       });
       if (!result.ok) {
         res.status(result.status).json({ error: result.error, latencyMs: result.latencyMs });
@@ -2073,8 +4317,7 @@ app.post('/api/coding', requireAuthenticatedUser, async (req: Request, res: Resp
       return;
     }
 
-    const customKey = (req.headers['x-gemini-api-key'] as string) || req.body?.customApiKey;
-    const ai = getGeminiClient(customKey);
+    const ai = getGeminiClient();
     if (!ai) {
       res.status(400).json({ error: 'Gemini API key is not configured.' });
       return;
@@ -2153,8 +4396,7 @@ app.post('/api/study', requireAuthenticatedUser, async (req: Request, res: Respo
       return;
     }
 
-    const customKey = (req.headers['x-gemini-api-key'] as string) || req.body?.customApiKey;
-    const ai = getGeminiClient(customKey);
+    const ai = getGeminiClient();
     if (!ai) {
       res.status(400).json({ error: 'Gemini API key is not configured.' });
       return;
@@ -2240,8 +4482,7 @@ app.post('/api/document', requireAuthenticatedUser, async (req: Request, res: Re
       targetLanguage = 'en',
     } = req.body;
 
-    const customKey = (req.headers['x-gemini-api-key'] as string) || req.body?.customApiKey;
-    const ai = getGeminiClient(customKey);
+    const ai = getGeminiClient();
     if (!ai) {
       res.status(400).json({ error: 'Gemini API key is not configured.' });
       return;
@@ -2355,8 +4596,7 @@ app.post('/api/research', requireAuthenticatedUser, async (req: Request, res: Re
       return;
     }
 
-    const customKey = (req.headers['x-gemini-api-key'] as string) || req.body?.customApiKey;
-    const ai = getGeminiClient(customKey);
+    const ai = getGeminiClient();
     if (!ai) {
       res.status(400).json({ error: 'Gemini API key is not configured.' });
       return;
@@ -2434,8 +4674,7 @@ app.post('/api/video', requireAuthenticatedUser, async (req: Request, res: Respo
       targetLanguage = 'en',
     } = req.body;
 
-    const customKey = (req.headers['x-gemini-api-key'] as string) || req.body?.customApiKey;
-    const ai = getGeminiClient(customKey);
+    const ai = getGeminiClient();
     if (!ai) {
       res.status(400).json({ error: 'Gemini API key is not configured.' });
       return;
@@ -2520,8 +4759,7 @@ app.post('/api/assistant', requireAuthenticatedUser, async (req: Request, res: R
       return;
     }
 
-    const customKey = (req.headers['x-gemini-api-key'] as string) || req.body?.customApiKey;
-    const ai = getGeminiClient(customKey);
+    const ai = getGeminiClient();
     if (!ai) {
       res.status(400).json({ error: 'Gemini API key is not configured.' });
       return;
@@ -2607,8 +4845,7 @@ app.post('/api/voice/transcribe', requireAuthenticatedUser, async (req: Request,
       return;
     }
 
-    const customKey = (req.headers['x-gemini-api-key'] as string) || req.body?.customApiKey;
-    const ai = getGeminiClient(customKey);
+    const ai = getGeminiClient();
     if (!ai) {
       res.status(400).json({ error: 'Gemini API key is not configured.' });
       return;
@@ -2689,8 +4926,7 @@ app.post('/api/voice/tts', requireAuthenticatedUser, async (req: Request, res: R
       return;
     }
 
-    const customKey = (req.headers['x-gemini-api-key'] as string) || req.body?.customApiKey;
-    const ai = getGeminiClient(customKey);
+    const ai = getGeminiClient();
     if (!ai) {
       res.status(400).json({
         error: 'Gemini API key is not configured for AI Voice Generation.',
@@ -2783,8 +5019,7 @@ app.post('/api/agent', requireAuthenticatedUser, async (req: Request, res: Respo
       return;
     }
 
-    const customKey = (req.headers['x-gemini-api-key'] as string) || req.body?.customApiKey;
-    const ai = getGeminiClient(customKey);
+    const ai = getGeminiClient();
     if (!ai) {
       res.status(400).json({ error: 'Gemini API key is not configured.' });
       return;
@@ -2975,8 +5210,7 @@ app.post('/api/automation/suggest', requireAuthenticatedUser, async (req: Reques
     const toneInstruction = validTones[String(tone)] || validTones.professional;
     const targetLangName = LANGUAGE_NAMES[String(targetLanguage)] || String(targetLanguage) || 'English';
 
-    const customKey = (req.headers['x-gemini-api-key'] as string) || req.body?.customApiKey;
-    const ai = getGeminiClient(customKey);
+    const ai = getGeminiClient();
     if (!ai) {
       res.status(400).json({ error: 'Gemini API key is not configured.' });
       return;
@@ -3123,8 +5357,7 @@ app.post('/api/automation/execute', requireAuthenticatedUser, async (req: Reques
       return;
     }
 
-    const customKey = (req.headers['x-gemini-api-key'] as string) || req.body?.customApiKey;
-    const ai = getGeminiClient(customKey);
+    const ai = getGeminiClient();
     if (!ai) {
       res.status(400).json({
         ok: false,
@@ -3375,8 +5608,8 @@ async function startServer() {
   });
 }
 
-// Only start HTTP listener locally; on Vercel, /api/index.ts invokes the exported Express app
-if (!process.env.VERCEL && !process.env.VERCEL_ENV) {
+// Only start HTTP listener locally; on Vercel or test imports, /api/index.ts or tests use exported helpers directly
+if (!process.env.VERCEL && !process.env.VERCEL_ENV && !process.env.AADESH_SKIP_SERVER_LISTEN) {
   void startServer();
 }
 

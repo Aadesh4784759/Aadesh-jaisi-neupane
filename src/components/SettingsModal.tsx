@@ -20,13 +20,8 @@ import {
   Zap,
   Briefcase,
   Smile,
-  KeyRound,
   Cpu,
-  Eye,
-  EyeOff,
   CheckCircle2,
-  AlertCircle,
-  RefreshCw,
   Download,
   FileJson,
   FileText,
@@ -38,13 +33,14 @@ import { AppSettings, ChatSession, GeotaggedMedia, VoicePersona, VoicePersonaInf
 import { OFFLINE_PHRASEBOOK, SUPPORTED_LANGUAGES, UI_TRANSLATIONS, VOICE_PERSONAS } from '../data/languages';
 import { voiceAssistant } from '../utils/speech';
 import { COLOR_THEME_PRESETS } from '../utils/avatarTheme';
-import { getAuthHeaders } from '../utils/firebase';
+import { AIProviderId, AIProviderStatusInfo } from '../utils/aiProviders';
+import { AIProviderSelector } from './AIProviderSelector';
 import {
   BulkExportFormat,
   ChatExportFormat,
   ChatExportScope,
   downloadBulkBackupFile,
-  downloadChatHistoryFile,
+  downloadChatHistoryFileAsync,
 } from '../utils/exportHistory';
 
 interface SettingsModalProps {
@@ -61,6 +57,9 @@ interface SettingsModalProps {
   sessions: ChatSession[];
   currentSession: ChatSession;
   userName?: string;
+  providersStatus?: Partial<Record<AIProviderId, AIProviderStatusInfo>> | null;
+  isLoadingProvidersStatus?: boolean;
+  onRefreshProvidersStatus?: () => void;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
@@ -77,15 +76,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   sessions,
   currentSession,
   userName,
+  providersStatus = null,
+  isLoadingProvidersStatus = false,
+  onRefreshProvidersStatus,
 }) => {
   const [activeTab, setActiveTab] = useState<'general' | 'ai' | 'voice' | 'accessibility' | 'offline' | 'phrasebook'>('general');
   const [phraseSearch, setPhraseSearch] = useState('');
   const [phraseLang, setPhraseLang] = useState<'spanish' | 'nepali' | 'japanese' | 'french' | 'chinese'>('spanish');
   const [testSpeechActive, setTestSpeechActive] = useState(false);
-  const [customKeyInput, setCustomKeyInput] = useState(settings.customGeminiApiKey || '');
-  const [showKey, setShowKey] = useState(false);
-  const [keyVerifyStatus, setKeyVerifyStatus] = useState<{ loading: boolean; success?: boolean; message?: string } | null>(null);
-  const [activeModel, setActiveModel] = useState<string>('gemini-4-hydrogen');
   const [exportScope, setExportScope] = useState<ChatExportScope>('all');
   const [exportFormat, setExportFormat] = useState<ChatExportFormat>('json');
   const [bulkFormat, setBulkFormat] = useState<BulkExportFormat>('json');
@@ -96,46 +94,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   } | null>(null);
 
   useEffect(() => {
-    if (!isOpen) return;
-    const headers: Record<string, string> = {};
-    if (settings.customGeminiApiKey) {
-      headers['x-gemini-api-key'] = settings.customGeminiApiKey;
+    if (isOpen && onRefreshProvidersStatus && !providersStatus) {
+      onRefreshProvidersStatus();
     }
-    fetch('/api/health', { headers })
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (data?.model) setActiveModel(data.model);
-      })
-      .catch(() => {});
-  }, [isOpen, settings.customGeminiApiKey]);
+  }, [isOpen, onRefreshProvidersStatus, providersStatus]);
 
   if (!isOpen) return null;
 
   const t = UI_TRANSLATIONS[settings.uiLanguage] || UI_TRANSLATIONS.en;
-
-  const handleVerifyGeminiKey = async () => {
-    setKeyVerifyStatus({ loading: true });
-    try {
-      const headers = await getAuthHeaders({
-        'Content-Type': 'application/json',
-        'x-gemini-api-key': customKeyInput.trim(),
-      });
-      const res = await fetch('/api/gemini/verify-key', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ apiKey: customKeyInput.trim() }),
-      });
-      const data = await res.json();
-      if (res.ok && data.valid) {
-        onUpdateSettings({ customGeminiApiKey: customKeyInput.trim() });
-        setKeyVerifyStatus({ loading: false, success: true, message: `Connected! Verified with model ${data.model}.` });
-      } else {
-        setKeyVerifyStatus({ loading: false, success: false, message: data.error || 'Failed to authenticate key' });
-      }
-    } catch (err: any) {
-      setKeyVerifyStatus({ loading: false, success: false, message: err.message || 'Verification request failed' });
-    }
-  };
 
   const activePersona =
     VOICE_PERSONAS.find((p) => p.id === (settings.voicePersona || 'friendly')) || VOICE_PERSONAS[3];
@@ -181,9 +147,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const allSessionsList = sessions.length > 0 ? sessions : [currentSession];
   const allMessagesTotal = allSessionsList.reduce((acc, s) => acc + s.messages.length, 0);
 
-  const handleDownloadChatHistory = (overrideFormat?: ChatExportFormat) => {
+  const handleDownloadChatHistory = async (overrideFormat?: ChatExportFormat) => {
     const formatToUse = overrideFormat || exportFormat;
-    const result = downloadChatHistoryFile({
+    const result = await downloadChatHistoryFileAsync({
       scope: exportScope,
       format: formatToUse,
       currentSession,
@@ -419,9 +385,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-3 sm:p-5 animate-in fade-in duration-200">
-      <div className="glass-card rounded-3xl max-w-2xl w-full border border-purple-500/50 shadow-2xl relative flex flex-col max-h-[90vh] overflow-hidden">
+      <div className="glass-card rounded-3xl max-w-2xl w-full border border-purple-500/50 shadow-2xl relative flex flex-col max-h-[90vh] max-h-[90dvh] overflow-hidden">
         {/* Header */}
-        <div className="p-4 sm:p-6 border-b border-white/10 flex items-center justify-between">
+        <div className="p-4 sm:p-6 border-b border-white/10 flex items-center justify-between shrink-0">
           <div className="flex items-center gap-2.5">
             <div className="w-9 h-9 rounded-xl bg-purple-900/40 border border-purple-500/30 flex items-center justify-center text-purple-400">
               <Settings className="w-5 h-5" />
@@ -440,10 +406,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         </div>
 
         {/* Tab navigation within modal */}
-        <div className="flex border-b border-white/10 px-4 sm:px-6 overflow-x-auto gap-2 bg-[#090a0f]/40">
+        <div className="flex border-b border-white/10 px-4 sm:px-6 overflow-x-auto gap-2 bg-[#090a0f]/40 shrink-0">
           {[
             { id: 'general', label: 'Languages & Backup', icon: Languages },
-            { id: 'ai', label: 'Gemini Engine & API', icon: Cpu },
+            { id: 'ai', label: 'AI Providers & Models', icon: Cpu },
             { id: 'voice', label: 'Voice & Speech', icon: Mic },
             { id: 'accessibility', label: 'Accessibility', icon: SunMoon },
             { id: 'offline', label: 'Offline & Backup', icon: WifiOff },
@@ -469,7 +435,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         </div>
 
         {/* Tab Body */}
-        <div className="p-4 sm:p-6 overflow-y-auto space-y-6 flex-grow">
+        <div className="p-4 sm:p-6 flex-1 min-h-0 overflow-y-auto scroll-pane space-y-6">
           {/* TAB 1: GENERAL & LANGUAGES */}
           {activeTab === 'general' && (
             <div className="space-y-4">
@@ -509,107 +475,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           )}
 
-          {/* TAB: GEMINI AI ENGINE & API KEY */}
+          {/* TAB: MULTI-AI PROVIDERS & MODELS */}
           {activeTab === 'ai' && (
             <div className="space-y-4">
-              <div className="p-4 rounded-2xl bg-[#090a0f] border border-purple-500/40 shadow-lg space-y-3">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h4 className="text-xs sm:text-sm font-bold text-white flex items-center gap-1.5">
-                      <Cpu className="w-4 h-4 text-purple-400" />
-                      <span>Google Gemini Engine</span>
-                    </h4>
-                    <p className="text-[11px] text-gray-400">
-                      Official Google GenAI SDK backend proxy
-                    </p>
-                  </div>
-                  <span className="text-[10px] px-2.5 py-0.5 rounded-full bg-emerald-950/80 text-emerald-300 font-semibold border border-emerald-500/30 font-mono">
-                    {activeModel}
-                  </span>
-                </div>
-
-                <div className="p-3 rounded-xl bg-purple-950/30 border border-purple-500/20 text-xs text-purple-200 space-y-1">
-                  <p className="font-semibold text-white flex items-center gap-1">
-                    <Sparkles className="w-3.5 h-3.5 text-purple-400" />
-                    <span>NPR 0 Budget & Free Tier Limits</span>
-                  </p>
-                  <p className="text-[11px] text-gray-300 leading-relaxed">
-                    Google Gemini Flash is free to use with up to 15 requests per minute via Google AI Studio. Your custom API key is routed through secure server-side proxy routes (<code className="text-purple-300">/api/*</code>) and is never exposed in client JavaScript.
-                  </p>
-                </div>
-
-                {/* Custom API Key input */}
-                <div className="space-y-2 pt-1">
-                  <label className="text-xs font-semibold text-gray-200 flex items-center justify-between">
-                    <span>Connect Your Gemini API Key</span>
-                    <span className="text-[10px] text-gray-400">Optional: Overrides server default</span>
-                  </label>
-                  <div className="relative">
-                    <KeyRound className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-                    <input
-                      type={showKey ? 'text' : 'password'}
-                      value={customKeyInput}
-                      onChange={(e) => setCustomKeyInput(e.target.value)}
-                      placeholder="Enter AIzaSy... or custom Gemini API Key"
-                      className="w-full bg-[#131520] border border-[#232738] focus:border-purple-500 rounded-xl pl-9 pr-10 py-2.5 text-xs text-white outline-none font-mono"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowKey(!showKey)}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-white cursor-pointer"
-                    >
-                      {showKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                    </button>
-                  </div>
-
-                  <div className="flex gap-2 pt-1">
-                    <button
-                      type="button"
-                      onClick={handleVerifyGeminiKey}
-                      disabled={keyVerifyStatus?.loading || !customKeyInput.trim()}
-                      className="flex-1 py-2 rounded-xl text-xs font-bold bg-purple-600 hover:bg-purple-500 text-white flex items-center justify-center gap-1.5 transition-all shadow-md cursor-pointer disabled:opacity-50"
-                    >
-                      {keyVerifyStatus?.loading ? (
-                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                      ) : (
-                        <Check className="w-3.5 h-3.5" />
-                      )}
-                      <span>Verify & Connect Key</span>
-                    </button>
-
-                    {customKeyInput && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setCustomKeyInput('');
-                          onUpdateSettings({ customGeminiApiKey: '' });
-                          setKeyVerifyStatus(null);
-                        }}
-                        className="px-3 py-2 rounded-xl text-xs font-semibold bg-[#131520] hover:bg-rose-950/40 text-rose-400 border border-rose-500/20 cursor-pointer transition-colors"
-                      >
-                        Disconnect
-                      </button>
-                    )}
-                  </div>
-
-                  {keyVerifyStatus && (
-                    <div
-                      className={`p-2.5 rounded-xl text-xs flex items-center gap-2 animate-in fade-in ${
-                        keyVerifyStatus.success
-                          ? 'bg-emerald-950/40 border border-emerald-500/40 text-emerald-200'
-                          : 'bg-rose-950/40 border border-rose-500/40 text-rose-200'
-                      }`}
-                    >
-                      {keyVerifyStatus.success ? (
-                        <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                      ) : (
-                        <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
-                      )}
-                      <span>{keyVerifyStatus.message}</span>
-                    </div>
-                  )}
-                </div>
-              </div>
+              <AIProviderSelector
+                settings={settings}
+                onUpdateSettings={onUpdateSettings}
+                providersStatus={providersStatus}
+                isLoadingStatus={isLoadingProvidersStatus}
+                onRefreshStatus={onRefreshProvidersStatus}
+                compact={true}
+              />
             </div>
           )}
 
@@ -881,6 +757,35 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       </div>
                       <span className="text-[10px] text-gray-500 font-mono">2.00x</span>
                     </div>
+
+                    {/* Quick Select Common Speeds */}
+                    <div className="pt-2 border-t border-purple-500/20 space-y-1.5">
+                      <div className="text-[11px] font-bold text-purple-200">Quick-Select Common Speeds:</div>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {[
+                          { label: '0.75x', val: 0.75 },
+                          { label: '1.0x', val: 1.0 },
+                          { label: '1.25x', val: 1.25 },
+                          { label: '1.5x', val: 1.5 },
+                        ].map((item) => {
+                          const isActive = Math.abs(currentSpeed - item.val) < 0.025;
+                          return (
+                            <button
+                              key={item.val}
+                              type="button"
+                              onClick={() => applySpeed(item.val)}
+                              className={`px-2.5 py-1 rounded-xl text-xs font-mono font-bold border transition-all cursor-pointer ${
+                                isActive
+                                  ? 'bg-purple-600 text-white border-purple-400 shadow-[0_0_12px_rgba(168,85,247,0.5)]'
+                                  : 'bg-[#131520] text-gray-300 border-[#232738] hover:border-purple-500/40 hover:text-white'
+                              }`}
+                            >
+                              {item.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
                   </div>
                 );
               })()}
@@ -1133,7 +1038,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     </h4>
                     <p className="text-xs text-gray-400">
                       {isOnline
-                        ? 'All queries use live multimodal Gemini reasoning & cloud translation.'
+                        ? 'All queries use your selected live AI provider & cloud translation.'
                         : 'Using cached offline translations and locally persisted conversation history.'}
                     </p>
                   </div>

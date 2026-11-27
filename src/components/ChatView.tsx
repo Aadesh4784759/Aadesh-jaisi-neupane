@@ -1,6 +1,7 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, lazy, Suspense } from 'react';
 import { motion, AnimatePresence, useReducedMotion } from 'motion/react';
 import {
+  Brain,
   Send,
   Image as ImageIcon,
   MapPin,
@@ -65,23 +66,69 @@ import {
   ScanText,
   Code2,
   ArrowLeftRight,
+  ArrowDown,
+  Cpu,
+  Zap,
+  Server,
+  AlertTriangle,
+  FlaskConical,
+  CheckCircle2,
 } from 'lucide-react';
-import { AppSettings, ChatMessage, ChatSession, GeotaggedMedia, LocationData, UserProfile } from '../types';
+import {
+  AIConnectionHealth,
+  AppSettings,
+  ChatMessage,
+  ChatSession,
+  GeotaggedMedia,
+  LocationData,
+  MemoryCategory,
+  UserProfile,
+} from '../types';
+import {
+  AI_PROVIDER_METADATA,
+  AIProviderId,
+  AIProviderStatusInfo,
+  getProviderSelectorOptionLabel,
+  getProviderStatusLabel,
+  getStaticCatalogForProvider,
+  normalizeAIProviderId,
+  normalizeProviderStatusInfo,
+  resolveSafeModelForProvider,
+} from '../utils/aiProviders';
 import { SUPPORTED_LANGUAGES, UI_TRANSLATIONS, VOICE_PERSONAS, isRtlLanguage } from '../data/languages';
-import { GeotagPickerModal } from './GeotagPickerModal';
-import { ExportModal, ExportFormat } from './ExportModal';
-import { ImageLightbox, LightboxImageData } from './ImageLightbox';
+import type { ExportFormat } from './ExportModal';
+import type { LightboxImageData } from './ImageLightbox';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import { HighlightText } from './HighlightText';
 import { voiceAssistant, VoicePlaybackState } from '../utils/speech';
 import { generateThemeTokensFromColor } from '../utils/avatarTheme';
 import { DEFAULT_SESSION_CATEGORIES } from '../utils/storage';
-import { DocumentAssistantModal } from './DocumentAssistantModal';
-import { AgentModePanel } from './AgentModePanel';
 import { BrandLogo } from './BrandLogo';
-import { CameraScannerModal } from './CameraScannerModal';
-import { ChatToolOverlay, PlusToolModalId } from './ChatToolOverlay';
+import type { PlusToolModalId } from './ChatToolOverlay';
 import { getAuthHeaders } from '../utils/firebase';
+import { isScrollContainerNearBottom, shouldAutoScrollChatFeed } from '../utils/scroll';
+
+const GeotagPickerModal = lazy(() =>
+  import('./GeotagPickerModal').then((m) => ({ default: m.GeotagPickerModal }))
+);
+const ExportModal = lazy(() =>
+  import('./ExportModal').then((m) => ({ default: m.ExportModal }))
+);
+const ImageLightbox = lazy(() =>
+  import('./ImageLightbox').then((m) => ({ default: m.ImageLightbox }))
+);
+const DocumentAssistantModal = lazy(() =>
+  import('./DocumentAssistantModal').then((m) => ({ default: m.DocumentAssistantModal }))
+);
+const AgentModePanel = lazy(() =>
+  import('./AgentModePanel').then((m) => ({ default: m.AgentModePanel }))
+);
+const CameraScannerModal = lazy(() =>
+  import('./CameraScannerModal').then((m) => ({ default: m.CameraScannerModal }))
+);
+const ChatToolOverlay = lazy(() =>
+  import('./ChatToolOverlay').then((m) => ({ default: m.ChatToolOverlay }))
+);
 
 interface ChatViewProps {
   currentSession: ChatSession;
@@ -102,7 +149,8 @@ interface ChatViewProps {
     location?: LocationData;
     isVoice?: boolean;
     targetLanguage: string;
-  }) => Promise<void>;
+    handledByVoiceView?: boolean;
+  }) => Promise<{ reply: string; translation?: string } | void>;
   onStopGeneration?: () => void;
   onUpdateSessionTargetLang: (lang: string) => void;
   onTranslateMessage?: (messageId: string, targetLangCode: string) => Promise<string>;
@@ -114,11 +162,22 @@ interface ChatViewProps {
   onUpdateSettings?: (patch: Partial<AppSettings>) => void;
   onImageGenerated?: (latencyMs: number) => void;
   onRecordTranslationMetric?: (langA: string, langB: string, latencyMs: number) => void;
+  onSuggestedReplyClick?: (suggestion: string, message: ChatMessage, index: number) => void;
   mediaItems?: GeotaggedMedia[];
   onAddMedia?: (media: GeotaggedMedia) => void;
   onDeleteMedia?: (id: string) => void;
   user?: UserProfile;
   settings: AppSettings;
+  aiHealth?: AIConnectionHealth;
+  providersStatus?: Partial<Record<AIProviderId, AIProviderStatusInfo>> | null;
+  isLoadingProvidersStatus?: boolean;
+  testingProviderId?: AIProviderId | null;
+  onRefreshProvidersStatus?: () => void;
+  onTestProvider?: (
+    providerId: AIProviderId,
+    modelId?: string
+  ) => Promise<{ ok: boolean; message: string; modelUsed?: string; latencyMs?: number }>;
+  onOpenProviderSettings?: () => void;
   isOnline: boolean;
   isLoading: boolean;
   searchFilter: string;
@@ -130,6 +189,17 @@ interface ChatViewProps {
     image?: { base64: string; mimeType: string };
     file?: { name: string; content: string };
   } | null;
+  pendingMemoryProposal?: {
+    id: string;
+    content: string;
+    category: MemoryCategory;
+    reason?: string;
+    isSensitive: boolean;
+  } | null;
+  onConfirmMemoryProposal?: () => void;
+  onDismissMemoryProposal?: () => void;
+  memoryActionNotice?: string | null;
+  onDismissMemoryNotice?: () => void;
 }
 
 const QUICK_REACTIONS = ['👍', '❤️', '😂', '😮'] as const;
@@ -201,17 +271,30 @@ export const ChatView: React.FC<ChatViewProps> = ({
   onUpdateSettings,
   onImageGenerated,
   onRecordTranslationMetric,
+  onSuggestedReplyClick,
   mediaItems = [],
   onAddMedia,
   onDeleteMedia,
   user,
   settings,
+  aiHealth,
+  providersStatus = null,
+  isLoadingProvidersStatus = false,
+  testingProviderId = null,
+  onRefreshProvidersStatus,
+  onTestProvider,
+  onOpenProviderSettings,
   isOnline,
   isLoading,
   searchFilter,
   onSearchChange,
   isKeyboardOpen = false,
   externalDraft = null,
+  pendingMemoryProposal = null,
+  onConfirmMemoryProposal,
+  onDismissMemoryProposal,
+  memoryActionNotice = null,
+  onDismissMemoryNotice,
 }) => {
   const prefersReducedMotion = useReducedMotion();
   const [inputText, setInputText] = useState('');
@@ -245,6 +328,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const [chatError, setChatError] = useState<string | null>(null);
   const [translatingMsgId, setTranslatingMsgId] = useState<string | null>(null);
+  const [translationErrors, setTranslationErrors] = useState<Record<string, string>>({});
+  const [selectedTranslateLangs, setSelectedTranslateLangs] = useState<Record<string, string>>({});
   const [sharePopoverMsgId, setSharePopoverMsgId] = useState<string | null>(null);
   const [reactionPickerMsgId, setReactionPickerMsgId] = useState<string | null>(null);
   const [sessionsSidebarOpen, setSessionsSidebarOpen] = useState(false);
@@ -261,6 +346,14 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const [sessionSearchDropdownOpen, setSessionSearchDropdownOpen] = useState(false);
   const [langSwitcherOpen, setLangSwitcherOpen] = useState(false);
   const [langSearchQuery, setLangSearchQuery] = useState('');
+  const [providerSwitcherOpen, setProviderSwitcherOpen] = useState(false);
+  const [chatProviderTestFeedback, setChatProviderTestFeedback] = useState<{
+    provider: AIProviderId;
+    ok: boolean;
+    message: string;
+  } | null>(null);
+  const [providerModelSearch, setProviderModelSearch] = useState('');
+  const [openRouterTierFilter, setOpenRouterTierFilter] = useState<'free' | 'paid' | 'all'>('free');
   const [activeFolderFilter, setActiveFolderFilter] = useState<string>('All');
   const [collapsedFolders, setCollapsedFolders] = useState<Record<string, boolean>>({});
   const [isCreatingFolder, setIsCreatingFolder] = useState(false);
@@ -293,13 +386,14 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const justTriggeredQuickContextRef = useRef<boolean>(false);
   const langSwitcherRef = useRef<HTMLDivElement>(null);
   const langSearchInputRef = useRef<HTMLInputElement>(null);
+  const providerSwitcherRef = useRef<HTMLDivElement>(null);
   const sessionSearchRef = useRef<HTMLDivElement>(null);
   const composerAreaRef = useRef<HTMLDivElement>(null);
   const documentOnlyInputRef = useRef<HTMLInputElement>(null);
 
-  // Close Quick Language Switcher, Session Search Dropdown, PLUS menu, and Folder Assign popover
+  // Close Quick Language Switcher, Provider Switcher, Session Search Dropdown, PLUS menu, and Folder Assign popover
   useEffect(() => {
-    if (!langSwitcherOpen && !folderAssignSessionId && !sessionSearchDropdownOpen && !plusMenuOpen) return;
+    if (!langSwitcherOpen && !providerSwitcherOpen && !folderAssignSessionId && !sessionSearchDropdownOpen && !plusMenuOpen) return;
     const handleOutsideClick = (e: MouseEvent | TouchEvent) => {
       const target = e.target as HTMLElement | null;
       if (plusMenuOpen && composerAreaRef.current && !composerAreaRef.current.contains(target)) {
@@ -307,6 +401,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
       }
       if (langSwitcherOpen && langSwitcherRef.current && !langSwitcherRef.current.contains(target)) {
         setLangSwitcherOpen(false);
+      }
+      if (providerSwitcherOpen && providerSwitcherRef.current && !providerSwitcherRef.current.contains(target)) {
+        setProviderSwitcherOpen(false);
       }
       if (
         sessionSearchDropdownOpen &&
@@ -323,6 +420,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
       if (e.key === 'Escape') {
         setPlusMenuOpen(false);
         setLangSwitcherOpen(false);
+        setProviderSwitcherOpen(false);
         setSessionSearchDropdownOpen(false);
         setFolderAssignSessionId(null);
       }
@@ -335,7 +433,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
       window.removeEventListener('touchstart', handleOutsideClick);
       window.removeEventListener('keydown', handleEscape);
     };
-  }, [langSwitcherOpen, folderAssignSessionId, sessionSearchDropdownOpen, plusMenuOpen]);
+  }, [langSwitcherOpen, providerSwitcherOpen, folderAssignSessionId, sessionSearchDropdownOpen, plusMenuOpen]);
 
   useEffect(() => {
     if (langSwitcherOpen) {
@@ -474,9 +572,13 @@ export const ChatView: React.FC<ChatViewProps> = ({
     }
 
     try {
+      const activeProviderId: AIProviderId = settings.aiProvider || 'gemini';
+      const requestedModel =
+        activeProviderId === 'openrouter'
+          ? settings.openRouterModel || settings.aiModel
+          : settings.aiModel;
       const headers = await getAuthHeaders({
         'Content-Type': 'application/json',
-        ...(settings.customGeminiApiKey ? { 'x-gemini-api-key': settings.customGeminiApiKey } : {}),
       });
 
       const res = await fetch('/api/summarize', {
@@ -485,7 +587,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
         body: JSON.stringify({
           text: content,
           targetLanguage: currentSession.targetLanguage,
-          customApiKey: settings.customGeminiApiKey,
+          aiProvider: activeProviderId,
+          aiModel: requestedModel,
         }),
       });
 
@@ -500,7 +603,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
         summary: data.summary || 'Summary generated.',
         keyPoints: Array.isArray(data.keyPoints) ? data.keyPoints : [],
         isLoading: false,
-        modelUsed: data.modelUsed || 'gemini-4-hydrogen',
+        modelUsed: data.modelUsed || requestedModel || 'gemini-4-hydrogen',
         latencyMs: data.latencyMs,
       });
     } catch (err: any) {
@@ -510,7 +613,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
         summary: '',
         keyPoints: [],
         isLoading: false,
-        error: err?.message || 'Unable to generate summary with Gemini API right now.',
+        error: err?.message || 'Unable to generate summary right now.',
       });
     }
   };
@@ -593,11 +696,41 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const docFileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const chatScrollContainerRef = useRef<HTMLDivElement>(null);
   const chatBottomRef = useRef<HTMLDivElement>(null);
+  const isNearBottomRef = useRef<boolean>(true);
+  const shouldForceScrollRef = useRef<boolean>(true);
+  const [showScrollToBottom, setShowScrollToBottom] = useState<boolean>(false);
+
+  const handleChatFeedScroll = () => {
+    const el = chatScrollContainerRef.current;
+    if (!el) return;
+    const nearBottom = isScrollContainerNearBottom({
+      scrollTop: el.scrollTop,
+      scrollHeight: el.scrollHeight,
+      clientHeight: el.clientHeight,
+    });
+    if (isNearBottomRef.current !== nearBottom) {
+      isNearBottomRef.current = nearBottom;
+      setShowScrollToBottom(!nearBottom);
+    }
+  };
+
+  const scrollChatFeedToBottom = (behavior: ScrollBehavior = 'smooth') => {
+    const el = chatScrollContainerRef.current;
+    if (!el) return;
+    isNearBottomRef.current = true;
+    setShowScrollToBottom(false);
+    if (behavior === 'smooth' && !prefersReducedMotion) {
+      el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+    } else {
+      el.scrollTop = el.scrollHeight;
+    }
+  };
 
   const t = UI_TRANSLATIONS[settings.uiLanguage] || UI_TRANSLATIONS.en;
   const targetLangObj =
-    SUPPORTED_LANGUAGES.find((l) => l.code === currentSession.targetLanguage) || SUPPORTED_LANGUAGES[1];
+    SUPPORTED_LANGUAGES.find((l) => l.code === currentSession.targetLanguage) || SUPPORTED_LANGUAGES[0];
 
   // Auto-resize composer textarea on input changes
   useEffect(() => {
@@ -611,6 +744,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
   useEffect(() => {
     if (prevChatSessionIdRef.current !== currentSession.id) {
       prevChatSessionIdRef.current = currentSession.id;
+      shouldForceScrollRef.current = true;
+      isNearBottomRef.current = true;
+      setShowScrollToBottom(false);
+      voiceAssistant.stopSpeaking();
+      setSpeakingId(null);
       if (!externalDraft) {
         setInputText('');
         setSelectedImage(null);
@@ -627,14 +765,51 @@ export const ChatView: React.FC<ChatViewProps> = ({
     }
   }, [currentSession.id, externalDraft]);
 
-  // Automatically scroll to the latest message whenever the current session's message array is updated
+  // Stop voice speaking on ChatView unmount and clear speakingId whenever speech stops
   useEffect(() => {
-    if (searchFilter.trim()) return;
+    return () => {
+      voiceAssistant.stopSpeaking();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!playbackState.isSpeaking && speakingId !== null) {
+      setSpeakingId(null);
+    }
+  }, [playbackState.isSpeaking, speakingId]);
+
+  // Smart auto-scroll: follow newest messages ONLY when user is near bottom or just sent/switched sessions.
+  // Never hijacks manual scroll position when reading earlier history during streaming.
+  useEffect(() => {
+    const el = chatScrollContainerRef.current;
+    if (!el) return;
+
+    const shouldScroll = shouldAutoScrollChatFeed({
+      isNearBottom: isNearBottomRef.current,
+      forceScroll: shouldForceScrollRef.current,
+      hasSearchFilter: Boolean(searchFilter.trim()),
+    });
+
+    if (!shouldScroll) return;
+
+    const wasForced = shouldForceScrollRef.current;
+    shouldForceScrollRef.current = false;
+
     const rafId = window.requestAnimationFrame(() => {
-      chatBottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+      const container = chatScrollContainerRef.current;
+      if (!container) return;
+      // Direct scrollTop during streaming prevents smooth-scroll cancellation jitter;
+      // smooth scroll only on explicit new message / session change when not reduced motion.
+      if (wasForced && !isLoading && !prefersReducedMotion) {
+        container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+      } else {
+        container.scrollTop = container.scrollHeight;
+      }
+      isNearBottomRef.current = true;
+      setShowScrollToBottom(false);
     });
     return () => window.cancelAnimationFrame(rafId);
-  }, [currentSession.messages, isLoading, voiceInterimTranscript, searchFilter]);
+  }, [currentSession.messages, isLoading, voiceInterimTranscript, searchFilter, prefersReducedMotion]);
 
   // Consume handoff drafts sent from More or Voice pages
   useEffect(() => {
@@ -851,6 +1026,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
     const textToSend = (customText !== undefined ? customText : inputText).trim();
     if (!textToSend && !selectedImage && !selectedFile && !selectedVideo) return;
 
+    // Ensure voice speaking is OFF when sending a new message (only Read click enables speaking)
+    voiceAssistant.stopSpeaking();
+    setSpeakingId(null);
     setChatError(null);
     const payload = {
       text: textToSend || (selectedVideo ? `Analyze uploaded video "${selectedVideo.name}"` : ''),
@@ -868,6 +1046,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
     const prevFile = selectedFile;
     const prevVideo = selectedVideo;
     const prevLoc = attachedLocation;
+
+    shouldForceScrollRef.current = true;
+    isNearBottomRef.current = true;
+    setShowScrollToBottom(false);
 
     setInputText('');
     setSelectedImage(null);
@@ -946,12 +1128,18 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const handleInlineTranslate = async (msgId: string, langCode: string) => {
     if (!onTranslateMessage || !langCode) return;
     setTranslatingMsgId(msgId);
+    setTranslationErrors((prev) => {
+      const next = { ...prev };
+      delete next[msgId];
+      return next;
+    });
     setVoiceError(null);
     try {
       await onTranslateMessage(msgId, langCode);
       setTranslationViewModes((prev) => ({ ...prev, [msgId]: 'bilingual' }));
     } catch (err: any) {
-      setVoiceError(err?.message || 'Unable to translate this response right now.');
+      const errMsg = err?.message || 'Unable to translate this response right now.';
+      setTranslationErrors((prev) => ({ ...prev, [msgId]: errMsg }));
     } finally {
       setTranslatingMsgId(null);
     }
@@ -1678,13 +1866,13 @@ export const ChatView: React.FC<ChatViewProps> = ({
     <div className="flex-1 min-h-0 flex relative w-full overflow-hidden">
       {/* SESSIONS SIDEBAR (Desktop & Mobile Drawer) */}
       <div
-        className={`fixed inset-y-0 left-0 z-50 md:z-20 w-72 max-w-[85vw] safe-top safe-bottom glass-nav border-r border-[#232738] p-4 flex flex-col justify-between transform transition-all duration-300 md:relative ${
+        className={`fixed inset-y-0 left-0 z-50 md:z-20 w-72 max-w-[85vw] h-[100dvh] md:h-auto min-h-0 safe-top safe-bottom glass-nav border-r border-[#232738] p-4 flex flex-col justify-between transform transition-all duration-300 md:relative ${
           sessionsSidebarOpen
             ? 'translate-x-0 md:w-72 md:opacity-100'
             : '-translate-x-full md:w-0 md:p-0 md:opacity-0 md:overflow-hidden md:border-none'
         }`}
       >
-        <div className="space-y-3 flex-grow overflow-hidden flex flex-col">
+        <div className="space-y-3 flex-1 min-h-0 overflow-hidden flex flex-col">
           {/* Top Actions */}
           <div className="flex items-center justify-between pb-2 border-b border-white/10">
             <h3 className="text-xs font-bold text-gray-200 uppercase tracking-wider flex items-center gap-1.5">
@@ -1720,6 +1908,26 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 <span>New</span>
               </button>
             </div>
+          </div>
+
+          {/* Active Conversation Folder Button (transferred from chat sub-header into Conversation Log) */}
+          <div className="flex items-center justify-between gap-2 px-2 py-1.5 rounded-xl bg-[#090a0f]/80 border border-white/10">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-400 truncate">
+              Active Chat Folder
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                setActiveFolderFilter(currentSession.category || 'General');
+              }}
+              title="Filter Conversation Log by active chat folder"
+              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-lg border text-[10px] font-semibold cursor-pointer shrink-0 transition-all hover:brightness-125 ${
+                getFolderMeta(currentSession.category || 'General').badgeClass
+              }`}
+            >
+              {getFolderMeta(currentSession.category || 'General').icon}
+              <span>{currentSession.category || 'General'}</span>
+            </button>
           </div>
 
           {/* Inline Create Custom Folder Input */}
@@ -1868,7 +2076,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
           </div>
 
           {/* Session List (Grouped by Collapsible Folder when All selected & no search, or Direct Filtered List) */}
-          <div className="overflow-y-auto space-y-2 flex-grow pr-1">
+          <div className="flex-1 min-h-0 overflow-y-auto scroll-pane space-y-2 pr-1">
             {folderFilteredSessions.length === 0 && (
               <div className="p-4 rounded-xl bg-[#131520]/80 border border-purple-500/20 text-center space-y-2">
                 <p className="text-xs text-gray-300 font-medium">
@@ -2049,20 +2257,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
               <h2 className="text-xs sm:text-sm font-bold text-white truncate max-w-[130px] sm:max-w-[230px]">
                 {currentSession.title}
               </h2>
-              <button
-                type="button"
-                onClick={() => {
-                  setActiveFolderFilter(currentSession.category || 'General');
-                  setSessionsSidebarOpen(true);
-                }}
-                title="Open conversation folders"
-                className={`hidden md:inline-flex items-center gap-1 px-2 py-0.5 rounded-lg border text-[10px] font-semibold cursor-pointer shrink-0 hover:brightness-125 ${
-                  getFolderMeta(currentSession.category || 'General').badgeClass
-                }`}
-              >
-                {getFolderMeta(currentSession.category || 'General').icon}
-                <span>{currentSession.category || 'General'}</span>
-              </button>
               {isGeotaggedConversation && (
                 <span
                   title={
@@ -2228,6 +2422,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 <Search className="w-3.5 h-3.5" />
               </button>
             )}
+
+
 
             {/* Quick Language Switcher Dropdown */}
             <div className="relative" ref={langSwitcherRef}>
@@ -2664,17 +2860,25 @@ export const ChatView: React.FC<ChatViewProps> = ({
               animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, y: 0 }}
               exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: -6 }}
               transition={{ duration: prefersReducedMotion ? 0.1 : 0.2, ease: 'easeOut' }}
-              className="flex-1 min-h-0 flex flex-col"
+              className="flex-1 min-h-0 min-w-0 flex flex-col"
             >
-              <AgentModePanel
-                settings={settings}
-                isOnline={isOnline}
-                onSendOutputToChat={(content) => {
-                  setAiMode('chatbot');
-                  setInputText(content);
-                  setTimeout(() => textareaRef.current?.focus(), 30);
-                }}
-              />
+              <Suspense
+                fallback={
+                  <div className="flex-1 flex items-center justify-center p-6 text-xs text-purple-200">
+                    Loading Agent Mode...
+                  </div>
+                }
+              >
+                <AgentModePanel
+                  settings={settings}
+                  isOnline={isOnline}
+                  onSendOutputToChat={(content) => {
+                    setAiMode('chatbot');
+                    setInputText(content);
+                    setTimeout(() => textareaRef.current?.focus(), 30);
+                  }}
+                />
+              </Suspense>
             </motion.div>
           ) : (
             <motion.div
@@ -2683,10 +2887,119 @@ export const ChatView: React.FC<ChatViewProps> = ({
               animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, y: 0 }}
               exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: -6 }}
               transition={{ duration: prefersReducedMotion ? 0.1 : 0.2, ease: 'easeOut' }}
-              className="flex-1 min-h-0 flex flex-col"
+              className="flex-1 min-h-0 min-w-0 flex flex-col"
             >
+        {/* COMPACT MINI SPEAKING PANEL (Only visible when user clicks Read on a chat response; otherwise OFF) */}
+        {playbackState.isSpeaking && speakingId !== null && (
+          <div
+            role="region"
+            aria-label="Aadesh AI Speaking Controls"
+            className="shrink-0 w-full px-2.5 sm:px-6 pt-2 pb-1 z-20 animate-in fade-in slide-in-from-top-1 duration-150"
+          >
+            <div className="max-w-3xl mx-auto rounded-xl bg-[#0b1022]/95 backdrop-blur-md border border-purple-500/45 shadow-[0_6px_22px_rgba(91,33,182,0.32)] px-2.5 py-1.5 flex items-center justify-between gap-2 min-w-0 overflow-hidden">
+              {/* Left: Compact Live Waveform + Status Label */}
+              <div className="flex items-center gap-2 min-w-0 flex-1">
+                <div
+                  className="flex items-center justify-center gap-[3px] h-6 px-2 rounded-lg bg-[#070a14] border border-purple-500/30 shrink-0"
+                  aria-hidden="true"
+                >
+                  {[0.55, 0.9, 0.65, 1.0, 0.72, 0.95, 0.6, 0.85].map((weight, idx) => {
+                    const activeIntensity =
+                      playbackState.isPaused || playbackState.isMuted ? 0.12 : playbackState.intensity;
+                    const heightPx = Math.max(4, Math.round(4 + weight * activeIntensity * 14));
+                    return (
+                      <span
+                        key={idx}
+                        className="wave-bar wave-bar-live"
+                        style={{
+                          height: `${heightPx}px`,
+                          opacity:
+                            playbackState.isMuted || playbackState.isPaused
+                              ? 0.35
+                              : 0.6 + weight * activeIntensity * 0.4,
+                        }}
+                      />
+                    );
+                  })}
+                </div>
+
+                <div className="min-w-0 flex-1 flex items-center gap-1.5">
+                  <span className="text-[11px] sm:text-xs font-bold text-white truncate">
+                    {playbackState.isMuted
+                      ? 'AI Voice Muted'
+                      : playbackState.isPaused
+                      ? 'AI Voice Paused'
+                      : 'Aadesh AI Speaking'}
+                  </span>
+                  <span className="hidden sm:inline-block text-[10px] font-mono tabular-nums text-purple-300/85 shrink-0">
+                    {(playbackState.rate ?? 1).toFixed(1)}x
+                  </span>
+                </div>
+              </div>
+
+              {/* Right: Compact Controls (Pause/Resume, Volume, Stop) */}
+              <div className="flex items-center gap-1 shrink-0">
+                <button
+                  type="button"
+                  onClick={() =>
+                    playbackState.isPaused ? voiceAssistant.resumeSpeaking() : voiceAssistant.pauseSpeaking()
+                  }
+                  className="h-7 px-2 rounded-lg bg-[#151b33] hover:bg-purple-900/55 border border-purple-500/35 text-purple-100 text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer transition-colors"
+                  title={playbackState.isPaused ? 'Resume voice playback' : 'Pause voice playback'}
+                  aria-label={playbackState.isPaused ? 'Resume voice playback' : 'Pause voice playback'}
+                >
+                  {playbackState.isPaused ? (
+                    <Play className="w-3 h-3 shrink-0" />
+                  ) : (
+                    <Pause className="w-3 h-3 shrink-0" />
+                  )}
+                  <span className="hidden xs:inline sm:inline">
+                    {playbackState.isPaused ? 'Resume' : 'Pause'}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => voiceAssistant.setMuted(!playbackState.isMuted)}
+                  className={`h-7 w-7 rounded-lg border inline-flex items-center justify-center cursor-pointer transition-colors ${
+                    playbackState.isMuted
+                      ? 'bg-amber-950/65 border-amber-500/45 text-amber-300'
+                      : 'bg-[#151b33] hover:bg-purple-900/55 border-purple-500/35 text-purple-200'
+                  }`}
+                  title={playbackState.isMuted ? 'Unmute AI voice' : 'Mute AI voice'}
+                  aria-label={playbackState.isMuted ? 'Unmute AI voice' : 'Mute AI voice'}
+                >
+                  {playbackState.isMuted ? (
+                    <VolumeX className="w-3.5 h-3.5" />
+                  ) : (
+                    <Volume2 className="w-3.5 h-3.5" />
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    voiceAssistant.stopSpeaking();
+                    setSpeakingId(null);
+                  }}
+                  className="h-7 px-2 rounded-lg bg-rose-600/85 hover:bg-rose-500 border border-rose-400/40 text-white text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer transition-colors"
+                  title="Stop AI voice"
+                  aria-label="Stop AI voice"
+                >
+                  <Square className="w-2.5 h-2.5 fill-white shrink-0" />
+                  <span>Stop</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Message Feed */}
-        <div className="flex-1 min-h-0 overflow-y-auto chat-feed-scroll px-2.5 sm:px-6 py-4 space-y-5">
+        <div
+          ref={chatScrollContainerRef}
+          onScroll={handleChatFeedScroll}
+          className="flex-1 min-h-0 overflow-y-auto chat-feed-scroll px-2.5 sm:px-6 py-4 space-y-5"
+        >
           {/* No Search Results Empty State */}
           {trimmedSearch && displayedMessages.length === 0 && (
             <div className="glass-card rounded-2xl p-6 max-w-lg mx-auto text-center border border-amber-500/30 space-y-3">
@@ -2738,7 +3051,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   How can I assist you today?
                 </h1>
                 <p className="text-xs sm:text-sm text-purple-200/80 max-w-md mx-auto">
-                  Your worldwide AI assistant powered by Google Gemini.
+                  Worldwide multimodal intelligence across Gemini, Groq &amp; OpenRouter.
                 </p>
               </motion.div>
 
@@ -2974,7 +3287,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                         : isOtherParticipant
                         ? 'glass-card text-gray-100 rounded-tl-xs border border-emerald-500/40 bg-emerald-950/20'
                         : msg.isError
-                        ? 'glass-card text-rose-100 rounded-tl-xs border border-rose-500/50 bg-rose-950/25'
+                        ? 'glass-card text-amber-50 rounded-tl-xs border border-amber-400/40 bg-amber-950/20 max-w-xl'
                         : hasGeotagContext
                         ? 'glass-card text-gray-100 rounded-tl-xs border border-emerald-400/50 shadow-[0_0_24px_rgba(16,185,129,0.12)]'
                         : 'v2-neu-card text-gray-100 rounded-tl-xs border border-purple-400/30'
@@ -3030,6 +3343,23 @@ export const ChatView: React.FC<ChatViewProps> = ({
                               </span>
                             )}
                           </span>
+                          {isAI && (msg.provider || msg.modelUsed) && (
+                            <span
+                              title={msg.modelUsed ? `Model: ${msg.modelUsed}` : undefined}
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-[#090a0f]/80 border border-purple-400/25 text-[10px] font-mono text-purple-200/85 shrink-0"
+                            >
+                              <span>
+                                {msg.provider
+                                  ? AI_PROVIDER_METADATA[msg.provider]?.shortName || msg.provider
+                                  : 'AI'}
+                              </span>
+                              {msg.modelUsed && (
+                                <span className="text-gray-400 truncate max-w-[120px]">
+                                  · {msg.modelUsed}
+                                </span>
+                              )}
+                            </span>
+                          )}
                           {hasGeotagContext && (
                             <span
                               data-context-badge="true"
@@ -3042,34 +3372,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
                           )}
                         </div>
 
-                        {/* View Mode Toggle Tabs & All-Language Response Translator */}
+                        {/* View Mode Toggle Tabs */}
                         <div className="flex items-center gap-1.5 flex-wrap justify-end">
-                        {!msg.isError && onTranslateMessage && (
-                          <div className="flex items-center gap-1 bg-[#090a0f] px-2 py-0.5 rounded-lg border border-[#232738] text-[10px]">
-                            <Globe2 className="w-3 h-3 text-purple-400 shrink-0" />
-                            <select
-                              aria-label="Translate AI response to language"
-                              value={msg.translationLanguage || ''}
-                              disabled={translatingMsgId === msg.id}
-                              onChange={(e) => {
-                                if (e.target.value) {
-                                  handleInlineTranslate(msg.id, e.target.value);
-                                }
-                              }}
-                              className="bg-transparent text-purple-300 font-medium outline-none cursor-pointer max-w-[115px]"
-                            >
-                              <option value="" className="bg-[#131520] text-gray-300">
-                                {translatingMsgId === msg.id ? 'Translating...' : 'Translate All...'}
-                              </option>
-                              {SUPPORTED_LANGUAGES.map((lang) => (
-                                <option key={lang.code} value={lang.code} className="bg-[#131520] text-gray-200">
-                                  {lang.flag} {lang.name}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-                        )}
-
                         {msg.translation && (
                           <div className="flex items-center gap-1 bg-[#090a0f] p-0.5 rounded-lg border border-[#232738] text-[10px]">
                             <button
@@ -3192,17 +3496,35 @@ export const ChatView: React.FC<ChatViewProps> = ({
                     )
                   )}
 
-                  {/* Direct Retry Action for Failed Requests */}
+                  {/* Compact Actionable Error Controls for Failed Requests */}
                   {!isUser && msg.isError && (
-                    <div className="pt-1 flex flex-wrap items-center gap-2">
+                    <div className="pt-2 border-t border-amber-400/20 flex flex-wrap items-center gap-2">
                       <button
+                        type="button"
                         onClick={() => handleRegenerate(msg.id)}
                         disabled={isLoading}
-                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-rose-600/80 hover:bg-rose-500 text-white text-xs font-semibold transition-all cursor-pointer disabled:opacity-50"
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/40 text-amber-100 text-xs font-semibold transition-colors cursor-pointer disabled:opacity-50"
                       >
                         <RotateCcw className="w-3.5 h-3.5" />
-                        <span>Retry Request</span>
+                        <span>Retry</span>
                       </button>
+                      <button
+                        type="button"
+                        onClick={() => setProviderSwitcherOpen(true)}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#131520] hover:bg-white/10 border border-white/15 text-purple-100 text-xs font-semibold transition-colors cursor-pointer"
+                      >
+                        <Cpu className="w-3.5 h-3.5 text-sky-300" />
+                        <span>Change Model</span>
+                      </button>
+                      {onOpenProviderSettings && (
+                        <button
+                          type="button"
+                          onClick={onOpenProviderSettings}
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-amber-200/90 hover:text-white transition-colors cursor-pointer"
+                        >
+                          <span>Switch Provider</span>
+                        </button>
+                      )}
                     </div>
                   )}
 
@@ -3369,225 +3691,361 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   )}
 
                   {/* Bubble Actions Toolbar */}
-                  <div className="flex items-center justify-between pt-1 text-[11px] text-gray-400 border-t border-white/5">
-                    <span className="text-[10px] flex items-center gap-1.5">
-                      <span>{new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                      {msg.isPinned && (
-                        <span className="inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded bg-amber-500/20 border border-amber-400/40 text-amber-300 font-semibold">
-                          <Pin className="w-2.5 h-2.5 fill-amber-400/40" />
-                          <span>Pinned</span>
-                        </span>
-                      )}
-                      {msg.isVoiceInput && <span>• 🎙️ Voice</span>}
-                      {msg.isOffline && <span>• 💾 Local Engine</span>}
-                    </span>
-
-                    <div className="flex items-center space-x-2">
-                      {/* Pin / Unpin message to top of session */}
-                      {onTogglePinMessage && (
+                  {!isUser ? (
+                    <div className="pt-2 mt-1 border-t border-purple-500/15 space-y-1.5">
+                      {/* Clean 5-Button AI Response Action Bar: Copy, Like, Dislike, Read, Retry */}
+                      <div
+                        role="toolbar"
+                        aria-label="AI message actions"
+                        className="flex items-center flex-wrap gap-1 sm:gap-1.5 max-w-full"
+                      >
+                        {/* 1. Copy */}
                         <button
                           type="button"
-                          onClick={() => onTogglePinMessage(msg.id)}
-                          aria-pressed={Boolean(msg.isPinned)}
-                          className={`p-1 rounded transition-colors cursor-pointer ${
-                            msg.isPinned
-                              ? 'text-amber-300 bg-amber-950/60 border border-amber-500/40'
-                              : 'hover:text-amber-300 text-gray-400'
+                          onClick={() =>
+                            handleCopy(
+                              msg.id,
+                              msg.translation ? `${msg.content}\n\nTranslation: ${msg.translation}` : msg.content
+                            )
+                          }
+                          className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg border text-[10.5px] sm:text-[11px] font-semibold transition-all cursor-pointer shrink-0 ${
+                            copiedId === msg.id
+                              ? 'bg-emerald-500/20 border-emerald-400/50 text-emerald-300'
+                              : 'bg-[#121426]/90 hover:bg-purple-900/45 border-purple-500/25 hover:border-purple-400/55 text-gray-300 hover:text-white'
                           }`}
-                          title={msg.isPinned ? 'Unpin message from top' : 'Pin message to top of chat'}
-                          aria-label={msg.isPinned ? 'Unpin message' : 'Pin message'}
+                          title="Copy response"
+                          aria-label="Copy response"
                         >
-                          <Pin className={`w-3.5 h-3.5 ${msg.isPinned ? 'fill-amber-400/40' : ''}`} />
+                          {copiedId === msg.id ? (
+                            <>
+                              <Check className="w-3 h-3 text-emerald-400 shrink-0" />
+                              <span>Copied</span>
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="w-3 h-3 shrink-0" />
+                              <span>Copy</span>
+                            </>
+                          )}
                         </button>
-                      )}
 
-                      {/* Feedback: Thumbs Up / Thumbs Down */}
-                      {!isUser && !msg.isError && onFeedbackMessage && (
-                        <div className="flex items-center gap-0.5 mr-1 border-r border-white/10 pr-2">
-                          <button
-                            onClick={() => onFeedbackMessage(msg.id, 'up')}
-                            className={`p-1 rounded transition-colors cursor-pointer ${
-                              msg.feedback === 'up'
-                                ? 'text-emerald-400 bg-emerald-950/50'
-                                : 'hover:text-emerald-300 text-gray-400'
-                            }`}
-                            title="Helpful response"
-                          >
-                            <ThumbsUp className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            onClick={() => onFeedbackMessage(msg.id, 'down')}
-                            className={`p-1 rounded transition-colors cursor-pointer ${
-                              msg.feedback === 'down'
-                                ? 'text-rose-400 bg-rose-950/50'
-                                : 'hover:text-rose-300 text-gray-400'
-                            }`}
-                            title="Needs improvement"
-                          >
-                            <ThumbsDown className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      )}
-
-                      {/* Copy */}
-                      <button
-                        onClick={() => handleCopy(msg.id, msg.translation ? `${msg.content}\n\nTranslation: ${msg.translation}` : msg.content)}
-                        className="hover:text-white transition-colors p-1 cursor-pointer"
-                        title="Copy to clipboard"
-                      >
-                        {copiedId === msg.id ? (
-                          <Check className="w-3.5 h-3.5 text-emerald-400" />
-                        ) : (
-                          <Copy className="w-3.5 h-3.5" />
-                        )}
-                      </button>
-
-                      {/* Regenerate AI response */}
-                      {!isUser && (
+                        {/* 2. Like */}
                         <button
+                          type="button"
+                          onClick={() => onFeedbackMessage?.(msg.id, 'up')}
+                          disabled={!onFeedbackMessage}
+                          aria-pressed={msg.feedback === 'up'}
+                          className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg border text-[10.5px] sm:text-[11px] font-semibold transition-all cursor-pointer shrink-0 disabled:opacity-45 ${
+                            msg.feedback === 'up'
+                              ? 'bg-emerald-500/20 border-emerald-400/55 text-emerald-300 shadow-[0_0_10px_rgba(52,211,153,0.2)]'
+                              : 'bg-[#121426]/90 hover:bg-purple-900/45 border-purple-500/25 hover:border-purple-400/55 text-gray-300 hover:text-emerald-200'
+                          }`}
+                          title="Like response"
+                          aria-label="Like response"
+                        >
+                          <ThumbsUp className="w-3 h-3 shrink-0" />
+                          <span>Like</span>
+                        </button>
+
+                        {/* 3. Dislike */}
+                        <button
+                          type="button"
+                          onClick={() => onFeedbackMessage?.(msg.id, 'down')}
+                          disabled={!onFeedbackMessage}
+                          aria-pressed={msg.feedback === 'down'}
+                          className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg border text-[10.5px] sm:text-[11px] font-semibold transition-all cursor-pointer shrink-0 disabled:opacity-45 ${
+                            msg.feedback === 'down'
+                              ? 'bg-rose-500/20 border-rose-400/55 text-rose-300 shadow-[0_0_10px_rgba(244,63,94,0.2)]'
+                              : 'bg-[#121426]/90 hover:bg-purple-900/45 border-purple-500/25 hover:border-purple-400/55 text-gray-300 hover:text-rose-200'
+                          }`}
+                          title="Dislike response"
+                          aria-label="Dislike response"
+                        >
+                          <ThumbsDown className="w-3 h-3 shrink-0" />
+                          <span>Dislike</span>
+                        </button>
+
+                        {/* 4. Read */}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const msgTransLangObj =
+                              SUPPORTED_LANGUAGES.find((l) => l.code === msg.translationLanguage) || targetLangObj;
+                            const useTranslatedText = viewMode === 'translated' && Boolean(msg.translation);
+                            const speechText = useTranslatedText
+                              ? msg.translation || msg.content
+                              : msg.content;
+                            const speechLang = useTranslatedText
+                              ? msgTransLangObj.speechCode
+                              : resolveMessageSpeechCode(speechText, msg.detectedLanguage);
+                            handleSpeakMessage(msg.id, speechText, speechLang);
+                          }}
+                          aria-pressed={speakingId === msg.id && playbackState.isSpeaking}
+                          aria-label={
+                            speakingId === msg.id && playbackState.isSpeaking
+                              ? 'Stop reading response'
+                              : 'Read response aloud'
+                          }
+                          className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg border text-[10.5px] sm:text-[11px] font-semibold transition-all cursor-pointer shrink-0 ${
+                            speakingId === msg.id && playbackState.isSpeaking
+                              ? 'bg-purple-600/35 border-purple-400/75 text-purple-100 shadow-[0_0_12px_rgba(168,85,247,0.35)]'
+                              : 'bg-[#121426]/90 hover:bg-purple-900/45 border-purple-500/25 hover:border-purple-400/55 text-gray-300 hover:text-purple-200'
+                          }`}
+                          title={`Read aloud (${settings.voicePersona || 'friendly'} persona · ${(settings.voiceSpeed ?? 1).toFixed(2)}x speed)`}
+                        >
+                          {speakingId === msg.id && playbackState.isSpeaking ? (
+                            <>
+                              <VolumeX className="w-3 h-3 text-purple-200 shrink-0" />
+                              <span>Stop</span>
+                            </>
+                          ) : (
+                            <>
+                              <Volume2 className="w-3 h-3 shrink-0" />
+                              <span>Read</span>
+                            </>
+                          )}
+                        </button>
+
+                        {/* 5. Retry */}
+                        <button
+                          type="button"
                           onClick={() => handleRegenerate(msg.id)}
-                          className="hover:text-purple-300 transition-colors p-1 cursor-pointer"
-                          title="Regenerate this AI response"
+                          disabled={isLoading}
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border text-[10.5px] sm:text-[11px] font-semibold transition-all cursor-pointer shrink-0 bg-[#121426]/90 hover:bg-purple-900/45 border-purple-500/25 hover:border-purple-400/55 text-gray-300 hover:text-purple-200 disabled:opacity-45"
+                          title="Retry / regenerate AI response"
+                          aria-label="Retry AI response"
                         >
-                          <RotateCcw className="w-3.5 h-3.5" />
-                        </button>
-                      )}
-
-                      {/* Read Aloud (Web Speech API respecting active Voice Persona & Speed) */}
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const msgTransLangObj =
-                            SUPPORTED_LANGUAGES.find((l) => l.code === msg.translationLanguage) || targetLangObj;
-                          const useTranslatedText = viewMode === 'translated' && Boolean(msg.translation);
-                          const speechText = useTranslatedText
-                            ? msg.translation || msg.content
-                            : msg.content;
-                          const speechLang = useTranslatedText
-                            ? msgTransLangObj.speechCode
-                            : resolveMessageSpeechCode(speechText, msg.detectedLanguage);
-                          handleSpeakMessage(msg.id, speechText, speechLang);
-                        }}
-                        aria-pressed={speakingId === msg.id && playbackState.isSpeaking}
-                        aria-label={
-                          speakingId === msg.id && playbackState.isSpeaking
-                            ? 'Stop reading aloud'
-                            : 'Read aloud'
-                        }
-                        className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg border text-[11px] font-semibold transition-all cursor-pointer ${
-                          speakingId === msg.id && playbackState.isSpeaking
-                            ? 'bg-purple-500/30 border-purple-400/70 text-purple-100 animate-pulse'
-                            : isUser
-                            ? 'bg-white/10 hover:bg-white/20 border-white/20 text-purple-100 hover:text-white'
-                            : 'bg-[#131626] hover:bg-purple-900/40 border-[#282d44] text-gray-300 hover:text-purple-200'
-                        }`}
-                        title={`Read aloud (${settings.voicePersona || 'friendly'} persona · ${(settings.voiceSpeed ?? 1).toFixed(2)}x speed)`}
-                      >
-                        {speakingId === msg.id && playbackState.isSpeaking ? (
-                          <>
-                            <VolumeX className="w-3.5 h-3.5 text-purple-300" />
-                            <span>Stop</span>
-                          </>
-                        ) : (
-                          <>
-                            <Volume2 className="w-3.5 h-3.5" />
-                            <span>Read Aloud</span>
-                          </>
-                        )}
-                      </button>
-
-                      {/* Social Media Sharing Button & Dropdown */}
-                      <div className="relative">
-                        <button
-                          onClick={() => setSharePopoverMsgId(sharePopoverMsgId === msg.id ? null : msg.id)}
-                          className={`hover:text-purple-300 transition-colors p-1 cursor-pointer ${
-                            sharePopoverMsgId === msg.id ? 'text-purple-400' : ''
-                          }`}
-                          title="Share formatted snippet to social media"
-                        >
-                          <Share2 className="w-3.5 h-3.5" />
+                          <RotateCcw className="w-3 h-3 shrink-0" />
+                          <span>Retry</span>
                         </button>
 
-                        {/* Social Share Popover Dropdown */}
-                        {sharePopoverMsgId === msg.id && (
-                          <div className="absolute right-0 bottom-full mb-2 w-60 glass-card rounded-2xl p-2.5 border border-purple-500/40 shadow-2xl z-50 text-xs animate-in fade-in zoom-in-95 duration-150 space-y-1">
-                            <div className="text-[10px] font-bold uppercase tracking-wider text-purple-300 px-2 pb-1.5 border-b border-white/10 flex items-center justify-between">
-                              <span>Share Response</span>
-                              <span className="text-[9px] text-purple-300 font-semibold">🌐 Global Hub</span>
-                            </div>
-
-                            {/* 1. Copy Formatted Snippet */}
+                        {/* Secondary Pin & Share utilities aligned cleanly */}
+                        <div className="flex items-center gap-1 ml-auto">
+                          {onTogglePinMessage && (
                             <button
-                              onClick={() => handleCopyShareSnippet(msg)}
-                              className="w-full text-left px-2.5 py-1.5 rounded-xl hover:bg-purple-900/40 text-gray-200 hover:text-white flex items-center gap-2 cursor-pointer transition-colors"
+                              type="button"
+                              onClick={() => onTogglePinMessage(msg.id)}
+                              aria-pressed={Boolean(msg.isPinned)}
+                              className={`p-1 rounded-md transition-colors cursor-pointer ${
+                                msg.isPinned
+                                  ? 'text-amber-300 bg-amber-950/60 border border-amber-500/40'
+                                  : 'hover:text-amber-300 text-gray-400'
+                              }`}
+                              title={msg.isPinned ? 'Unpin message from top' : 'Pin message to top of chat'}
+                              aria-label={msg.isPinned ? 'Unpin message' : 'Pin message'}
                             >
-                              <Copy className="w-3.5 h-3.5 text-purple-400" />
-                              <span className="font-medium">Copy Formatted Snippet</span>
+                              <Pin className={`w-3 h-3 ${msg.isPinned ? 'fill-amber-400/40' : ''}`} />
+                            </button>
+                          )}
+
+                          <div className="relative">
+                            <button
+                              type="button"
+                              onClick={() => setSharePopoverMsgId(sharePopoverMsgId === msg.id ? null : msg.id)}
+                              className={`hover:text-purple-300 transition-colors p-1 rounded-md cursor-pointer ${
+                                sharePopoverMsgId === msg.id ? 'text-purple-400' : 'text-gray-400'
+                              }`}
+                              title="Share formatted snippet to social media"
+                              aria-label="Share response"
+                            >
+                              <Share2 className="w-3 h-3" />
                             </button>
 
-                            {/* 2. Share on X / Twitter */}
-                            <a
-                              href={`https://twitter.com/intent/tweet?text=${encodeURIComponent(getFormattedShareSnippet(msg))}`}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              onClick={() => setSharePopoverMsgId(null)}
-                              className="w-full text-left px-2.5 py-1.5 rounded-xl hover:bg-purple-900/40 text-gray-200 hover:text-white flex items-center gap-2 cursor-pointer transition-colors"
-                            >
-                              <span className="text-xs font-bold text-sky-400 w-3.5 text-center">𝕏</span>
-                              <span>Post on X (Twitter)</span>
-                            </a>
-
-                            {/* 3. Share on WhatsApp */}
-                            <a
-                              href={`https://api.whatsapp.com/send?text=${encodeURIComponent(getFormattedShareSnippet(msg))}`}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              onClick={() => setSharePopoverMsgId(null)}
-                              className="w-full text-left px-2.5 py-1.5 rounded-xl hover:bg-purple-900/40 text-gray-200 hover:text-white flex items-center gap-2 cursor-pointer transition-colors"
-                            >
-                              <span className="text-xs font-bold text-emerald-400 w-3.5 text-center">💬</span>
-                              <span>Share on WhatsApp</span>
-                            </a>
-
-                            {/* 4. Share on Facebook */}
-                            <a
-                              href={`https://www.facebook.com/sharer/sharer.php?quote=${encodeURIComponent(getFormattedShareSnippet(msg))}`}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              onClick={() => setSharePopoverMsgId(null)}
-                              className="w-full text-left px-2.5 py-1.5 rounded-xl hover:bg-purple-900/40 text-gray-200 hover:text-white flex items-center gap-2 cursor-pointer transition-colors"
-                            >
-                              <span className="text-xs font-bold text-blue-500 w-3.5 text-center">f</span>
-                              <span>Share on Facebook</span>
-                            </a>
-
-                            {/* 5. Share on LinkedIn */}
-                            <a
-                              href={`https://www.linkedin.com/sharing/share-offsite/?url=${encodeURIComponent(window.location.origin)}`}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              onClick={() => setSharePopoverMsgId(null)}
-                              className="w-full text-left px-2.5 py-1.5 rounded-xl hover:bg-purple-900/40 text-gray-200 hover:text-white flex items-center gap-2 cursor-pointer transition-colors"
-                            >
-                              <span className="text-xs font-bold text-blue-400 w-3.5 text-center">in</span>
-                              <span>Share on LinkedIn</span>
-                            </a>
-
-                            {/* 6. Native Device Share */}
-                            {typeof navigator !== 'undefined' && 'share' in navigator && (
-                              <button
-                                onClick={() => handleNativeShare(msg)}
-                                className="w-full text-left px-2.5 py-1.5 rounded-xl bg-purple-950/60 hover:bg-purple-900/60 text-purple-200 hover:text-white flex items-center gap-2 cursor-pointer transition-colors border border-purple-500/30"
-                              >
-                                <Share2 className="w-3.5 h-3.5 text-purple-300" />
-                                <span>Device Share Sheet</span>
-                              </button>
+                            {sharePopoverMsgId === msg.id && (
+                              <div className="absolute right-0 bottom-full mb-2 w-60 glass-card rounded-2xl p-2.5 border border-purple-500/40 shadow-2xl z-50 text-xs animate-in fade-in zoom-in-95 duration-150 space-y-1">
+                                <div className="text-[10px] font-bold uppercase tracking-wider text-purple-300 px-2 pb-1.5 border-b border-white/10 flex items-center justify-between">
+                                  <span>Share Response</span>
+                                  <span className="text-[9px] text-purple-300 font-semibold">🌐 Global Hub</span>
+                                </div>
+                                <button
+                                  onClick={() => handleCopyShareSnippet(msg)}
+                                  className="w-full text-left px-2.5 py-1.5 rounded-xl hover:bg-purple-900/40 text-gray-200 hover:text-white flex items-center gap-2 cursor-pointer transition-colors"
+                                >
+                                  <Copy className="w-3.5 h-3.5 text-purple-400" />
+                                  <span className="font-medium">Copy Formatted Snippet</span>
+                                </button>
+                                <a
+                                  href={`https://twitter.com/intent/tweet?text=${encodeURIComponent(getFormattedShareSnippet(msg))}`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  onClick={() => setSharePopoverMsgId(null)}
+                                  className="w-full text-left px-2.5 py-1.5 rounded-xl hover:bg-purple-900/40 text-gray-200 hover:text-white flex items-center gap-2 cursor-pointer transition-colors"
+                                >
+                                  <span className="text-xs font-bold text-sky-400 w-3.5 text-center">𝕏</span>
+                                  <span>Post on X (Twitter)</span>
+                                </a>
+                                <a
+                                  href={`https://api.whatsapp.com/send?text=${encodeURIComponent(getFormattedShareSnippet(msg))}`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  onClick={() => setSharePopoverMsgId(null)}
+                                  className="w-full text-left px-2.5 py-1.5 rounded-xl hover:bg-purple-900/40 text-gray-200 hover:text-white flex items-center gap-2 cursor-pointer transition-colors"
+                                >
+                                  <span className="text-xs font-bold text-emerald-400 w-3.5 text-center">💬</span>
+                                  <span>Share on WhatsApp</span>
+                                </a>
+                                <a
+                                  href={`https://www.facebook.com/sharer/sharer.php?quote=${encodeURIComponent(getFormattedShareSnippet(msg))}`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  onClick={() => setSharePopoverMsgId(null)}
+                                  className="w-full text-left px-2.5 py-1.5 rounded-xl hover:bg-purple-900/40 text-gray-200 hover:text-white flex items-center gap-2 cursor-pointer transition-colors"
+                                >
+                                  <span className="text-xs font-bold text-blue-500 w-3.5 text-center">f</span>
+                                  <span>Share on Facebook</span>
+                                </a>
+                                <a
+                                  href={`https://www.linkedin.com/sharing/share-offsite/?url=${encodeURIComponent(window.location.origin)}`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  onClick={() => setSharePopoverMsgId(null)}
+                                  className="w-full text-left px-2.5 py-1.5 rounded-xl hover:bg-purple-900/40 text-gray-200 hover:text-white flex items-center gap-2 cursor-pointer transition-colors"
+                                >
+                                  <span className="text-xs font-bold text-blue-400 w-3.5 text-center">in</span>
+                                  <span>Share on LinkedIn</span>
+                                </a>
+                                {typeof navigator !== 'undefined' && 'share' in navigator && (
+                                  <button
+                                    onClick={() => handleNativeShare(msg)}
+                                    className="w-full text-left px-2.5 py-1.5 rounded-xl bg-purple-950/60 hover:bg-purple-900/60 text-purple-200 hover:text-white flex items-center gap-2 cursor-pointer transition-colors border border-purple-500/30"
+                                  >
+                                    <Share2 className="w-3.5 h-3.5 text-purple-300" />
+                                    <span>Device Share Sheet</span>
+                                  </button>
+                                )}
+                              </div>
                             )}
                           </div>
+                        </div>
+                      </div>
+
+                      {/* Per-Message Translate Bar Below Every AI Response */}
+                      {!msg.isError && !msg.isStreaming && onTranslateMessage && (() => {
+                        const chosenLang =
+                          selectedTranslateLangs[msg.id] ||
+                          msg.translationLanguage ||
+                          settings.translationLanguage ||
+                          'ne';
+                        const isTranslatingThis = translatingMsgId === msg.id;
+                        const transErr = translationErrors[msg.id];
+                        return (
+                          <div className="pt-1.5 border-t border-white/5 space-y-1.5">
+                            <div className="flex flex-wrap items-center gap-1.5 text-[10.5px]">
+                              <div className="inline-flex items-center gap-1 bg-[#090a0f]/90 px-2 py-1 rounded-lg border border-purple-500/25">
+                                <Languages className="w-3 h-3 text-purple-400 shrink-0" />
+                                <select
+                                  aria-label="Select translation target language"
+                                  value={chosenLang}
+                                  disabled={isTranslatingThis}
+                                  onChange={(e) =>
+                                    setSelectedTranslateLangs((prev) => ({
+                                      ...prev,
+                                      [msg.id]: e.target.value,
+                                    }))
+                                  }
+                                  className="bg-transparent text-purple-200 font-medium outline-none cursor-pointer max-w-[130px]"
+                                >
+                                  {SUPPORTED_LANGUAGES.map((lang) => (
+                                    <option key={`${msg.id}-tr-${lang.code}`} value={lang.code} className="bg-[#131520] text-gray-200">
+                                      {lang.flag} {lang.name}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+
+                              <button
+                                type="button"
+                                onClick={() => void handleInlineTranslate(msg.id, chosenLang)}
+                                disabled={isTranslatingThis}
+                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-purple-600/30 hover:bg-purple-600/45 border border-purple-400/40 text-purple-100 font-semibold transition-colors cursor-pointer disabled:opacity-55"
+                              >
+                                <Globe2 className={`w-3 h-3 text-purple-300 ${isTranslatingThis ? 'animate-spin' : ''}`} />
+                                <span>{isTranslatingThis ? 'Translating...' : 'Translate'}</span>
+                              </button>
+
+                              {msg.translation && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setTranslationViewModes((prev) => ({
+                                      ...prev,
+                                      [msg.id]: viewMode === 'original' ? 'bilingual' : 'original',
+                                    }))
+                                  }
+                                  className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-[#121426] hover:bg-purple-900/40 border border-white/15 text-gray-200 font-medium transition-colors cursor-pointer"
+                                >
+                                  <span>{viewMode === 'original' ? 'Show Translation' : 'Show Original Only'}</span>
+                                </button>
+                              )}
+                            </div>
+
+                            {transErr && (
+                              <div className="px-2.5 py-1.5 rounded-lg bg-rose-950/50 border border-rose-400/35 text-[10.5px] text-rose-200">
+                                {transErr}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
+
+                      {(msg.isPinned || msg.isOffline) && (
+                        <div className="flex items-center gap-1.5 text-[10px] text-gray-400">
+                          {msg.isPinned && (
+                            <span className="inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded bg-amber-500/20 border border-amber-400/40 text-amber-300 font-semibold">
+                              <Pin className="w-2.5 h-2.5 fill-amber-400/40" />
+                              <span>Pinned</span>
+                            </span>
+                          )}
+                          {msg.isOffline && <span>💾 Local Engine</span>}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="flex items-center justify-between pt-1 text-[11px] text-gray-300/90 border-t border-white/10">
+                      <span className="text-[10px] flex items-center gap-1.5">
+                        <span>{new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                        {msg.isPinned && (
+                          <span className="inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded bg-amber-500/20 border border-amber-400/40 text-amber-300 font-semibold">
+                            <Pin className="w-2.5 h-2.5 fill-amber-400/40" />
+                            <span>Pinned</span>
+                          </span>
                         )}
+                        {msg.isVoiceInput && <span>• 🎙️ Voice</span>}
+                      </span>
+
+                      <div className="flex items-center gap-1.5">
+                        {onTogglePinMessage && (
+                          <button
+                            type="button"
+                            onClick={() => onTogglePinMessage(msg.id)}
+                            aria-pressed={Boolean(msg.isPinned)}
+                            className={`p-1 rounded transition-colors cursor-pointer ${
+                              msg.isPinned
+                                ? 'text-amber-300 bg-amber-950/60 border border-amber-500/40'
+                                : 'hover:text-amber-300 text-purple-200/80'
+                            }`}
+                            title={msg.isPinned ? 'Unpin message from top' : 'Pin message to top of chat'}
+                            aria-label={msg.isPinned ? 'Unpin message' : 'Pin message'}
+                          >
+                            <Pin className={`w-3.5 h-3.5 ${msg.isPinned ? 'fill-amber-400/40' : ''}`} />
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => handleCopy(msg.id, msg.content)}
+                          className="hover:text-white transition-colors p-1 cursor-pointer"
+                          title="Copy to clipboard"
+                          aria-label="Copy message"
+                        >
+                          {copiedId === msg.id ? (
+                            <Check className="w-3.5 h-3.5 text-emerald-400" />
+                          ) : (
+                            <Copy className="w-3.5 h-3.5" />
+                          )}
+                        </button>
                       </div>
                     </div>
-                  </div>
+                  )}
                 </div>
                 </div>
 
@@ -3628,7 +4086,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
                             ease: [0.22, 1, 0.36, 1],
                           }}
                           whileTap={prefersReducedMotion ? undefined : { scale: 0.96 }}
-                          onClick={() => handleSend(q)}
+                          onClick={() => {
+                            onSuggestedReplyClick?.(q, msg, idx);
+                            handleSend(q);
+                          }}
                           className="smart-reply-chip text-xs text-purple-200 px-3.5 py-1.5 rounded-xl flex items-center gap-1.5 group cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                         >
                           <span className="w-1.5 h-1.5 rounded-full bg-purple-400 group-hover:scale-125 transition-transform" />
@@ -3674,109 +4135,12 @@ export const ChatView: React.FC<ChatViewProps> = ({
           <div ref={chatBottomRef} />
         </div>
 
-        {/* REAL-TIME VOICE VISUALIZER OVERLAY (Activates whenever VoiceAssistant is speaking) */}
-        {playbackState.isSpeaking && (
-          <div
-            role="region"
-            aria-label="Voice Visualizer"
-            className="absolute top-14 left-1/2 -translate-x-1/2 z-30 w-[94%] max-w-2xl pointer-events-auto animate-in fade-in slide-in-from-top-2 duration-200"
-          >
-            <div className="rounded-2xl bg-[#0b1020]/95 backdrop-blur-xl border border-purple-500/50 shadow-[0_12px_40px_rgba(91,33,182,0.45)] p-3 sm:px-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <div className="flex items-center gap-3 min-w-0 flex-1">
-                {/* Real-time Audio Intensity Wave Bars using .wave-bar CSS classes */}
-                <div
-                  className="flex items-center justify-center gap-1 h-9 px-2.5 rounded-xl bg-[#070a14] border border-purple-500/30 shrink-0"
-                  aria-hidden="true"
-                >
-                  {[0.55, 0.85, 0.65, 1.0, 0.72, 0.95, 0.6, 0.9, 0.75, 1.0, 0.68, 0.88, 0.58, 0.82].map(
-                    (weight, idx) => {
-                      const activeIntensity =
-                        playbackState.isPaused || playbackState.isMuted ? 0.1 : playbackState.intensity;
-                      const heightPx = Math.max(5, Math.round(5 + weight * activeIntensity * 26));
-                      return (
-                        <span
-                          key={idx}
-                          className="wave-bar wave-bar-live"
-                          style={{
-                            height: `${heightPx}px`,
-                            opacity: playbackState.isMuted || playbackState.isPaused ? 0.35 : 0.55 + weight * activeIntensity * 0.45,
-                          }}
-                        />
-                      );
-                    }
-                  )}
-                </div>
-
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2 text-xs font-bold text-white">
-                    <span>
-                      {playbackState.isMuted
-                        ? 'Aadesh AI Voice (Muted)'
-                        : playbackState.isPaused
-                        ? 'Aadesh AI Voice Paused'
-                        : 'Aadesh AI Speaking'}
-                    </span>
-                    <span className="text-[10px] font-mono tabular-nums text-purple-300">
-                      {playbackState.currentLang} · {(playbackState.rate ?? 1).toFixed(2)}x · {Math.round(playbackState.intensity * 100)}%
-                    </span>
-                  </div>
-                  <p className="text-[11px] text-gray-300 truncate mt-0.5">
-                    {playbackState.currentText}
-                  </p>
-                </div>
-              </div>
-
-              {/* Playback Controls: Pause/Resume, Mute/Unmute, Stop */}
-              <div className="flex items-center gap-1.5 shrink-0 self-end sm:self-center">
-                <button
-                  type="button"
-                  onClick={() =>
-                    playbackState.isPaused ? voiceAssistant.resumeSpeaking() : voiceAssistant.pauseSpeaking()
-                  }
-                  className="px-2.5 py-1.5 rounded-xl bg-[#141a30] hover:bg-purple-900/50 border border-purple-500/30 text-purple-200 text-xs font-semibold flex items-center gap-1 cursor-pointer transition-colors"
-                  title={playbackState.isPaused ? 'Resume voice playback' : 'Pause voice playback'}
-                >
-                  {playbackState.isPaused ? <Play className="w-3.5 h-3.5" /> : <Pause className="w-3.5 h-3.5" />}
-                  <span>{playbackState.isPaused ? 'Resume' : 'Pause'}</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => voiceAssistant.setMuted(!playbackState.isMuted)}
-                  className={`p-1.5 rounded-xl border text-xs cursor-pointer transition-colors ${
-                    playbackState.isMuted
-                      ? 'bg-amber-950/60 border-amber-500/40 text-amber-300'
-                      : 'bg-[#141a30] hover:bg-purple-900/50 border-purple-500/30 text-purple-200'
-                  }`}
-                  title={playbackState.isMuted ? 'Unmute AI voice' : 'Mute AI voice'}
-                >
-                  {playbackState.isMuted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => voiceAssistant.stopSpeaking()}
-                  className="px-2.5 py-1.5 rounded-xl bg-rose-600/85 hover:bg-rose-500 text-white text-xs font-semibold flex items-center gap-1 cursor-pointer transition-colors"
-                  title="Stop AI voice"
-                >
-                  <Square className="w-3 h-3 fill-white" />
-                  <span>Stop</span>
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
         {/* VOICE RECOGNITION / SYNTHESIS ERROR BANNER */}
         {voiceError && (
-          <div
-            className={`absolute left-1/2 -translate-x-1/2 z-30 w-[92%] max-w-xl pointer-events-auto ${
-              playbackState.isSpeaking ? 'top-36 sm:top-32' : 'top-14'
-            }`}
-          >
-            <div className="rounded-xl bg-rose-950/90 border border-rose-500/50 text-rose-100 px-3.5 py-2.5 text-xs shadow-xl flex items-center justify-between gap-2">
+          <div className="shrink-0 w-full px-2.5 sm:px-6 pb-1.5 z-20">
+            <div className="max-w-xl mx-auto rounded-xl bg-amber-950/85 border border-amber-400/45 text-amber-100 px-3 py-2 text-xs shadow-lg flex items-center justify-between gap-2">
               <div className="flex items-center gap-2 min-w-0">
-                <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+                <AlertTriangle className="w-4 h-4 text-amber-300 shrink-0" />
                 <span className="truncate sm:whitespace-normal">{voiceError}</span>
               </div>
               <button
@@ -3785,7 +4149,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   setVoiceError(null);
                   voiceAssistant.clearError();
                 }}
-                className="p-1 text-rose-300 hover:text-white shrink-0 cursor-pointer"
+                className="p-1 text-amber-200/80 hover:text-white shrink-0 cursor-pointer"
                 title="Dismiss voice alert"
               >
                 <X className="w-3.5 h-3.5" />
@@ -3803,6 +4167,20 @@ export const ChatView: React.FC<ChatViewProps> = ({
           }`}
         >
           <div className="max-w-3xl mx-auto w-full space-y-2 relative" ref={composerAreaRef}>
+            {/* Non-intrusive Jump to Latest button shown only when user scrolls up */}
+            {showScrollToBottom && displayedMessages.length > 0 && (
+              <div className="flex justify-center pb-1">
+                <button
+                  type="button"
+                  onClick={() => scrollChatFeedToBottom('smooth')}
+                  aria-label="Scroll to latest messages"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#131520]/95 hover:bg-purple-900/75 border border-purple-400/50 text-xs font-bold text-purple-100 shadow-lg backdrop-blur-md cursor-pointer transition-all"
+                >
+                  <ArrowDown className="w-3.5 h-3.5 text-purple-300" />
+                  <span>Jump to latest</span>
+                </button>
+              </div>
+            )}
             {/* Hidden Inputs triggered cleanly via PLUS (+) */}
             <input
               type="file"
@@ -3920,25 +4298,55 @@ export const ChatView: React.FC<ChatViewProps> = ({
               )}
             </AnimatePresence>
 
-            {/* VISIBLE CHAT SEND / API ERROR BANNER */}
+            {/* COMPACT WARNING CARD FOR CHAT SEND / PROVIDER ERRORS */}
             {chatError && (
               <div
                 role="alert"
-                className="rounded-2xl bg-rose-950/90 border border-rose-500/55 text-rose-100 px-3.5 py-2.5 text-xs shadow-xl flex items-center justify-between gap-2 animate-in fade-in duration-150"
+                className="rounded-xl bg-amber-950/85 border border-amber-400/45 text-amber-100 px-3 py-2 text-xs shadow-lg flex flex-wrap items-center justify-between gap-2 animate-in fade-in duration-150"
               >
-                <div className="flex items-center gap-2 min-w-0">
-                  <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
-                  <span className="break-words font-medium">{chatError}</span>
+                <div className="flex items-start gap-2 min-w-0 flex-1">
+                  <AlertTriangle className="w-4 h-4 text-amber-300 shrink-0 mt-0.5" />
+                  <span className="break-words text-[11.5px] leading-snug font-medium">
+                    {chatError}
+                  </span>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setChatError(null)}
-                  className="p-1 text-rose-300 hover:text-white shrink-0 cursor-pointer"
-                  aria-label="Dismiss error alert"
-                  title="Dismiss error alert"
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  {currentSession.messages.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const lastUserOrError = [...currentSession.messages]
+                          .reverse()
+                          .find((m) => m.isError || m.role === 'user');
+                        if (lastUserOrError) {
+                          void handleRegenerate(lastUserOrError.id);
+                        }
+                      }}
+                      disabled={isLoading}
+                      className="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/40 text-[11px] font-semibold text-amber-100 inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                    >
+                      <RotateCcw className="w-3 h-3" />
+                      <span>Retry</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setProviderSwitcherOpen(true)}
+                    className="px-2.5 py-1 rounded-lg bg-[#131520]/90 hover:bg-white/10 border border-white/15 text-[11px] font-semibold text-purple-100 inline-flex items-center gap-1 cursor-pointer"
+                  >
+                    <Cpu className="w-3 h-3 text-sky-300" />
+                    <span>Change Model</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setChatError(null)}
+                    className="p-1 text-amber-200/80 hover:text-white shrink-0 cursor-pointer"
+                    aria-label="Dismiss warning"
+                    title="Dismiss warning"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
               </div>
             )}
 
@@ -3979,67 +4387,82 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 </div>
               )}
 
-            {/* COMPACT VOICE READER ON/OFF MINI CONTROL (Separate from Microphone Button) */}
-            <div className="flex items-center justify-between gap-2 px-1">
-              <div className="flex items-center gap-1.5 flex-wrap">
-                <button
-                  type="button"
-                  onClick={() => {
-                    const nextOn = !settings.autoSpeakAIResponses;
-                    if (nextOn && !voiceAssistant.isSpeechSynthesisSupported()) {
-                      setVoiceError('Text-to-Speech is not supported in this browser. AI replies will stay as text.');
-                      onUpdateSettings?.({ autoSpeakAIResponses: false });
-                      return;
-                    }
-                    if (!nextOn) {
-                      voiceAssistant.stopSpeaking();
-                      setSpeakingId(null);
-                    }
-                    onUpdateSettings?.({ autoSpeakAIResponses: nextOn });
-                  }}
-                  aria-pressed={Boolean(settings.autoSpeakAIResponses)}
-                  aria-label={settings.autoSpeakAIResponses ? 'Turn Voice Reader OFF' : 'Turn Voice Reader ON'}
-                  title={
-                    settings.autoSpeakAIResponses
-                      ? 'Voice Reader is ON: automatically reads AI replies aloud'
-                      : 'Voice Reader is OFF: displays text silently'
-                  }
-                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl border text-[11px] font-semibold transition-all cursor-pointer ${
-                    settings.autoSpeakAIResponses
-                      ? 'bg-emerald-500/20 border-emerald-400/45 text-emerald-200 hover:bg-emerald-500/30'
-                      : 'bg-[#120d26]/85 border-purple-400/25 text-purple-200/80 hover:text-white hover:border-purple-400/45'
-                  }`}
-                >
-                  {settings.autoSpeakAIResponses ? (
-                    <Volume2 className="w-3.5 h-3.5 text-emerald-300 shrink-0" />
-                  ) : (
-                    <VolumeX className="w-3.5 h-3.5 text-purple-300/75 shrink-0" />
-                  )}
-                  <span>Voice Reader: {settings.autoSpeakAIResponses ? 'ON' : 'OFF'}</span>
-                </button>
-
-                {playbackState.isSpeaking && (
+            {memoryActionNotice && (
+              <div
+                role="status"
+                aria-label="Power Memory Notification"
+                className="rounded-2xl glass-card border border-purple-400/40 bg-purple-950/60 px-3.5 py-2 text-xs flex items-center justify-between gap-2.5 shadow-md"
+              >
+                <div className="flex items-center gap-2 min-w-0 text-purple-100">
+                  <Brain className="w-4 h-4 text-purple-300 shrink-0" />
+                  <span className="leading-snug truncate">{memoryActionNotice}</span>
+                </div>
+                {onDismissMemoryNotice && (
                   <button
                     type="button"
-                    onClick={() => {
-                      voiceAssistant.stopSpeaking();
-                      setSpeakingId(null);
-                    }}
-                    className="inline-flex items-center gap-1 px-2 py-1 rounded-xl bg-rose-600/85 hover:bg-rose-500 border border-rose-400/50 text-white text-[10px] font-bold cursor-pointer transition-colors"
-                    title="Stop voice playback now"
+                    onClick={onDismissMemoryNotice}
+                    aria-label="Dismiss memory notice"
+                    className="p-1 rounded-lg text-purple-300/80 hover:text-white hover:bg-white/10 cursor-pointer shrink-0"
                   >
-                    <Square className="w-2.5 h-2.5 fill-white" />
-                    <span>Stop Audio</span>
+                    <X className="w-3.5 h-3.5" />
                   </button>
                 )}
               </div>
+            )}
 
-              {micPermissionState === 'denied' && (
+            {pendingMemoryProposal && onConfirmMemoryProposal && onDismissMemoryProposal && (
+              <div
+                role="region"
+                aria-label="Sensitive Power Memory Permission"
+                className="rounded-2xl glass-card border border-violet-400/45 bg-gradient-to-r from-purple-950/80 via-[#1a103a]/90 to-indigo-950/80 px-3.5 py-3 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-lg"
+              >
+                <div className="flex items-start gap-2.5 min-w-0 text-purple-100">
+                  <Brain className="w-4 h-4 text-violet-300 shrink-0 mt-0.5" />
+                  <div className="space-y-0.5 min-w-0">
+                    <div className="font-bold text-white flex flex-wrap items-center gap-1.5">
+                      <span>
+                        {pendingMemoryProposal.isSensitive
+                          ? 'Save personal/sensitive memory?'
+                          : 'Save to Power Memory?'}
+                      </span>
+                      <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded-full bg-purple-500/25 border border-purple-400/35 text-purple-200">
+                        {pendingMemoryProposal.category}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-purple-200/85 break-words">
+                      “{pendingMemoryProposal.content}”
+                    </p>
+                    {pendingMemoryProposal.reason && (
+                      <p className="text-[10px] text-purple-200/65">{pendingMemoryProposal.reason}</p>
+                    )}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
+                  <button
+                    type="button"
+                    onClick={onConfirmMemoryProposal}
+                    className="px-3 py-1.5 rounded-xl electric-purple-btn text-white text-[11px] font-bold cursor-pointer"
+                  >
+                    Save to Power Memory
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onDismissMemoryProposal}
+                    className="px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white/15 border border-white/15 text-purple-200 text-[11px] font-semibold cursor-pointer"
+                  >
+                    Don&apos;t Save
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {micPermissionState === 'denied' && (
+              <div className="flex items-center justify-end px-1">
                 <span className="text-[10px] text-amber-300 font-medium truncate">
                   Mic blocked in browser
                 </span>
-              )}
-            </div>
+              </div>
+            )}
 
             {/* Attached context chip (photo, file, video, or geotag) */}
             {(selectedImage || selectedFile || selectedVideo || attachedLocation) && (
@@ -4282,94 +4705,118 @@ export const ChatView: React.FC<ChatViewProps> = ({
       </div>
 
       {/* Geotag / Location Sharing Modal */}
-      <GeotagPickerModal
-        isOpen={showGeotagModal}
-        onClose={() => setShowGeotagModal(false)}
-        onSelectLocation={(loc) => setAttachedLocation(loc)}
-        currentSelected={attachedLocation}
-      />
+      {showGeotagModal && (
+        <Suspense fallback={null}>
+          <GeotagPickerModal
+            isOpen={showGeotagModal}
+            onClose={() => setShowGeotagModal(false)}
+            onSelectLocation={(loc) => setAttachedLocation(loc)}
+            currentSelected={attachedLocation}
+          />
+        </Suspense>
+      )}
 
       {/* Camera & Document Scanner Modal */}
-      <CameraScannerModal
-        isOpen={cameraModalMode !== null}
-        mode={cameraModalMode || 'camera'}
-        onClose={() => setCameraModalMode(null)}
-        onCapture={(dataUrl, mimeType, isScanner) => {
-          setSelectedImage({ base64: dataUrl, mimeType });
-          if (isScanner && !inputText.trim()) {
-            setInputText('Scan, extract all text cleanly (OCR), and summarize this document.');
-          }
-          window.setTimeout(() => textareaRef.current?.focus(), 40);
-        }}
-      />
+      {cameraModalMode !== null && (
+        <Suspense fallback={null}>
+          <CameraScannerModal
+            isOpen={cameraModalMode !== null}
+            mode={cameraModalMode || 'camera'}
+            onClose={() => setCameraModalMode(null)}
+            onCapture={(dataUrl, mimeType, isScanner) => {
+              setSelectedImage({ base64: dataUrl, mimeType });
+              if (isScanner && !inputText.trim()) {
+                setInputText('Scan, extract all text cleanly (OCR), and summarize this document.');
+              }
+              window.setTimeout(() => textareaRef.current?.focus(), 40);
+            }}
+          />
+        </Suspense>
+      )}
 
       {/* Inline Tool Overlays for MORE & Attachments (Image Gen, Gallery, World Time, Voice Studio, Translation, Writing/Email/Grammar/Summarizer/Extra AI Tools) */}
-      <ChatToolOverlay
-        activeTool={activePlusTool}
-        onClose={() => setActivePlusTool(null)}
-        user={user}
-        settings={settings}
-        isOnline={isOnline}
-        onUpdateSettings={(patch) => onUpdateSettings?.(patch)}
-        onSendVoiceMessage={async ({ text, isVoice, targetLanguage }) => {
-          await onSendMessage({ text, isVoice, targetLanguage });
-          return {};
-        }}
-        onSendToolResultToChat={(text) => {
-          setInputText(text);
-          window.setTimeout(() => textareaRef.current?.focus(), 30);
-        }}
-        onOpenScanner={() => setCameraModalMode('scanner')}
-        onAskAboutCountry={(countryName, city, formattedTime) => {
-          void onSendMessage({
-            text: `Tell me about ${countryName} (${city}), where the current live local time is ${formattedTime}.`,
-            targetLanguage: currentSession.targetLanguage || settings.defaultTargetLanguage,
-          }).catch((err: any) => {
-            setChatError(err?.message || 'Unable to send message right now.');
-          });
-        }}
-        onImageGenerated={onImageGenerated}
-        onRecordTranslationMetric={onRecordTranslationMetric}
-        mediaItems={mediaItems}
-        onAddMedia={(m) => onAddMedia?.(m)}
-        onDeleteMedia={(id) => onDeleteMedia?.(id)}
-        onPickDevicePhoto={(file) => processPhotoFile(file)}
-        selectedImage={selectedImage}
-        selectedFile={selectedFile}
-        selectedVideo={selectedVideo}
-        attachedLocation={attachedLocation}
-        onClearImage={() => setSelectedImage(null)}
-        onClearFile={() => setSelectedFile(null)}
-        onClearVideo={() => setSelectedVideo(null)}
-        onClearLocation={() => setAttachedLocation(undefined)}
-        onOpenTransfer={onOpenTransfer}
-      />
+      {activePlusTool !== null && (
+        <Suspense fallback={null}>
+          <ChatToolOverlay
+            activeTool={activePlusTool}
+            onClose={() => setActivePlusTool(null)}
+            user={user}
+            settings={settings}
+            isOnline={isOnline}
+            onUpdateSettings={(patch) => onUpdateSettings?.(patch)}
+            onSendVoiceMessage={async ({ text, isVoice, targetLanguage }) => {
+              const res = await onSendMessage({ text, isVoice, targetLanguage, handledByVoiceView: true });
+              return res || {};
+            }}
+            onSendToolResultToChat={(text) => {
+              setInputText(text);
+              window.setTimeout(() => textareaRef.current?.focus(), 30);
+            }}
+            onOpenScanner={() => setCameraModalMode('scanner')}
+            onAskAboutCountry={(countryName, city, formattedTime) => {
+              void onSendMessage({
+                text: `Tell me about ${countryName} (${city}), where the current live local time is ${formattedTime}.`,
+                targetLanguage: currentSession.targetLanguage || settings.defaultTargetLanguage,
+              }).catch((err: any) => {
+                setChatError(err?.message || 'Unable to send message right now.');
+              });
+            }}
+            onImageGenerated={onImageGenerated}
+            onRecordTranslationMetric={onRecordTranslationMetric}
+            mediaItems={mediaItems}
+            onAddMedia={(m) => onAddMedia?.(m)}
+            onDeleteMedia={(id) => onDeleteMedia?.(id)}
+            onPickDevicePhoto={(file) => processPhotoFile(file)}
+            selectedImage={selectedImage}
+            selectedFile={selectedFile}
+            selectedVideo={selectedVideo}
+            attachedLocation={attachedLocation}
+            onClearImage={() => setSelectedImage(null)}
+            onClearFile={() => setSelectedFile(null)}
+            onClearVideo={() => setSelectedVideo(null)}
+            onClearLocation={() => setAttachedLocation(undefined)}
+            onOpenTransfer={onOpenTransfer}
+          />
+        </Suspense>
+      )}
 
       {/* AI Document Assistant Modal */}
-      <DocumentAssistantModal
-        isOpen={showDocAssistant}
-        onClose={() => setShowDocAssistant(false)}
-        onAttachToChat={(name, content) => {
-          setSelectedFile({ name, content });
-          setExportToast(`Attached "${name}" to chat input`);
-          setTimeout(() => setExportToast(null), 2500);
-        }}
-        settings={settings}
-        isOnline={isOnline}
-      />
+      {showDocAssistant && (
+        <Suspense fallback={null}>
+          <DocumentAssistantModal
+            isOpen={showDocAssistant}
+            onClose={() => setShowDocAssistant(false)}
+            onAttachToChat={(name, content) => {
+              setSelectedFile({ name, content });
+              setExportToast(`Attached "${name}" to chat input`);
+              setTimeout(() => setExportToast(null), 2500);
+            }}
+            settings={settings}
+            isOnline={isOnline}
+          />
+        </Suspense>
+      )}
 
       {/* Export & Backup Modal */}
-      <ExportModal
-        isOpen={isExportModalOpen}
-        onClose={() => setIsExportModalOpen(false)}
-        session={currentSession}
-      />
+      {isExportModalOpen && (
+        <Suspense fallback={null}>
+          <ExportModal
+            isOpen={isExportModalOpen}
+            onClose={() => setIsExportModalOpen(false)}
+            session={currentSession}
+          />
+        </Suspense>
+      )}
 
       {/* Full-Screen Image Lightbox Overlay */}
-      <ImageLightbox
-        image={lightboxImage}
-        onClose={() => setLightboxImage(null)}
-      />
+      {lightboxImage && (
+        <Suspense fallback={null}>
+          <ImageLightbox
+            image={lightboxImage}
+            onClose={() => setLightboxImage(null)}
+          />
+        </Suspense>
+      )}
 
       {/* Quick Context Long-Press Floating Menu (AI Messages) */}
       {quickContextMenu && (
@@ -4459,10 +4906,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
             aria-modal="true"
             aria-label="Gemini Message Summary"
             onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-lg glass-card rounded-3xl border border-purple-400/50 shadow-2xl overflow-hidden flex flex-col max-h-[85vh]"
+            className="w-full max-w-lg glass-card rounded-3xl border border-purple-400/50 shadow-2xl overflow-hidden flex flex-col max-h-[85dvh]"
           >
             {/* Header */}
-            <div className="px-5 py-4 border-b border-white/10 bg-[#0b0d17]/90 flex items-center justify-between gap-3">
+            <div className="px-5 py-4 border-b border-white/10 bg-[#0b0d17]/90 flex items-center justify-between gap-3 shrink-0">
               <div className="flex items-center gap-2.5">
                 <div className="w-8 h-8 rounded-xl bg-emerald-500/20 border border-emerald-400/40 flex items-center justify-center text-emerald-300">
                   <Sparkles className="w-4 h-4" />
@@ -4494,7 +4941,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
             </div>
 
             {/* Body */}
-            <div className="p-5 overflow-y-auto space-y-4">
+            <div className="p-5 flex-1 min-h-0 overflow-y-auto scroll-pane space-y-4">
               {messageSummary.isLoading ? (
                 <div className="py-8 flex flex-col items-center justify-center gap-3 text-center">
                   <div className="w-8 h-8 border-2 border-emerald-400 border-t-transparent rounded-full animate-spin" />

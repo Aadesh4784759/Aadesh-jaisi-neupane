@@ -47,17 +47,18 @@ function mapRecognitionError(errorCode: string): string {
   }
 }
 
-function cleanTextForSpeech(text: string): string {
+export function cleanTextForSpeech(text: string): string {
   return text
-    .replace(/```[\s\S]*?```/g, ' Code block omitted. ')
+    .replace(/```[\s\S]*?```/g, ' Code snippet omitted. ')
     .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
     .replace(/`([^`]+)`/g, '$1')
     .replace(/[*#_~>\[\]]/g, '')
+    .replace(/[•\-\+]\s+/g, '')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
-function splitIntoSpeechChunks(text: string, maxLength: number = 175): string[] {
+export function splitIntoSpeechChunks(text: string, maxLength: number = 175): string[] {
   if (text.length <= maxLength) return [text];
 
   const sentences = text.match(/[^.!?।\n]+[.!?।\n]*/g) || [text];
@@ -94,6 +95,33 @@ function splitIntoSpeechChunks(text: string, maxLength: number = 175): string[] 
   if (current) chunks.push(current);
   return chunks.length > 0 ? chunks : [text];
 }
+
+export function resolveSpeechCodeForText(text: string, preferredLangCode?: string): string {
+  const clean = String(text || '').trim();
+  if (preferredLangCode) {
+    const code = preferredLangCode.toLowerCase();
+    if (code === 'ne' || code === 'nep' || code === 'ne-np') return 'ne-NP';
+    if (code === 'hi' || code === 'hin' || code === 'hi-in') return 'hi-IN';
+    if (code === 'ar' || code === 'ar-sa') return 'ar-SA';
+    if (code === 'zh' || code === 'zh-cn') return 'zh-CN';
+    if (code === 'ja' || code === 'ja-jp') return 'ja-JP';
+    if (code === 'ko' || code === 'ko-kr') return 'ko-KR';
+    if (code === 'es' || code === 'es-es') return 'es-ES';
+    if (code === 'fr' || code === 'fr-fr') return 'fr-FR';
+    if (code === 'de' || code === 'de-de') return 'de-DE';
+    if (code.includes('-')) return preferredLangCode;
+  }
+  // Detect scripts
+  if (/[\u0900-\u097F]/.test(clean)) {
+    return 'ne-NP';
+  }
+  if (/[\u0600-\u06FF]/.test(clean)) return 'ar-SA';
+  if (/[\u4E00-\u9FFF]/.test(clean)) return 'zh-CN';
+  if (/[\u3040-\u30FF]/.test(clean)) return 'ja-JP';
+  if (/[\uAC00-\uD7AF]/.test(clean)) return 'ko-KR';
+  return 'en-US';
+}
+
 
 export class VoiceAssistant {
   private recognition: any = null;
@@ -404,6 +432,9 @@ export class VoiceAssistant {
     };
 
     window.speechSynthesis.speak(utterance);
+    if (window.speechSynthesis.paused) {
+      window.speechSynthesis.resume();
+    }
   }
 
   // Text to Speech (chunked for desktop & Android Chrome reliability)
@@ -422,7 +453,12 @@ export class VoiceAssistant {
     try {
       this.speechToken += 1;
       const token = this.speechToken;
-      window.speechSynthesis.cancel();
+      if (window.speechSynthesis.speaking || window.speechSynthesis.pending || window.speechSynthesis.paused) {
+        window.speechSynthesis.cancel();
+      }
+      if (window.speechSynthesis.paused) {
+        window.speechSynthesis.resume();
+      }
 
       const cleanText = cleanTextForSpeech(text);
       if (!cleanText) {

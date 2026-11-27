@@ -1,3 +1,5 @@
+import { AIProviderId, AIProviderStatusInfo, ConnectionHistoryEntry } from '../utils/aiProviders';
+
 export interface LocationData {
   name: string;
   lat: number;
@@ -37,6 +39,7 @@ export interface ChatMessage {
   editedAt?: number;
   sources?: GroundingSource[];
   modelUsed?: string;
+  provider?: AIProviderId;
   latencyMs?: number;
 }
 
@@ -114,12 +117,17 @@ export interface VoicePersonaInfo {
   sampleAudioText: string;
 }
 
-export type AIConnectionState = 'connected' | 'connecting' | 'offline' | 'error';
+export type AIConnectionState = 'connected' | 'configured' | 'connecting' | 'offline' | 'error';
 
 export interface AIConnectionHealth {
   state: AIConnectionState;
   backendConnected: boolean;
   geminiConnected: boolean;
+  activeProvider?: AIProviderId;
+  activeProviderConfigured?: boolean;
+  activeProviderVerified?: boolean;
+  providers?: Partial<Record<AIProviderId, AIProviderStatusInfo>>;
+  connectionHistory?: ConnectionHistoryEntry[];
   model: string;
   checkedAt: number | null;
   lastConnectedAt: number | null;
@@ -142,6 +150,7 @@ export interface DailyStreakDay {
   dayLabel: string; // Mon, Tue, etc.
   completed: boolean;
   activityCount: number;
+  status?: 'maintained' | 'missed' | 'recovered';
 }
 
 export interface UserProfile {
@@ -174,8 +183,10 @@ export interface UserProfile {
   streakDays: number;
   currentStreak?: number;
   longestStreak: number;
+  streakGoalDays?: number;
   recoveryCount?: number;
   recoveryMonth?: string; // YYYY-MM in user's IANA timezone
+  recoveredDates?: string[]; // YYYY-MM-DD dates restored via streak recovery
   streakBeforeBreak?: number;
   streakBrokenDate?: string; // YYYY-MM-DD of lastActiveDate before break
   xp: number;
@@ -264,8 +275,12 @@ export interface LoginActivityEntry {
 export interface AppSettings {
   uiLanguage: string;
   defaultTargetLanguage: string;
+  aiResponseLanguage?: string;
+  autoDetectInputLanguage?: boolean;
+  translationEnabled?: boolean;
+  translationLanguage?: string;
   autoSpeakAIResponses: boolean;
-  voiceSpeed: number; // 0.8 - 1.5
+  voiceSpeed: number; // 0.5 - 2.0
   voicePitch: number; // 0.8 - 1.2
   voiceVolume: number; // 0.0 - 1.0
   voiceSensitivity?: number; // 0 - 100 dB threshold
@@ -274,18 +289,21 @@ export interface AppSettings {
   theme?: 'dark' | 'light';
   colorTheme?: 'dark-galaxy' | 'pure-light' | 'purple-galaxy' | 'ocean-blue' | 'emerald-green' | 'sunset-orange' | 'cyber-neon';
   dynamicAvatarTheme?: boolean;
-  customGeminiApiKey?: string;
-  geminiModel?: string;
+  aiProvider?: AIProviderId;
+  aiModel?: string;
+  openRouterModel?: string;
   fontSize: 'normal' | 'large' | 'xlarge';
   handsFreeMode: boolean;
   offlineModeForce: boolean;
   screenReaderAnnounce: boolean;
   streamingResponses?: boolean;
   aiMemoryEnabled?: boolean;
+  smartMemoryAutoSave?: boolean;
   memoryConsent?: 'pending' | 'agreed' | 'disagreed';
   notificationsEnabled?: boolean;
   soundEffects?: boolean;
   streakReminders?: boolean;
+  streakReminderTime?: string; // HH:mm 24-hour preferred push reminder time
   emailUpdatesEnabled?: boolean;
   privateAccount?: boolean;
   aiResponseMode?: 'fast' | 'balanced' | 'detailed';
@@ -293,9 +311,19 @@ export interface AppSettings {
   chatAppearance?: 'spacious' | 'compact';
   reducedAnimations?: boolean;
   biometricLockEnabled?: boolean;
+  analyticsConsent?: boolean;
 }
 
-export type MemoryCategory = 'preference' | 'instruction' | 'fact' | 'goal';
+export type MemoryCategory =
+  | 'identity'
+  | 'preference'
+  | 'goal'
+  | 'project'
+  | 'interest'
+  | 'comedy'
+  | 'instruction'
+  | 'fact'
+  | 'conversation';
 
 export interface AIMemoryItem {
   id: string;
@@ -303,6 +331,9 @@ export interface AIMemoryItem {
   category: MemoryCategory;
   content: string;
   approved: boolean;
+  source?: 'manual' | 'smart_auto' | 'command' | 'chat';
+  isSensitive?: boolean;
+  keywords?: string[];
   createdAt: number;
   updatedAt: number;
 }
@@ -492,5 +523,41 @@ export interface GeneratedImageItem {
   createdAt: number;
   latencyMs?: number;
 }
+
+export type SuggestionCategory =
+  | 'deep_dive'
+  | 'examples'
+  | 'summary'
+  | 'translate'
+  | 'action_steps'
+  | 'compare'
+  | 'explore_local'
+  | 'visual'
+  | 'general';
+
+export interface SuggestionAnalyticsItem {
+  id: string;
+  normalizedKey: string;
+  sampleText: string;
+  category: SuggestionCategory;
+  language?: string;
+  clickCount: number;
+  lastClickedAt: number;
+  createdAt: number;
+}
+
+export interface PreferredSuggestionPatterns {
+  topClickedSuggestions: Array<{
+    text: string;
+    category: SuggestionCategory;
+    clickCount: number;
+  }>;
+  topCategories: Array<{
+    category: SuggestionCategory;
+    totalClicks: number;
+  }>;
+  totalClicks: number;
+}
+
 
 

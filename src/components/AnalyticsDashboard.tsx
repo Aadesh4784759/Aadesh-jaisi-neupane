@@ -204,8 +204,12 @@ ${trimmed}`;
     try {
       const headers = await getAuthHeaders({
         'Content-Type': 'application/json',
-        ...(settings?.customGeminiApiKey ? { 'x-gemini-api-key': settings.customGeminiApiKey } : {}),
       });
+      const activeProvider = settings?.aiProvider || 'gemini';
+      const activeModel =
+        activeProvider === 'openrouter'
+          ? settings?.openRouterModel || settings?.aiModel
+          : settings?.aiModel;
 
       const res = await fetch('/api/chat', {
         method: 'POST',
@@ -215,7 +219,8 @@ ${trimmed}`;
           targetLanguage: settings?.defaultTargetLanguage || 'en',
           userLanguage: settings?.uiLanguage || 'en',
           responseMode: 'detailed',
-          customApiKey: settings?.customGeminiApiKey,
+          aiProvider: activeProvider,
+          aiModel: activeModel,
         }),
       });
 

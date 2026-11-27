@@ -100,7 +100,7 @@ const VOICE_TOOLS: Array<{
   },
 ];
 
-const GEMINI_AI_VOICES = [
+const NEURAL_AI_VOICES = [
   { id: 'Kore', label: 'Kore — Clear & Balanced' },
   { id: 'Puck', label: 'Puck — Warm & Expressive' },
   { id: 'Charon', label: 'Charon — Deep & Authoritative' },
@@ -309,8 +309,12 @@ export const VoicePage: React.FC<VoicePageProps> = ({
         }
         const headers = await getAuthHeaders({
           'Content-Type': 'application/json',
-          ...(settings.customGeminiApiKey ? { 'x-gemini-api-key': settings.customGeminiApiKey } : {}),
         });
+        const activeProvider = settings.aiProvider || 'gemini';
+        const activeModel =
+          activeProvider === 'openrouter'
+            ? settings.openRouterModel || settings.aiModel
+            : settings.aiModel;
         const res = await fetch('/api/translate', {
           method: 'POST',
           headers,
@@ -318,7 +322,8 @@ export const VoicePage: React.FC<VoicePageProps> = ({
             text: clean,
             sourceLang,
             targetLang,
-            customApiKey: settings.customGeminiApiKey,
+            aiProvider: activeProvider,
+            aiModel: activeModel,
           }),
         });
         const data = await res.json().catch(() => ({}));
@@ -361,7 +366,14 @@ export const VoicePage: React.FC<VoicePageProps> = ({
       };
       setTurns((prev) => [...prev, aiTurn]);
 
-      if (settings.autoSpeakAIResponses) {
+      // Voice responses speak immediately by default in assistant, voice-chat, and translator modes
+      const shouldSpeakReply =
+        settings.autoSpeakAIResponses !== false ||
+        activeToolRef.current === 'assistant' ||
+        activeToolRef.current === 'voice-chat' ||
+        activeToolRef.current === 'translator';
+
+      if (shouldSpeakReply) {
         speakTextWithConfig(spokenReply, replyLangObj.speechCode, () => {
           if (
             activeToolRef.current === 'voice-chat' &&
@@ -372,7 +384,7 @@ export const VoicePage: React.FC<VoicePageProps> = ({
               if (activeToolRef.current === 'voice-chat' && sessionActiveRef.current) {
                 void beginListening();
               }
-            }, 350);
+            }, 300);
           }
         });
       } else if (
@@ -407,7 +419,7 @@ export const VoicePage: React.FC<VoicePageProps> = ({
     }
 
     if (!speechRecSupported) {
-      setErrorMsg('Live browser SpeechRecognition is unavailable; use "Record Audio (Gemini Transcribe)" below.');
+      setErrorMsg('Live browser SpeechRecognition is unavailable; use "Record Audio" below.');
       sessionActiveRef.current = false;
       return;
     }
@@ -514,7 +526,6 @@ export const VoicePage: React.FC<VoicePageProps> = ({
           try {
             const headers = await getAuthHeaders({
               'Content-Type': 'application/json',
-              ...(settings.customGeminiApiKey ? { 'x-gemini-api-key': settings.customGeminiApiKey } : {}),
             });
             const res = await fetch('/api/voice/transcribe', {
               method: 'POST',
@@ -523,7 +534,6 @@ export const VoicePage: React.FC<VoicePageProps> = ({
                 audioData: base64Audio,
                 mimeType: blob.type || 'audio/webm',
                 languageHint: sourceLang,
-                customApiKey: settings.customGeminiApiKey,
               }),
             });
             const data = await res.json().catch(() => ({}));
@@ -574,7 +584,6 @@ export const VoicePage: React.FC<VoicePageProps> = ({
     try {
       const headers = await getAuthHeaders({
         'Content-Type': 'application/json',
-        ...(settings.customGeminiApiKey ? { 'x-gemini-api-key': settings.customGeminiApiKey } : {}),
       });
       const res = await fetch('/api/voice/tts', {
         method: 'POST',
@@ -584,7 +593,6 @@ export const VoicePage: React.FC<VoicePageProps> = ({
           voiceName: geminiVoice,
           style: voiceStyle,
           languageName: sourceLangObj.name,
-          customApiKey: settings.customGeminiApiKey,
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -796,13 +804,13 @@ export const VoicePage: React.FC<VoicePageProps> = ({
 
           {activeTool === 'generator' ? (
             <div className="space-y-1">
-              <label className="text-[11px] font-bold text-purple-200">Gemini AI Voice</label>
+              <label className="text-[11px] font-bold text-purple-200">Neural AI Voice</label>
               <select
                 value={geminiVoice}
                 onChange={(e) => setGeminiVoice(e.target.value)}
                 className="w-full min-h-[42px] px-3 py-2 rounded-xl bg-[#0c081a] border border-purple-400/30 text-xs text-white outline-none"
               >
-                {GEMINI_AI_VOICES.map((v) => (
+                {NEURAL_AI_VOICES.map((v) => (
                   <option key={v.id} value={v.id}>
                     {v.label}
                   </option>
@@ -1021,10 +1029,10 @@ export const VoicePage: React.FC<VoicePageProps> = ({
                       ? 'bg-rose-600/80 border-rose-400 text-white'
                       : 'bg-purple-950/60 hover:bg-purple-900/70 border-purple-400/35 text-purple-100'
                   }`}
-                  title="Record microphone audio and transcribe using Gemini Audio"
+                  title="Record microphone audio and transcribe"
                 >
                   <FileAudio className="w-3.5 h-3.5" />
-                  <span>{isRecordingAudio ? 'Stop & Transcribe' : 'Record Audio (Gemini)'}</span>
+                  <span>{isRecordingAudio ? 'Stop & Transcribe' : 'Record Audio'}</span>
                 </button>
               </>
             )}

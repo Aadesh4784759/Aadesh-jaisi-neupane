@@ -169,82 +169,159 @@ export async function detectCountryApproxViaIP(): Promise<CountryOption | null> 
   }
 }
 
+export function isoCodeToFlagEmoji(isoCode?: string): string {
+  const code = (isoCode || '').trim().toUpperCase();
+  if (!/^[A-Z]{2}$/.test(code) || code === 'GL' || code === 'XX' || code === 'T1') {
+    return '🌐';
+  }
+  try {
+    return String.fromCodePoint(...[...code].map((c) => 0x1f1e6 + c.charCodeAt(0) - 65));
+  } catch {
+    return '🌐';
+  }
+}
+
+export function buildCountryOptionFromIso(code?: string, countryName?: string): CountryOption | null {
+  const matched = findCountryOption(code, countryName);
+  if (matched) return matched;
+  const upperCode = (code || '').trim().toUpperCase();
+  const cleanName = (countryName || '').trim();
+  if (/^[A-Z]{2}$/.test(upperCode) && upperCode !== 'GL' && upperCode !== 'XX' && upperCode !== 'T1') {
+    let displayName = cleanName;
+    if (!displayName && typeof Intl !== 'undefined' && typeof (Intl as any).DisplayNames === 'function') {
+      try {
+        displayName = new (Intl as any).DisplayNames(['en'], { type: 'region' }).of(upperCode) || upperCode;
+      } catch {
+        displayName = upperCode;
+      }
+    }
+    return {
+      code: upperCode,
+      country: displayName || upperCode,
+      flag: isoCodeToFlagEmoji(upperCode),
+      timeZone: getBrowserTimezone(),
+    };
+  }
+  return null;
+}
+
 export interface GpsCountryDetectionResult {
   option: CountryOption | null;
-  source?: 'gps' | 'ip-approximate' | 'timezone';
+  source?: 'gps';
+  provider?: string;
+  errorCode?: 'insecure_context' | 'unsupported' | 'permission_denied' | 'position_unavailable' | 'timeout' | 'reverse_geocode_failed' | 'network_error';
   error?: string;
+}
+
+export async function reverseGeocodeCountryFromCoords(
+  lat: number,
+  lng: number,
+  fetchImpl: typeof fetch = fetch
+): Promise<{ option: CountryOption | null; provider?: string; errorCode?: GpsCountryDetectionResult['errorCode']; error?: string }> {
+  try {
+    const geoRes = await fetchImpl(
+      `/api/geo/reverse-country?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}`,
+      { cache: 'no-store' }
+    );
+    if (!geoRes.ok) {
+      return {
+        option: null,
+        errorCode: 'reverse_geocode_failed',
+        error: `Reverse geocoding failed (HTTP ${geoRes.status}). Please select your country manually below.`,
+      };
+    }
+    const geoData = await geoRes.json();
+    if (!geoData?.ok) {
+      return {
+        option: null,
+        errorCode: 'reverse_geocode_failed',
+        error: geoData?.error || 'Could not determine your country from GPS coordinates. Please choose manually.',
+      };
+    }
+    const option = buildCountryOptionFromIso(geoData.code, geoData.country);
+    if (!option) {
+      return {
+        option: null,
+        errorCode: 'reverse_geocode_failed',
+        error: 'GPS returned an unrecognized country code. Please select your country manually below.',
+      };
+    }
+    return {
+      option,
+      provider: typeof geoData.source === 'string' ? geoData.source : 'gps-reverse-geocode',
+    };
+  } catch {
+    return {
+      option: null,
+      errorCode: 'network_error',
+      error: 'Network error while resolving GPS country. Check your connection or select your country manually.',
+    };
+  }
 }
 
 export async function detectCountryViaGPSDetailed(): Promise<GpsCountryDetectionResult> {
   if (typeof window !== 'undefined' && !window.isSecureContext) {
     return {
       option: null,
+      errorCode: 'insecure_context',
       error: 'GPS detection requires a secure HTTPS connection. Please select your country manually below.',
     };
   }
 
   if (typeof navigator === 'undefined' || !navigator.geolocation) {
-    const ipApprox = await detectCountryApproxViaIP();
-    if (ipApprox) {
-      return { option: ipApprox, source: 'ip-approximate' };
-    }
     return {
       option: null,
-      error: 'GPS geolocation is not supported in this browser. Please select your country manually.',
+      errorCode: 'unsupported',
+      error: 'GPS geolocation is not supported in this browser. Please select your country manually below.',
     };
   }
 
   return new Promise((resolve) => {
     navigator.geolocation.getCurrentPosition(
       async (pos) => {
-        try {
-          const lat = pos.coords.latitude;
-          const lng = pos.coords.longitude;
-          const geoRes = await fetch(
-            `/api/geo/reverse-country?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}`,
-            { cache: 'no-store' }
-          );
-          if (geoRes.ok) {
-            const geoData = await geoRes.json();
-            const matched = findCountryOption(geoData.code, geoData.country);
-            if (matched) {
-              resolve({ option: matched, source: 'gps' });
-              return;
-            }
-          }
-        } catch {
-          // Fall through to approximate/timezone match
-        }
-        const auto = detectUserCountry();
-        const found = COUNTRY_OPTIONS.find((c) => c.country === auto.country || c.code === auto.code) || null;
-        resolve({
-          option: found,
-          source: found ? 'timezone' : undefined,
-          error: found ? undefined : 'Could not map GPS coordinates to a country. Please choose manually.',
-        });
-      },
-      async (err) => {
-        if (err.code === err.PERMISSION_DENIED) {
+        const lat = pos.coords.latitude;
+        const lng = pos.coords.longitude;
+        const reverseResult = await reverseGeocodeCountryFromCoords(lat, lng);
+        if (reverseResult.option) {
           resolve({
-            option: null,
-            error: 'Location permission denied. You can select your country manually from the searchable list below.',
+            option: reverseResult.option,
+            source: 'gps',
+            provider: reverseResult.provider,
           });
-          return;
-        }
-        const ipApprox = await detectCountryApproxViaIP();
-        if (ipApprox) {
-          resolve({ option: ipApprox, source: 'ip-approximate' });
           return;
         }
         resolve({
           option: null,
+          errorCode: reverseResult.errorCode || 'reverse_geocode_failed',
           error:
-            err.code === err.TIMEOUT
-              ? 'GPS request timed out. Please select your country manually.'
-              : 'Location unavailable right now. Please select your country manually.',
+            reverseResult.error ||
+            'Could not determine your country from GPS coordinates. Please select your country manually.',
         });
       },
-      { timeout: 9000, maximumAge: 60000, enableHighAccuracy: false }
+      (err) => {
+        if (err.code === err.PERMISSION_DENIED) {
+          resolve({
+            option: null,
+            errorCode: 'permission_denied',
+            error: 'Location permission denied. Please select your country manually from the list below.',
+          });
+          return;
+        }
+        if (err.code === err.TIMEOUT) {
+          resolve({
+            option: null,
+            errorCode: 'timeout',
+            error: 'GPS request timed out. Please try again or select your country manually.',
+          });
+          return;
+        }
+        resolve({
+          option: null,
+          errorCode: 'position_unavailable',
+          error: 'GPS location is currently unavailable. Please select your country manually.',
+        });
+      },
+      { timeout: 10000, maximumAge: 60000, enableHighAccuracy: false }
     );
   });
 }

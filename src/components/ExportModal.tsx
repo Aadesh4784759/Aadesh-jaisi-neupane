@@ -222,9 +222,9 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, sessi
 
   return (
     <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-3 sm:p-5 animate-in fade-in duration-200">
-      <div className="glass-card rounded-3xl max-w-2xl w-full border border-purple-500/50 shadow-2xl relative flex flex-col max-h-[92vh] overflow-hidden">
+      <div className="glass-card rounded-3xl max-w-2xl w-full border border-purple-500/50 shadow-2xl relative flex flex-col max-h-[92vh] max-h-[92dvh] overflow-hidden">
         {/* Modal Header */}
-        <div className="p-4 sm:p-6 border-b border-white/10 flex items-center justify-between">
+        <div className="p-4 sm:p-6 border-b border-white/10 flex items-center justify-between shrink-0">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-2xl purple-glow-btn flex items-center justify-center text-white font-bold shadow-md">
               <Download className="w-5 h-5" />
@@ -250,7 +250,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, sessi
         </div>
 
         {/* Modal Body */}
-        <div className="p-4 sm:p-6 space-y-5 overflow-y-auto flex-grow">
+        <div className="p-4 sm:p-6 space-y-5 flex-1 min-h-0 overflow-y-auto scroll-pane">
           {/* Format Selection Cards */}
           <div className="space-y-2">
             <label className="text-xs font-bold text-gray-300 uppercase tracking-wider block">

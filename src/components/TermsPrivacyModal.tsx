@@ -29,11 +29,11 @@ export const TermsPrivacyModal: React.FC<TermsPrivacyModalProps> = ({
       aria-label="Aadesh AI Terms of Service and Privacy Policy"
     >
       <div
-        className="glass-card rounded-3xl max-w-2xl w-full border border-purple-500/40 shadow-2xl relative flex flex-col max-h-[90vh] overflow-hidden bg-[#0d091e]/95"
+        className="glass-card rounded-3xl max-w-2xl w-full border border-purple-500/40 shadow-2xl relative flex flex-col max-h-[90vh] max-h-[90dvh] overflow-hidden bg-[#0d091e]/95"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Top Header */}
-        <div className="p-4 sm:p-5 border-b border-white/10 flex items-center justify-between gap-3">
+        <div className="p-4 sm:p-5 border-b border-white/10 flex items-center justify-between gap-3 shrink-0">
           <div className="flex items-center gap-3 min-w-0">
             <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-purple-600 to-indigo-600 flex items-center justify-center text-white shadow-lg shrink-0">
               <ShieldCheck className="w-5 h-5 text-white" />
@@ -58,7 +58,7 @@ export const TermsPrivacyModal: React.FC<TermsPrivacyModalProps> = ({
         </div>
 
         {/* Tab Switcher */}
-        <div className="px-4 sm:px-5 pt-3 pb-1 border-b border-white/10 bg-[#090614]/80 flex gap-2">
+        <div className="px-4 sm:px-5 pt-3 pb-1 border-b border-white/10 bg-[#090614]/80 flex gap-2 shrink-0">
           <button
             type="button"
             onClick={() => setActiveTab('terms')}
@@ -86,7 +86,7 @@ export const TermsPrivacyModal: React.FC<TermsPrivacyModalProps> = ({
         </div>
 
         {/* Scrollable Content Body */}
-        <div className="p-4 sm:p-6 overflow-y-auto space-y-5 text-xs text-purple-100/90 leading-relaxed font-normal">
+        <div className="p-4 sm:p-6 flex-1 min-h-0 overflow-y-auto scroll-pane space-y-5 text-xs text-purple-100/90 leading-relaxed font-normal">
           {activeTab === 'terms' ? (
             <div className="space-y-4">
               <div className="p-3.5 rounded-2xl bg-purple-950/40 border border-purple-500/30">
@@ -212,7 +212,7 @@ export const TermsPrivacyModal: React.FC<TermsPrivacyModalProps> = ({
         </div>
 
         {/* Modal Footer */}
-        <div className="p-4 sm:p-5 border-t border-white/10 bg-[#090614]/90 flex flex-col sm:flex-row items-center justify-between gap-3">
+        <div className="p-4 sm:p-5 border-t border-white/10 bg-[#090614]/90 flex flex-col sm:flex-row items-center justify-between gap-3 shrink-0">
           <div className="text-[11px] text-purple-300/70 text-center sm:text-left">
             By using Aadesh AI, you consent to encrypted storage and Google Gemini processing.
           </div>

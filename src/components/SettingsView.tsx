@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { Suspense, useState, useRef, useEffect } from 'react';
 import type { User as FirebaseUser } from 'firebase/auth';
 import {
   User,
@@ -32,14 +32,26 @@ import {
   Zap,
   Sliders,
   Database,
+  BellRing,
+  Clock,
+  FileCode,
+  FileText,
+  AlertTriangle,
+  ChevronLeft,
+  ChevronRight,
+  Languages,
+  History,
+  RefreshCw,
 } from 'lucide-react';
 import {
   AIConnectionHealth,
+  AIMemoryItem,
   AppSettings,
   ChatSession,
   EngagementMetrics,
   GeotaggedMedia,
   LoginActivityEntry,
+  MemoryCategory,
   UserProfile,
   VoicePersona,
 } from '../types';
@@ -50,16 +62,55 @@ import {
   detectCountryApproxViaIP,
   detectCountryViaGPSDetailed,
 } from '../utils/country';
-import { updateUserProfile } from '../utils/firebase';
-import { getStoredLoginActivity, saveUserLocalExtras } from '../utils/storage';
+import {
+  clearAllMemoriesFromFirestore,
+  deleteMemoryFromFirestore,
+  saveMemoryToFirestore,
+  updateUserProfile,
+} from '../utils/firebase';
+import {
+  getLastStreakReminderDate,
+  getStoredLoginActivity,
+  getStoredMemories,
+  saveStoredMemories,
+  saveUserLocalExtras,
+} from '../utils/storage';
+import { containsSecretOrCredential, extractMemoryKeywords } from '../utils/powerMemory';
 import { voiceAssistant } from '../utils/speech';
+import { downloadChatHistoryFile } from '../utils/exportHistory';
+import { resolveEffectiveStreakTimezone } from '../utils/gamification';
+import {
+  DEFAULT_STREAK_REMINDER_TIME,
+  evaluateNepalEveningReminder,
+  getBrowserNotificationPermission,
+  parseReminderTime,
+  requestStreakReminderPermission,
+  triggerLocalStreakNotification,
+} from '../utils/streakReminder';
 import {
   AVATAR_COLOR_PRESETS,
   COLOR_THEME_PRESETS,
+  ColorThemePreset,
   DEFAULT_AVATAR_COLOR,
+  applyAvatarDynamicTheme,
   generateThemeTokensFromColor,
 } from '../utils/avatarTheme';
-import { TermsPrivacyModal } from './TermsPrivacyModal';
+import {
+  AI_PROVIDER_METADATA,
+  AIProviderId,
+  AIProviderStatusInfo,
+  getProviderStatusLabel,
+  normalizeProviderStatusInfo,
+  resolveProviderHealthDisplay,
+} from '../utils/aiProviders';
+import { getNotificationReadinessSnapshot } from '../utils/notifications';
+import { AIProviderSelector } from './AIProviderSelector';
+import { LiveAIControlCenter } from './LiveAIControlCenter';
+import { PowerMemorySection } from './PowerMemorySection';
+
+const LazyTermsPrivacyModal = React.lazy(() =>
+  import('./TermsPrivacyModal').then((m) => ({ default: m.TermsPrivacyModal }))
+);
 
 interface SettingsViewProps {
   initialSection?: 'profile' | 'settings';
@@ -69,6 +120,14 @@ interface SettingsViewProps {
   mediaItems: GeotaggedMedia[];
   metrics?: EngagementMetrics;
   aiHealth?: AIConnectionHealth;
+  providersStatus?: Partial<Record<AIProviderId, AIProviderStatusInfo>> | null;
+  isLoadingProvidersStatus?: boolean;
+  testingProviderId?: AIProviderId | null;
+  onRefreshProvidersStatus?: () => void;
+  onTestProvider?: (
+    providerId: AIProviderId,
+    modelId?: string
+  ) => Promise<{ ok: boolean; message: string; modelUsed?: string; latencyMs?: number }>;
   fbAuthUser?: FirebaseUser | null;
   isOnline: boolean;
   isOwnerAdmin: boolean;
@@ -80,6 +139,19 @@ interface SettingsViewProps {
   onOpenInstall: () => void;
   onOpenAdmin: () => void;
   onOpenFullBackup: () => void;
+  memories?: AIMemoryItem[];
+  onAddMemory?: (input: {
+    category: MemoryCategory;
+    content: string;
+    source?: AIMemoryItem['source'];
+  }) => { ok: boolean; error?: string };
+  onUpdateMemory?: (id: string, patch: { category?: MemoryCategory; content?: string }) => {
+    ok: boolean;
+    error?: string;
+  };
+  onToggleMemoryApproved?: (id: string) => void;
+  onDeleteMemory?: (id: string) => void;
+  onClearAllMemories?: () => Promise<void> | void;
 }
 
 const PillSwitch: React.FC<{
@@ -116,6 +188,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   sessions,
   metrics,
   aiHealth,
+  providersStatus = null,
+  isLoadingProvidersStatus = false,
+  testingProviderId = null,
+  onRefreshProvidersStatus,
+  onTestProvider,
   fbAuthUser,
   isOnline,
   isOwnerAdmin,
@@ -127,24 +204,45 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   onOpenInstall,
   onOpenAdmin,
   onOpenFullBackup,
+  memories: propMemories,
+  onAddMemory,
+  onUpdateMemory,
+  onToggleMemoryApproved,
+  onDeleteMemory,
+  onClearAllMemories,
 }) => {
   const [section, setSection] = useState<'profile' | 'settings'>(initialSection);
+  const [localMemories, setLocalMemories] = useState<AIMemoryItem[]>(() => getStoredMemories(user.id));
   const [isEditingProfile, setIsEditingProfile] = useState(false);
   const [editName, setEditName] = useState(user.name || '');
   const [editNickname, setEditNickname] = useState(user.nickname || '');
   const [editAge, setEditAge] = useState(user.age ? String(user.age) : '');
   const [editCountry, setEditCountry] = useState(user.country || 'Global');
+  const [editCountryCode, setEditCountryCode] = useState(user.countryCode || 'GLOBAL');
   const [editFlag, setEditFlag] = useState(user.countryFlag || '🌐');
+  const [editTimezone, setEditTimezone] = useState(user.timezone || '');
+  const [editCountryMethod, setEditCountryMethod] = useState<'gps' | 'ip' | 'manual' | 'timezone' | undefined>(
+    user.countryDetectionMethod || (user.isManualCountry ? 'manual' : undefined)
+  );
   const [editAvatar, setEditAvatar] = useState(user.avatarUrl || '');
   const [countrySearchQuery, setCountrySearchQuery] = useState('');
   const [isDetectingGps, setIsDetectingGps] = useState(false);
+  const [gpsFeedback, setGpsFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [savingProfile, setSavingProfile] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
   const [notifPermission, setNotifPermission] = useState<string>(() =>
-    typeof Notification !== 'undefined' ? Notification.permission : 'unsupported'
+    getBrowserNotificationPermission()
   );
+  const [reminderTestNotice, setReminderTestNotice] = useState<string | null>(null);
+  const [backupFeedback, setBackupFeedback] = useState<{
+    format: 'json' | 'md';
+    filename: string;
+    sessionCount: number;
+    messageCount: number;
+    kbLabel: string;
+  } | null>(null);
   const [biometricHardwareAvailable, setBiometricHardwareAvailable] = useState<boolean | null>(null);
   const [loginActivity, setLoginActivity] = useState<LoginActivityEntry[]>(() =>
     getStoredLoginActivity(user.id)
@@ -153,6 +251,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [termsModalTab, setTermsModalTab] = useState<'terms' | 'privacy'>('terms');
 
   const avatarFileInputRef = useRef<HTMLInputElement>(null);
+  const themeCarouselRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setSection(initialSection);
@@ -163,10 +262,106 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     setEditNickname(user.nickname || '');
     setEditAge(user.age ? String(user.age) : '');
     setEditCountry(user.country || 'Global');
+    setEditCountryCode(user.countryCode || 'GLOBAL');
     setEditFlag(user.countryFlag || '🌐');
+    setEditTimezone(user.timezone || '');
+    setEditCountryMethod(user.countryDetectionMethod || (user.isManualCountry ? 'manual' : undefined));
     setEditAvatar(user.avatarUrl || '');
     setLoginActivity(getStoredLoginActivity(user.id));
-  }, [user]);
+    if (!propMemories) {
+      setLocalMemories(getStoredMemories(user.id));
+    }
+  }, [user, propMemories]);
+
+  const effectiveMemories = propMemories ?? localMemories;
+
+  const fallbackAddMemory = (input: {
+    category: MemoryCategory;
+    content: string;
+    source?: AIMemoryItem['source'];
+  }) => {
+    const clean = input.content.trim();
+    if (!clean) return { ok: false, error: 'Please write a memory before saving.' };
+    if (containsSecretOrCredential(clean)) {
+      return { ok: false, error: 'Blocked: passwords, tokens, and API keys cannot be saved.' };
+    }
+    const now = Date.now();
+    const item: AIMemoryItem = {
+      id: `mem-${now}`,
+      userId: user.id,
+      category: input.category,
+      content: clean,
+      approved: true,
+      source: input.source || 'manual',
+      keywords: extractMemoryKeywords(clean),
+      createdAt: now,
+      updatedAt: now,
+    };
+    const next = [item, ...effectiveMemories];
+    setLocalMemories(next);
+    saveStoredMemories(next, user.id);
+    if (user.isLoggedIn) void saveMemoryToFirestore(user.id, item);
+    return { ok: true };
+  };
+
+  const fallbackUpdateMemory = (id: string, patch: { category?: MemoryCategory; content?: string }) => {
+    const clean = patch.content?.trim();
+    if (patch.content !== undefined && !clean) {
+      return { ok: false, error: 'Memory text cannot be empty.' };
+    }
+    if (clean && containsSecretOrCredential(clean)) {
+      return { ok: false, error: 'Blocked: passwords, tokens, and API keys cannot be saved.' };
+    }
+    let updatedItem: AIMemoryItem | undefined;
+    const next = effectiveMemories.map((m) => {
+      if (m.id !== id) return m;
+      updatedItem = {
+        ...m,
+        ...(patch.category ? { category: patch.category } : {}),
+        ...(clean ? { content: clean, keywords: extractMemoryKeywords(clean) } : {}),
+        updatedAt: Date.now(),
+      };
+      return updatedItem;
+    });
+    setLocalMemories(next);
+    saveStoredMemories(next, user.id);
+    if (user.isLoggedIn && updatedItem) void saveMemoryToFirestore(user.id, updatedItem);
+    return { ok: true };
+  };
+
+  const fallbackToggleApproved = (id: string) => {
+    let updatedItem: AIMemoryItem | undefined;
+    const next = effectiveMemories.map((m) => {
+      if (m.id !== id) return m;
+      updatedItem = { ...m, approved: !m.approved, updatedAt: Date.now() };
+      return updatedItem;
+    });
+    setLocalMemories(next);
+    saveStoredMemories(next, user.id);
+    if (user.isLoggedIn && updatedItem) void saveMemoryToFirestore(user.id, updatedItem);
+  };
+
+  const fallbackDeleteMemory = (id: string) => {
+    const next = effectiveMemories.filter((m) => m.id !== id);
+    setLocalMemories(next);
+    saveStoredMemories(next, user.id);
+    if (user.isLoggedIn) void deleteMemoryFromFirestore(user.id, id);
+  };
+
+  const fallbackClearMemories = async () => {
+    setLocalMemories([]);
+    saveStoredMemories([], user.id);
+    if (user.isLoggedIn) await clearAllMemoriesFromFirestore(user.id);
+  };
+
+  useEffect(() => {
+    const clampedSpeed = Math.max(0.5, Math.min(2.0, settings.voiceSpeed ?? 1.0));
+    voiceAssistant.configure({
+      rate: clampedSpeed,
+      pitch: settings.voicePitch ?? 1.0,
+      volume: settings.voiceVolume ?? 1.0,
+    });
+  }, [settings.voiceSpeed, settings.voicePitch, settings.voiceVolume]);
 
   useEffect(() => {
     let active = true;
@@ -241,13 +436,26 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
     setSavingProfile(true);
     try {
+      const matchedOpt = COUNTRY_OPTIONS.find(
+        (c) => c.country === editCountry || (editCountryCode && c.code === editCountryCode)
+      );
+      const resolvedCode =
+        editCountry === 'Global'
+          ? 'GLOBAL'
+          : (editCountryCode && editCountryCode !== 'GLOBAL' ? editCountryCode : matchedOpt?.code || 'GLOBAL');
+      const resolvedTz = editTimezone || matchedOpt?.timeZone || user.timezone;
+      const isManualChoice = editCountryMethod === 'manual';
+
       saveUserLocalExtras(user.id, {
         nickname: cleanNickname,
         age: validAge,
         onboardingCompleted: true,
         country: editCountry,
+        countryCode: resolvedCode,
         countryFlag: editFlag,
-        isManualCountry: true,
+        timezone: resolvedTz,
+        countryDetectionMethod: editCountryMethod,
+        isManualCountry: isManualChoice,
         ...(editAvatar.startsWith('data:') ? { customAvatarDataUrl: editAvatar } : {}),
       });
 
@@ -266,8 +474,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         age: validAge,
         onboardingCompleted: true,
         country: editCountry,
+        countryCode: resolvedCode,
         countryFlag: editFlag,
-        isManualCountry: true,
+        timezone: resolvedTz,
+        countryDetectionMethod: editCountryMethod,
+        isManualCountry: isManualChoice,
         avatarUrl: editAvatar,
       });
 
@@ -290,16 +501,144 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     showToast(nextVal ? 'Notifications enabled.' : 'Notifications muted.');
   };
 
+  const streakRemindersEnabled = settings.streakReminders ?? true;
+  const preferredReminderTime = parseReminderTime(
+    settings.streakReminderTime || DEFAULT_STREAK_REMINDER_TIME
+  );
+  const effectiveStreakTz = resolveEffectiveStreakTimezone(user.timezone);
+  const streakReminderStatus = evaluateNepalEveningReminder({
+    enabled: streakRemindersEnabled,
+    lastActiveDate: user.lastActiveDate,
+    lastNotifiedDateKey: getLastStreakReminderDate(user.id),
+    preferredTime: preferredReminderTime.normalized,
+    timeZone: effectiveStreakTz,
+  });
+
+  const handleToggleDailyStreakReminder = async () => {
+    const nextVal = !streakRemindersEnabled;
+    if (nextVal) {
+      const perm = await requestStreakReminderPermission();
+      setNotifPermission(perm);
+      onUpdateSettings({
+        streakReminders: true,
+        streakReminderTime: preferredReminderTime.normalized,
+      });
+      if (perm === 'granted') {
+        setReminderTestNotice(
+          `Daily streak reminder enabled for ${preferredReminderTime.label12h} (${effectiveStreakTz}).`
+        );
+        showToast(`Streak reminder active at ${preferredReminderTime.label12h}.`);
+      } else if (perm === 'denied') {
+        setReminderTestNotice(
+          'Notifications are currently blocked in browser site settings. See the warning guide below to allow push alerts.'
+        );
+        showToast('Reminder saved — allow browser notifications to receive push alerts.');
+      } else {
+        setReminderTestNotice(
+          perm === 'unsupported'
+            ? 'Preference saved, though this view does not support browser Notification popups.'
+            : 'Click "Allow & Test Alert" below when ready to grant browser notification permission.'
+        );
+        showToast('Daily streak reminder enabled.');
+      }
+      return;
+    }
+
+    onUpdateSettings({ streakReminders: false });
+    setReminderTestNotice('Daily streak reminder paused.');
+    showToast('Daily streak reminders paused.');
+  };
+
+  const handleReminderTimeChange = (rawTime: string) => {
+    const parsed = parseReminderTime(rawTime);
+    onUpdateSettings({ streakReminderTime: parsed.normalized });
+    setReminderTestNotice(
+      `Preferred reminder time updated to ${parsed.label12h} (${effectiveStreakTz}).`
+    );
+    showToast(`Streak reminder time set to ${parsed.label12h}.`);
+  };
+
+  const handleTestDailyStreakNotification = async () => {
+    let perm = getBrowserNotificationPermission();
+    if (perm === 'default') {
+      perm = await requestStreakReminderPermission();
+    }
+    setNotifPermission(perm);
+    if (perm !== 'granted') {
+      setReminderTestNotice(
+        perm === 'denied'
+          ? 'Push alerts are blocked by your browser. Click the site lock/settings icon in the address bar and set Notifications to "Allow".'
+          : 'Browser notification permission is required before a push alert can be displayed.'
+      );
+      return;
+    }
+    const sent = await triggerLocalStreakNotification({
+      currentStreak: user.currentStreak ?? user.streakDays ?? 0,
+      userName: user.nickname || user.name,
+      preferredTime: preferredReminderTime.normalized,
+      timeZone: effectiveStreakTz,
+      isTest: true,
+    });
+    setReminderTestNotice(
+      sent
+        ? `Test alert sent! Your daily streak reminder is scheduled for ${preferredReminderTime.label12h} (${effectiveStreakTz}).`
+        : 'Unable to display notification in the current browser window.'
+    );
+  };
+
+  const handleExportAllSessionsBackup = (format: 'json' | 'md') => {
+    const fallbackSession: ChatSession = sessions[0] || {
+      id: 'empty-backup-session',
+      title: 'Empty Conversation',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      targetLanguage: settings.aiResponseLanguage || settings.defaultTargetLanguage || 'en',
+      messages: [],
+    };
+    const result = downloadChatHistoryFile({
+      scope: 'all',
+      format,
+      currentSession: fallbackSession,
+      allSessions: sessions,
+      userName: user.nickname || user.name,
+    });
+    const kbLabel =
+      result.byteSize >= 1024
+        ? `${(result.byteSize / 1024).toFixed(1)} KB`
+        : `${result.byteSize} B`;
+    setBackupFeedback({
+      format,
+      filename: result.filename,
+      sessionCount: result.sessionCount,
+      messageCount: result.messageCount,
+      kbLabel,
+    });
+    showToast(`Exported ${result.sessionCount} chat sessions as ${format.toUpperCase()}.`);
+  };
+
+  const applyVoiceSpeed = (rawSpeed: number) => {
+    const nextSpeed = Math.max(0.5, Math.min(2.0, Number(rawSpeed.toFixed(2))));
+    voiceAssistant.setPlaybackSpeed(nextSpeed);
+    voiceAssistant.configure({
+      rate: nextSpeed,
+      pitch: settings.voicePitch ?? 1.0,
+      volume: settings.voiceVolume ?? 1.0,
+    });
+    onUpdateSettings({ voiceSpeed: nextSpeed });
+  };
+
   const handleTestVoice = () => {
     const targetLangObj = SUPPORTED_LANGUAGES.find((l) => l.code === settings.defaultTargetLanguage);
+    const clampedSpeed = Math.max(0.5, Math.min(2.0, settings.voiceSpeed ?? 1.0));
     voiceAssistant.configure({
-      rate: settings.voiceSpeed ?? 1.0,
+      rate: clampedSpeed,
       pitch: settings.voicePitch ?? 1.0,
       volume: settings.voiceVolume ?? 1.0,
     });
     voiceAssistant.speak(
-      `Hello ${user.name || 'friend'}! Aadesh AI voice is active.`,
-      targetLangObj?.speechCode || 'en-US'
+      `Hello ${user.name || 'friend'}! Aadesh AI voice is active at ${clampedSpeed.toFixed(2)}x speed.`,
+      targetLangObj?.speechCode || 'en-US',
+      { rate: clampedSpeed }
     );
   };
 
@@ -504,22 +843,27 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                       <button
                         type="button"
                         onClick={async () => {
+                          setGpsFeedback(null);
                           const detected = detectUserCountry();
                           if (detected.country !== 'Global') {
                             setEditCountry(detected.country);
+                            setEditCountryCode(detected.code);
                             setEditFlag(detected.flag);
-                            showToast(`Auto-detected: ${detected.country} ${detected.flag}`);
+                            setEditTimezone(detected.timeZone || '');
+                            setEditCountryMethod('timezone');
+                            showToast(`Timezone detected: ${detected.country} ${detected.flag}`);
                             return;
                           }
                           const ipMatch = await detectCountryApproxViaIP();
                           if (ipMatch) {
                             setEditCountry(ipMatch.country);
+                            setEditCountryCode(ipMatch.code);
                             setEditFlag(ipMatch.flag);
-                            showToast(`Auto-detected: ${ipMatch.country} ${ipMatch.flag}`);
+                            setEditTimezone(ipMatch.timeZone || '');
+                            setEditCountryMethod('ip');
+                            showToast(`IP region detected: ${ipMatch.country} ${ipMatch.flag}`);
                           } else {
-                            setEditCountry(detected.country);
-                            setEditFlag(detected.flag);
-                            showToast('Using Global default. Choose manually or try GPS.');
+                            showToast('Automatic region detection unavailable. Choose manually or use GPS.');
                           }
                         }}
                         className="text-[11px] text-purple-300 hover:text-white underline cursor-pointer"
@@ -532,23 +876,52 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                         disabled={isDetectingGps}
                         onClick={async () => {
                           setIsDetectingGps(true);
+                          setGpsFeedback(null);
                           const gpsResult = await detectCountryViaGPSDetailed();
                           setIsDetectingGps(false);
-                          if (gpsResult.option) {
-                            setEditCountry(gpsResult.option.country);
-                            setEditFlag(gpsResult.option.flag);
-                            const label =
-                              gpsResult.source === 'gps'
-                                ? 'GPS Detected'
-                                : gpsResult.source === 'ip-approximate'
-                                ? 'Approximate Region Detected'
-                                : 'Timezone Detected';
-                            showToast(`${label}: ${gpsResult.option.country} ${gpsResult.option.flag}`);
+                          if (gpsResult.option && gpsResult.source === 'gps') {
+                            const detectedOpt = gpsResult.option;
+                            const resolvedTz =
+                              detectedOpt.timeZone ||
+                              (() => {
+                                try {
+                                  return Intl.DateTimeFormat().resolvedOptions().timeZone;
+                                } catch {
+                                  return user.timezone || '';
+                                }
+                              })();
+                            setEditCountry(detectedOpt.country);
+                            setEditCountryCode(detectedOpt.code);
+                            setEditFlag(detectedOpt.flag);
+                            setEditTimezone(resolvedTz);
+                            setEditCountryMethod('gps');
+                            // Persist GPS-detected country immediately to authenticated user profile
+                            saveUserLocalExtras(user.id, {
+                              country: detectedOpt.country,
+                              countryCode: detectedOpt.code,
+                              countryFlag: detectedOpt.flag,
+                              timezone: resolvedTz,
+                              countryDetectionMethod: 'gps',
+                              isManualCountry: false,
+                            });
+                            onUpdateUser({
+                              ...user,
+                              country: detectedOpt.country,
+                              countryCode: detectedOpt.code,
+                              countryFlag: detectedOpt.flag,
+                              timezone: resolvedTz,
+                              countryDetectionMethod: 'gps',
+                              isManualCountry: false,
+                            });
+                            const msg = `GPS detected & saved: ${detectedOpt.flag} ${detectedOpt.country} (${detectedOpt.code})`;
+                            setGpsFeedback({ type: 'success', message: msg });
+                            showToast(msg);
                           } else {
-                            showToast(
+                            const errMsg =
                               gpsResult.error ||
-                                'GPS unavailable. Please select your country manually below.'
-                            );
+                              'GPS country detection failed. Please select your country manually below.';
+                            setGpsFeedback({ type: 'error', message: errMsg });
+                            showToast(errMsg);
                           }
                         }}
                         className="text-[11px] text-sky-300 hover:text-white underline cursor-pointer disabled:opacity-50"
@@ -557,6 +930,19 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                       </button>
                     </div>
                   </div>
+
+                  {gpsFeedback && (
+                    <div
+                      role="status"
+                      className={`px-3 py-2 rounded-xl border text-[11px] font-medium ${
+                        gpsFeedback.type === 'success'
+                          ? 'bg-emerald-950/55 border-emerald-500/40 text-emerald-200'
+                          : 'bg-rose-950/60 border-rose-500/45 text-rose-200'
+                      }`}
+                    >
+                      {gpsFeedback.message}
+                    </div>
+                  )}
 
                   <input
                     type="text"
@@ -569,19 +955,34 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   <select
                     value={editCountry}
                     onChange={(e) => {
+                      setGpsFeedback(null);
                       const chosen = COUNTRY_OPTIONS.find((c) => c.country === e.target.value);
                       if (chosen) {
                         setEditCountry(chosen.country);
+                        setEditCountryCode(chosen.code);
                         setEditFlag(chosen.flag);
-                      } else {
+                        if (chosen.timeZone) {
+                          setEditTimezone(chosen.timeZone);
+                        }
+                        setEditCountryMethod('manual');
+                      } else if (e.target.value === 'Global') {
                         setEditCountry('Global');
+                        setEditCountryCode('GLOBAL');
                         setEditFlag('🌐');
+                        setEditCountryMethod('manual');
                       }
                     }}
                     size={5}
                     className="w-full px-2 py-1.5 rounded-xl bg-[#140e2a] border border-purple-400/30 focus:border-sky-400 text-white outline-none font-medium cursor-pointer"
                   >
                     <option value="Global">🌐 Global (International)</option>
+                    {editCountry &&
+                      editCountry !== 'Global' &&
+                      !COUNTRY_OPTIONS.some((c) => c.country === editCountry) && (
+                        <option value={editCountry}>
+                          {editFlag} {editCountry} ({editCountryCode})
+                        </option>
+                      )}
                     {COUNTRY_OPTIONS.filter((c) => {
                       if (!countrySearchQuery.trim()) return true;
                       const q = countrySearchQuery.toLowerCase();
@@ -691,10 +1092,34 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               })}
             </div>
           </div>
+
+          {/* Live AI Control Center (accessible from Profile section) */}
+          <LiveAIControlCenter
+            aiHealth={aiHealth}
+            providersStatus={providersStatus}
+            settings={settings}
+            isNetworkOnline={isOnline}
+            isRefreshing={isLoadingProvidersStatus}
+            testingProviderId={testingProviderId}
+            onRefreshStatus={onRefreshProvidersStatus}
+            onTestProvider={onTestProvider}
+            compact={true}
+          />
         </div>
       ) : (
-        /* SETTINGS SECTION: 5 Structured Controls Groups */
+        /* SETTINGS SECTION: Live AI Control Center + Structured Controls Groups */
         <div className="space-y-5">
+          <LiveAIControlCenter
+            aiHealth={aiHealth}
+            providersStatus={providersStatus}
+            settings={settings}
+            isNetworkOnline={isOnline}
+            isRefreshing={isLoadingProvidersStatus}
+            testingProviderId={testingProviderId}
+            onRefreshStatus={onRefreshProvidersStatus}
+            onTestProvider={onTestProvider}
+          />
+
           {/* 1. GENERAL SETTINGS */}
           <section className="v2-neu-card rounded-3xl p-5 border border-sky-400/25 space-y-4">
             <div className="flex items-center justify-between border-b border-white/10 pb-3">
@@ -753,10 +1178,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               </label>
 
               <label className="space-y-1.5">
-                <span className="text-purple-200/80 font-semibold block">Default Target Language</span>
+                <span className="text-purple-200/80 font-semibold block">Default AI Response Language</span>
                 <select
-                  value={settings.defaultTargetLanguage}
-                  onChange={(e) => onUpdateSettings({ defaultTargetLanguage: e.target.value })}
+                  aria-label="Default AI Response Language"
+                  value={settings.aiResponseLanguage || settings.defaultTargetLanguage || 'en'}
+                  onChange={(e) =>
+                    onUpdateSettings({
+                      aiResponseLanguage: e.target.value,
+                      defaultTargetLanguage: e.target.value,
+                    })
+                  }
                   className="w-full min-h-[42px] px-3 py-2 rounded-xl v2-neu-inset border border-purple-400/30 text-white outline-none"
                 >
                   {SUPPORTED_LANGUAGES.map((l) => (
@@ -782,6 +1213,98 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   </span>
                   <span className="text-[11px] text-sky-300 font-bold">Change</span>
                 </button>
+              </div>
+            </div>
+
+            {/* Dedicated AI Response Preferences & Independent AI Message Translation */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2 border-t border-white/10">
+              {/* AI Response Preferences */}
+              <div
+                aria-label="AI Response Preferences"
+                className="p-4 rounded-2xl v2-neu-inset border border-sky-400/25 space-y-3"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-bold text-white flex items-center gap-1.5">
+                    <Globe className="w-3.5 h-3.5 text-sky-400" />
+                    <span>AI Response Preferences</span>
+                  </span>
+                  <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-sky-500/20 text-sky-200 border border-sky-400/30">
+                    Default: English
+                  </span>
+                </div>
+                <label className="block space-y-1 text-xs">
+                  <span className="text-purple-200/80 font-semibold block">AI Response Language</span>
+                  <select
+                    aria-label="AI Response Language"
+                    value={settings.aiResponseLanguage || settings.defaultTargetLanguage || 'en'}
+                    onChange={(e) =>
+                      onUpdateSettings({
+                        aiResponseLanguage: e.target.value,
+                        defaultTargetLanguage: e.target.value,
+                      })
+                    }
+                    className="w-full min-h-[40px] px-3 py-2 rounded-xl bg-[#140e2a] border border-purple-400/30 text-white outline-none"
+                  >
+                    {SUPPORTED_LANGUAGES.map((l) => (
+                      <option key={`resp-lang-${l.code}`} value={l.code}>
+                        {l.flag} {l.name} ({l.nativeName})
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <PillSwitch
+                  checked={Boolean(settings.autoDetectInputLanguage)}
+                  onChange={() =>
+                    onUpdateSettings({ autoDetectInputLanguage: !settings.autoDetectInputLanguage })
+                  }
+                  label="Auto-detect Input Language"
+                  description="Match the user's message language automatically. When off, AI strictly replies in the selected language while preserving code blocks."
+                />
+              </div>
+
+              {/* Independent AI Message Translation (Default: OFF) */}
+              <div
+                aria-label="AI Message Translation"
+                className="p-4 rounded-2xl v2-neu-inset border border-purple-400/25 space-y-3"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-bold text-white flex items-center gap-1.5">
+                    <Languages className="w-3.5 h-3.5 text-purple-300" />
+                    <span>AI Message Translation</span>
+                  </span>
+                  <span
+                    className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${
+                      settings.translationEnabled
+                        ? 'bg-emerald-500/20 text-emerald-200 border-emerald-400/35'
+                        : 'bg-white/10 text-purple-200/75 border-white/15'
+                    }`}
+                  >
+                    {settings.translationEnabled ? 'Auto-Translate ON' : 'OFF by Default'}
+                  </span>
+                </div>
+                <PillSwitch
+                  checked={Boolean(settings.translationEnabled)}
+                  onChange={() =>
+                    onUpdateSettings({ translationEnabled: !settings.translationEnabled })
+                  }
+                  label="Auto-Translate Every AI Reply"
+                  description="Independent from AI Response Language. Keep off for clean replies; per-message Translate button remains available below every reply."
+                />
+                <label className="block space-y-1 text-xs">
+                  <span className="text-purple-200/80 font-semibold block">Translation Target Language</span>
+                  <select
+                    aria-label="Translation Target Language"
+                    value={settings.translationLanguage || 'ne'}
+                    onChange={(e) => onUpdateSettings({ translationLanguage: e.target.value })}
+                    className="w-full min-h-[40px] px-3 py-2 rounded-xl bg-[#140e2a] border border-purple-400/30 text-white outline-none"
+                  >
+                    {SUPPORTED_LANGUAGES.map((l) => (
+                      <option key={`trans-lang-${l.code}`} value={l.code}>
+                        {l.flag} {l.name} ({l.nativeName})
+                      </option>
+                    ))}
+                  </select>
+                </label>
               </div>
             </div>
           </section>
@@ -860,7 +1383,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   onUpdateSettings({ streamingResponses: settings.streamingResponses === false })
                 }
                 label="Streaming AI Responses"
-                description="Render Gemini output progressively word by word."
+                description="Render AI output progressively word by word."
               />
               <PillSwitch
                 checked={settings.memoryConsent === 'agreed' && settings.aiMemoryEnabled !== false}
@@ -877,13 +1400,202 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 description="Allow approved preferences from More > Personal Memory in chats."
               />
               <PillSwitch
-                checked={settings.streakReminders ?? true}
-                onChange={() =>
-                  onUpdateSettings({ streakReminders: !(settings.streakReminders ?? true) })
-                }
-                label="Streak Reminders"
-                description="Keep daily productivity & learning streak active."
+                checked={streakRemindersEnabled}
+                onChange={handleToggleDailyStreakReminder}
+                label="Daily Streak Push Reminder"
+                description={`Notify at ${preferredReminderTime.label12h} (${effectiveStreakTz}) if inactive.`}
               />
+              <PillSwitch
+                checked={Boolean(settings.analyticsConsent)}
+                onChange={() =>
+                  onUpdateSettings({ analyticsConsent: !settings.analyticsConsent })
+                }
+                label="Privacy-Safe Usage Analytics"
+                description="Share anonymous feature counts & errors (no emails, keys, or chat text)."
+              />
+            </div>
+
+            {(() => {
+              const notifSnapshot = getNotificationReadinessSnapshot();
+              return (
+                <div className="px-3.5 py-2.5 rounded-2xl v2-neu-inset border border-white/10 text-[11px] text-purple-200/80 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div className="space-y-0.5">
+                    <div className="font-bold text-white">
+                      Push &amp; FCM Readiness: <span className="text-cyan-300">{notifSnapshot.statusLabel}</span>
+                    </div>
+                    <p className="text-[10.5px] text-purple-200/65 leading-relaxed">
+                      {notifSnapshot.guidance}
+                    </p>
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* Toggle-Based Daily Streak Reminder Scheduler & Time Picker */}
+            <div className="p-4 rounded-2xl v2-neu-inset border border-cyan-400/25 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <BellRing
+                    className={`w-4 h-4 shrink-0 ${
+                      streakRemindersEnabled && notifPermission === 'granted'
+                        ? 'text-cyan-400'
+                        : 'text-purple-300'
+                    }`}
+                  />
+                  <div>
+                    <div className="text-xs font-bold text-white">
+                      Daily Streak Reminder Schedule
+                    </div>
+                    <div className="text-[11px] text-purple-200/70">
+                      Pick your preferred daily push notification time ({effectiveStreakTz})
+                    </div>
+                  </div>
+                </div>
+                <span className="text-[10.5px] font-mono px-2.5 py-0.5 rounded-full bg-cyan-950/60 border border-cyan-400/35 text-cyan-200 tabular-nums">
+                  {streakRemindersEnabled
+                    ? streakReminderStatus.reason === 'already_active_today'
+                      ? `Safe today · Next in ${streakReminderStatus.countdownLabel}`
+                      : `Next check in ${streakReminderStatus.countdownLabel}`
+                    : 'Paused'}
+                </span>
+              </div>
+
+              <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-3">
+                <label className="space-y-1 text-xs flex-1">
+                  <span className="text-purple-200/80 font-semibold flex items-center gap-1.5">
+                    <Clock className="w-3.5 h-3.5 text-cyan-400" />
+                    <span>Preferred Notification Time</span>
+                  </span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <input
+                      type="time"
+                      aria-label="Preferred daily streak reminder time"
+                      value={preferredReminderTime.normalized}
+                      disabled={!streakRemindersEnabled}
+                      onChange={(e) => handleReminderTimeChange(e.target.value)}
+                      className="min-h-[40px] px-3 py-1.5 rounded-xl bg-[#140e2a] border border-purple-400/35 focus:border-cyan-400 text-white text-xs font-mono tabular-nums outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+                    />
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {[
+                        { time: '09:00', label: '9 AM' },
+                        { time: '18:00', label: '6 PM' },
+                        { time: '20:00', label: '8 PM' },
+                        { time: '21:30', label: '9:30 PM' },
+                      ].map((preset) => (
+                        <button
+                          key={preset.time}
+                          type="button"
+                          disabled={!streakRemindersEnabled}
+                          onClick={() => handleReminderTimeChange(preset.time)}
+                          className={`px-2.5 py-1.5 rounded-lg border text-[11px] font-bold cursor-pointer transition-colors disabled:opacity-45 disabled:cursor-not-allowed ${
+                            preferredReminderTime.normalized === preset.time
+                              ? 'bg-cyan-500/25 border-cyan-400/60 text-cyan-200'
+                              : 'bg-white/5 border-white/10 text-purple-200/80 hover:text-white'
+                          }`}
+                        >
+                          {preset.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </label>
+
+                <button
+                  type="button"
+                  onClick={handleTestDailyStreakNotification}
+                  className="min-h-[40px] px-3.5 py-2 rounded-xl bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-400/40 text-cyan-200 text-xs font-bold inline-flex items-center justify-center gap-1.5 cursor-pointer transition-colors shrink-0"
+                >
+                  <Bell className="w-3.5 h-3.5" />
+                  <span>{notifPermission === 'granted' ? 'Send Test Alert' : 'Allow & Test Alert'}</span>
+                </button>
+              </div>
+
+              {reminderTestNotice && (
+                <p
+                  role="status"
+                  className="text-[11px] text-cyan-100 bg-cyan-950/45 border border-cyan-400/30 rounded-xl px-3 py-2"
+                >
+                  {reminderTestNotice}
+                </p>
+              )}
+
+              {streakRemindersEnabled && notifPermission !== 'granted' && (
+                <div
+                  role="status"
+                  className="p-3 rounded-xl bg-amber-950/40 border border-amber-400/35 flex items-start gap-2.5 text-[11px] text-amber-100/90 leading-relaxed"
+                >
+                  <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                  <div className="space-y-0.5">
+                    <div className="font-bold text-amber-200">
+                      {notifPermission === 'denied'
+                        ? 'Browser Push Permission Blocked'
+                        : notifPermission === 'unsupported'
+                        ? 'Browser Notification API Unavailable'
+                        : 'Push Notification Permission Pending'}
+                    </div>
+                    <p>
+                      {notifPermission === 'denied'
+                        ? 'Browsers suppress silent web push alerts until site Notifications are explicitly set to "Allow" in Chrome/Android Site Settings. Enable Notifications in your browser address bar, then tap Send Test Alert.'
+                        : notifPermission === 'unsupported'
+                        ? 'This embedded webview blocks OS push popups. Install Aadesh AI as a PWA or open in Chrome to receive scheduled daily streak notifications.'
+                        : 'Browsers require a user tap to grant Notification permission before scheduled alerts can fire. Tap "Allow & Test Alert" to authorize notifications.'}
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Local Chat Sessions Backup (JSON & Markdown) */}
+            <div className="p-4 rounded-2xl v2-neu-inset border border-purple-400/30 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Download className="w-4 h-4 text-purple-300 shrink-0" />
+                  <div>
+                    <div className="text-xs font-bold text-white">
+                      Local Chat Sessions Backup
+                    </div>
+                    <div className="text-[11px] text-purple-200/70">
+                      Export all {sessions.length} chat sessions (
+                      {sessions.reduce((sum, s) => sum + s.messages.length, 0)} messages) for offline safekeeping
+                    </div>
+                  </div>
+                </div>
+                <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-purple-950/80 border border-purple-400/35 text-purple-200">
+                  JSON &amp; Markdown
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => handleExportAllSessionsBackup('json')}
+                  className="min-h-[42px] px-4 py-2.5 rounded-xl bg-purple-600/25 hover:bg-purple-600/40 border border-purple-400/45 text-white text-xs font-bold flex items-center justify-center gap-2 cursor-pointer transition-colors"
+                >
+                  <FileCode className="w-4 h-4 text-purple-300" />
+                  <span>Export All Chats as JSON (.json)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleExportAllSessionsBackup('md')}
+                  className="min-h-[42px] px-4 py-2.5 rounded-xl bg-indigo-600/25 hover:bg-indigo-600/40 border border-indigo-400/45 text-white text-xs font-bold flex items-center justify-center gap-2 cursor-pointer transition-colors"
+                >
+                  <FileText className="w-4 h-4 text-sky-300" />
+                  <span>Export All Chats as Markdown (.md)</span>
+                </button>
+              </div>
+
+              {backupFeedback && (
+                <div
+                  role="status"
+                  className="p-2.5 rounded-xl bg-emerald-950/40 border border-emerald-400/40 text-emerald-200 text-[11px] flex items-center gap-2"
+                >
+                  <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                  <span className="truncate">
+                    Downloaded <strong>{backupFeedback.filename}</strong> ({backupFeedback.sessionCount} sessions,{' '}
+                    {backupFeedback.messageCount} msgs · {backupFeedback.kbLabel})
+                  </span>
+                </div>
+              )}
             </div>
 
             {/* Real Login Activity Panel */}
@@ -942,7 +1654,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 className="min-h-[40px] px-4 py-2 rounded-2xl bg-white/5 hover:bg-white/10 border border-white/15 text-xs font-semibold text-purple-100 flex items-center gap-2 cursor-pointer"
               >
                 <Download className="w-4 h-4 text-sky-300" />
-                <span>Backup &amp; Custom API Key ({sessions.length} chats)</span>
+                <span>Backup &amp; AI Providers ({sessions.length} chats)</span>
               </button>
 
               {confirmClear ? (
@@ -979,12 +1691,28 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </div>
           </section>
 
-          {/* 3. APPEARANCE */}
-          <section className="v2-neu-card rounded-3xl p-5 border border-purple-400/25 space-y-4">
-            <div className="flex items-center justify-between border-b border-white/10 pb-3">
+          {/* POWER MEMORY PERSISTENT SYSTEM */}
+          <PowerMemorySection
+            user={user}
+            settings={settings}
+            memories={effectiveMemories}
+            onUpdateSettings={onUpdateSettings}
+            onAddMemory={onAddMemory || fallbackAddMemory}
+            onUpdateMemory={onUpdateMemory || fallbackUpdateMemory}
+            onToggleMemoryApproved={onToggleMemoryApproved || fallbackToggleApproved}
+            onDeleteMemory={onDeleteMemory || fallbackDeleteMemory}
+            onClearAllMemories={onClearAllMemories || fallbackClearMemories}
+          />
+
+          {/* 3. APPEARANCE & THEME SWITCHER */}
+          <section
+            aria-label="Theme Switcher"
+            className="v2-neu-card rounded-3xl p-5 border border-purple-400/25 space-y-4"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-3">
               <div className="flex items-center gap-2">
                 <Palette className="w-4 h-4 text-sky-400" />
-                <h2 className="text-sm font-bold text-white">3. Appearance &amp; Theme</h2>
+                <h2 className="text-sm font-bold text-white">3. Appearance &amp; Theme Switcher</h2>
               </div>
               <span className="text-[11px] font-semibold text-sky-300">
                 Active:{' '}
@@ -994,67 +1722,140 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               </span>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
-              {COLOR_THEME_PRESETS.filter((p) => p.id !== 'purple-galaxy').map((preset) => {
-                const isSelected =
-                  (preset.id === 'pure-light' && settings.theme === 'light') ||
-                  (settings.theme !== 'light' &&
-                    (settings.colorTheme === preset.id ||
-                      (preset.id === 'dark-galaxy' &&
-                        (!settings.colorTheme || settings.colorTheme === 'purple-galaxy'))));
-
-                return (
+            {/* Theme Switcher Horizontal Color Palette Carousel */}
+            <div className="space-y-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <h3 className="text-xs font-extrabold text-white">Theme Switcher</h3>
+                  <p className="text-[11px] text-purple-200/70">
+                    Swipe or browse color palettes to apply a global theme instantly.
+                  </p>
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
                   <button
-                    key={preset.id}
                     type="button"
-                    onClick={() => {
-                      const isLight = preset.themeMode === 'light';
-                      onUpdateSettings({
-                        theme: isLight ? 'light' : 'dark',
-                        colorTheme: preset.id,
-                      });
-                      if (isLight) {
-                        document.body.classList.add('light-theme');
-                        document.documentElement.classList.remove('dark');
-                      } else {
-                        document.body.classList.remove('light-theme');
-                        document.documentElement.classList.add('dark');
-                      }
-                      showToast(`Applied ${preset.name} theme.`);
-                    }}
-                    className={`p-3.5 rounded-2xl border text-left transition-all cursor-pointer flex flex-col justify-between gap-2.5 ${
-                      isSelected
-                        ? 'bg-sky-500/15 border-sky-400 text-white shadow-[0_0_20px_rgba(56,189,248,0.28)]'
-                        : 'v2-neu-inset border-white/10 text-purple-200/80 hover:border-sky-400/40'
-                    }`}
+                    onClick={() =>
+                      themeCarouselRef.current?.scrollBy({ left: -240, behavior: 'smooth' })
+                    }
+                    aria-label="Scroll theme palettes left"
+                    className="w-8 h-8 rounded-xl bg-white/5 hover:bg-white/15 border border-white/10 text-purple-200 hover:text-white flex items-center justify-center cursor-pointer transition-colors"
                   >
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2">
-                        <span
-                          className="w-4 h-4 rounded-full border border-white/30 shrink-0"
-                          style={{ backgroundColor: preset.hex }}
-                        />
-                        <span className="text-xs font-bold text-white">{preset.name}</span>
-                      </div>
-                      {isSelected ? (
-                        <span className="w-5 h-5 rounded-full bg-emerald-500/30 border border-emerald-400 text-emerald-300 flex items-center justify-center shrink-0">
-                          <Check className="w-3 h-3" />
-                        </span>
-                      ) : (
-                        <span className="text-[10px] uppercase font-bold text-gray-400">
-                          {preset.themeMode === 'light' ? 'Light' : 'Dark'}
-                        </span>
-                      )}
-                    </div>
-                    <div
-                      className={`h-2 w-full rounded-full bg-gradient-to-r ${preset.gradientClass} opacity-85`}
-                    />
-                    <p className="text-[11px] text-purple-200/65 line-clamp-2">
-                      {preset.description}
-                    </p>
+                    <ChevronLeft className="w-4 h-4" />
                   </button>
-                );
-              })}
+                  <button
+                    type="button"
+                    onClick={() =>
+                      themeCarouselRef.current?.scrollBy({ left: 240, behavior: 'smooth' })
+                    }
+                    aria-label="Scroll theme palettes right"
+                    className="w-8 h-8 rounded-xl bg-white/5 hover:bg-white/15 border border-white/10 text-purple-200 hover:text-white flex items-center justify-center cursor-pointer transition-colors"
+                  >
+                    <ChevronRight className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+
+              <div
+                ref={themeCarouselRef}
+                role="listbox"
+                aria-label="Color theme palette carousel"
+                className="flex gap-3 overflow-x-auto snap-x snap-mandatory scroll-smooth pb-2 -mx-1 px-1"
+              >
+                {COLOR_THEME_PRESETS.map((preset: ColorThemePreset) => {
+                  const isSelected =
+                    (preset.id === 'pure-light' && settings.theme === 'light') ||
+                    (settings.theme !== 'light' &&
+                      (settings.colorTheme === preset.id ||
+                        (preset.id === 'dark-galaxy' && !settings.colorTheme)));
+                  const paletteTokens = generateThemeTokensFromColor(preset.hex);
+
+                  const handleSelectThemePalette = () => {
+                    const isLight = preset.themeMode === 'light';
+                    applyAvatarDynamicTheme(preset.hex, true);
+                    if (isLight) {
+                      document.body.classList.add('light-theme');
+                      document.documentElement.classList.remove('dark');
+                    } else {
+                      document.body.classList.remove('light-theme');
+                      document.documentElement.classList.add('dark');
+                    }
+                    onUpdateSettings({
+                      theme: isLight ? 'light' : 'dark',
+                      colorTheme: preset.id,
+                    });
+                    showToast(`Applied ${preset.name} theme globally.`);
+                  };
+
+                  return (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      role="option"
+                      aria-selected={isSelected}
+                      onClick={handleSelectThemePalette}
+                      className={`snap-start shrink-0 w-52 sm:w-56 p-3.5 rounded-2xl border text-left transition-all cursor-pointer flex flex-col justify-between gap-2.5 ${
+                        isSelected
+                          ? 'bg-sky-500/15 border-sky-400 text-white shadow-[0_0_20px_rgba(56,189,248,0.28)]'
+                          : 'v2-neu-inset border-white/10 text-purple-200/80 hover:border-sky-400/45'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span
+                            className="w-4 h-4 rounded-full border border-white/35 shrink-0"
+                            style={{ backgroundColor: preset.hex }}
+                          />
+                          <span className="text-xs font-bold text-white truncate">
+                            {preset.name}
+                          </span>
+                        </div>
+                        {isSelected ? (
+                          <span className="w-5 h-5 rounded-full bg-emerald-500/30 border border-emerald-400 text-emerald-300 flex items-center justify-center shrink-0">
+                            <Check className="w-3 h-3" />
+                          </span>
+                        ) : (
+                          <span className="text-[10px] uppercase font-bold text-gray-400 shrink-0">
+                            {preset.themeMode === 'light' ? 'Light' : 'Dark'}
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Palette Color Swatches + Gradient Strip */}
+                      <div className="space-y-1.5">
+                        <div className="flex items-center gap-1.5">
+                          <span
+                            className="w-3.5 h-3.5 rounded-md border border-white/20"
+                            style={{ backgroundColor: paletteTokens.primaryHex }}
+                            title="Primary"
+                          />
+                          <span
+                            className="w-3.5 h-3.5 rounded-md border border-white/20"
+                            style={{ backgroundColor: paletteTokens.secondaryHex }}
+                            title="Secondary"
+                          />
+                          <span
+                            className="w-3.5 h-3.5 rounded-md border border-white/20"
+                            style={{ backgroundColor: paletteTokens.lightHex }}
+                            title="Highlight"
+                          />
+                          <span
+                            className="w-3.5 h-3.5 rounded-md border border-white/20"
+                            style={{ backgroundColor: paletteTokens.deepHex }}
+                            title="Surface"
+                          />
+                        </div>
+                        <div
+                          className={`h-2 w-full rounded-full bg-gradient-to-r ${preset.gradientClass} opacity-90`}
+                        />
+                      </div>
+
+                      <p className="text-[11px] text-purple-200/65 line-clamp-2">
+                        {preset.description}
+                      </p>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs pt-1">
@@ -1163,73 +1964,171 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               </div>
             </div>
 
-            {/* Voice Persona */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-              {VOICE_PERSONAS.map((persona) => {
-                const active = (settings.voicePersona || 'friendly') === persona.id;
-                return (
-                  <button
-                    key={persona.id}
-                    type="button"
-                    onClick={() =>
-                      onUpdateSettings({
-                        voicePersona: persona.id as VoicePersona,
-                        voicePitch: persona.pitch,
-                      })
-                    }
-                    className={`p-2.5 rounded-xl border text-left text-xs cursor-pointer transition-all ${
-                      active
-                        ? 'bg-purple-600/35 border-sky-400 text-white font-bold'
-                        : 'v2-neu-inset border-white/10 text-purple-200/80'
-                    }`}
-                  >
-                    <div className="truncate">{persona.name}</div>
-                    <div className="text-[10px] opacity-75 truncate">{persona.tagline}</div>
-                  </button>
-                );
-              })}
+            {/* AI Provider Switch (Google Gemini Default, Groq, OpenRouter) */}
+            <div
+              aria-label="AI Provider Switch"
+              className="p-4 rounded-2xl v2-neu-inset border border-sky-400/25 space-y-3"
+            >
+              <AIProviderSelector
+                settings={settings}
+                onUpdateSettings={onUpdateSettings}
+                providersStatus={providersStatus ?? aiHealth?.providers ?? null}
+                isLoadingStatus={isLoadingProvidersStatus}
+                testingProviderId={testingProviderId}
+                onRefreshStatus={onRefreshProvidersStatus}
+                onTestProvider={onTestProvider}
+              />
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
-              <label className="space-y-1.5">
-                <div className="flex justify-between text-purple-200/80">
-                  <span className="flex items-center gap-1">
-                    <Mic className="w-3.5 h-3.5" />
-                    <span>Speech Speed</span>
-                  </span>
-                  <span className="font-mono tabular-nums">{(settings.voiceSpeed ?? 1).toFixed(2)}x</span>
-                </div>
-                <input
-                  type="range"
-                  min={0.6}
-                  max={1.6}
-                  step={0.05}
-                  value={settings.voiceSpeed ?? 1.0}
-                  onChange={(e) => onUpdateSettings({ voiceSpeed: Number(e.target.value) })}
-                  className="w-full accent-sky-400 cursor-pointer"
-                />
-              </label>
+            {/* Voice Section: Persona, Speaking Speed (0.5x–2.0x), and Volume */}
+            <div
+              aria-label="Voice"
+              className="p-4 rounded-2xl v2-neu-inset border border-sky-400/20 space-y-4"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-bold text-white flex items-center gap-1.5">
+                  <Mic className="w-3.5 h-3.5 text-sky-400" />
+                  <span>Voice</span>
+                </span>
+                <span className="text-[11px] font-mono text-sky-300 tabular-nums">
+                  Rate {Math.max(0.5, Math.min(2.0, settings.voiceSpeed ?? 1.0)).toFixed(2)}x
+                </span>
+              </div>
 
-              <label className="space-y-1.5">
-                <div className="flex justify-between text-purple-200/80">
-                  <span className="flex items-center gap-1">
-                    <Volume2 className="w-3.5 h-3.5" />
-                    <span>Volume</span>
-                  </span>
-                  <span className="font-mono tabular-nums">
-                    {Math.round((settings.voiceVolume ?? 1) * 100)}%
-                  </span>
+              {/* Voice Persona */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                {VOICE_PERSONAS.map((persona) => {
+                  const active = (settings.voicePersona || 'friendly') === persona.id;
+                  return (
+                    <button
+                      key={persona.id}
+                      type="button"
+                      onClick={() => {
+                        voiceAssistant.configure({ pitch: persona.pitch });
+                        onUpdateSettings({
+                          voicePersona: persona.id as VoicePersona,
+                          voicePitch: persona.pitch,
+                        });
+                      }}
+                      className={`p-2.5 rounded-xl border text-left text-xs cursor-pointer transition-all ${
+                        active
+                          ? 'bg-purple-600/35 border-sky-400 text-white font-bold'
+                          : 'bg-white/5 border-white/10 text-purple-200/80 hover:border-sky-400/35'
+                      }`}
+                    >
+                      <div className="truncate">{persona.name}</div>
+                      <div className="text-[10px] opacity-75 truncate">{persona.tagline}</div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+                <div className="space-y-2">
+                  <label htmlFor="settings-voice-speed-slider" className="block space-y-1.5">
+                    <div className="flex justify-between text-purple-200/80">
+                      <span className="flex items-center gap-1">
+                        <Mic className="w-3.5 h-3.5 text-sky-400" />
+                        <span>Speaking Speed (Rate)</span>
+                      </span>
+                      <span className="font-mono font-bold text-white tabular-nums">
+                        {Math.max(0.5, Math.min(2.0, settings.voiceSpeed ?? 1.0)).toFixed(2)}x
+                      </span>
+                    </div>
+                    <input
+                      id="settings-voice-speed-slider"
+                      type="range"
+                      aria-label="AI speaking speed"
+                      min={0.5}
+                      max={2.0}
+                      step={0.05}
+                      value={Math.max(0.5, Math.min(2.0, settings.voiceSpeed ?? 1.0))}
+                      onChange={(e) => applyVoiceSpeed(Number(e.target.value))}
+                      className="w-full accent-sky-400 cursor-pointer"
+                    />
+                    <div className="flex justify-between text-[10px] text-purple-200/55 font-mono tabular-nums">
+                      <span>0.5x</span>
+                      <span>1.0x</span>
+                      <span>1.5x</span>
+                      <span>2.0x</span>
+                    </div>
+                  </label>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {[0.5, 0.75, 1.0, 1.25, 1.5, 2.0].map((presetSpeed) => {
+                      const currentSpeed = Math.max(0.5, Math.min(2.0, settings.voiceSpeed ?? 1.0));
+                      const isActive = Math.abs(currentSpeed - presetSpeed) < 0.01;
+                      return (
+                        <button
+                          key={presetSpeed}
+                          type="button"
+                          onClick={() => applyVoiceSpeed(presetSpeed)}
+                          className={`px-2 py-0.5 rounded-lg border text-[10.5px] font-mono font-bold cursor-pointer transition-colors ${
+                            isActive
+                              ? 'bg-sky-500/25 border-sky-400/70 text-sky-200'
+                              : 'bg-white/5 border-white/10 text-purple-200/75 hover:text-white'
+                          }`}
+                        >
+                          {presetSpeed}x
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="mt-2.5 pt-2 border-t border-white/10 space-y-1.5">
+                    <div className="text-[11px] font-bold text-sky-300">Quick-Select Common Speeds:</div>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {[
+                        { label: '0.75x', val: 0.75 },
+                        { label: '1.0x', val: 1.0 },
+                        { label: '1.25x', val: 1.25 },
+                        { label: '1.5x', val: 1.5 },
+                      ].map((item) => {
+                        const currentSpeed = Math.max(0.5, Math.min(2.0, settings.voiceSpeed ?? 1.0));
+                        const isActive = Math.abs(currentSpeed - item.val) < 0.01;
+                        return (
+                          <button
+                            key={item.val}
+                            type="button"
+                            onClick={() => applyVoiceSpeed(item.val)}
+                            className={`px-2.5 py-1 rounded-xl text-xs font-mono font-bold border transition-all cursor-pointer ${
+                              isActive
+                                ? 'bg-sky-500/25 border-sky-400 text-sky-200'
+                                : 'bg-white/5 border-white/10 text-purple-200/75 hover:text-white'
+                            }`}
+                          >
+                            {item.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
                 </div>
-                <input
-                  type="range"
-                  min={0.1}
-                  max={1}
-                  step={0.05}
-                  value={settings.voiceVolume ?? 1.0}
-                  onChange={(e) => onUpdateSettings({ voiceVolume: Number(e.target.value) })}
-                  className="w-full accent-sky-400 cursor-pointer"
-                />
-              </label>
+
+                <label className="space-y-1.5">
+                  <div className="flex justify-between text-purple-200/80">
+                    <span className="flex items-center gap-1">
+                      <Volume2 className="w-3.5 h-3.5 text-sky-400" />
+                      <span>Volume</span>
+                    </span>
+                    <span className="font-mono font-bold text-white tabular-nums">
+                      {Math.round((settings.voiceVolume ?? 1) * 100)}%
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    aria-label="Voice volume"
+                    min={0.1}
+                    max={1}
+                    step={0.05}
+                    value={settings.voiceVolume ?? 1.0}
+                    onChange={(e) => {
+                      const nextVolume = Number(e.target.value);
+                      voiceAssistant.configure({ volume: nextVolume });
+                      onUpdateSettings({ voiceVolume: nextVolume });
+                    }}
+                    className="w-full accent-sky-400 cursor-pointer"
+                  />
+                </label>
+              </div>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
@@ -1242,8 +2141,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   }
                   onUpdateSettings({ autoSpeakAIResponses: nextVal });
                 }}
-                label="Voice Reader (Auto-Speak Replies)"
-                description="Automatically speak AI answers aloud when enabled."
+                label="Voice Reader (Voice Studio Auto-Speak)"
+                description="Off by default. Chat responses stay silent unless you click Read on a message."
               />
               <PillSwitch
                 checked={settings.handsFreeMode}
@@ -1286,29 +2185,75 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-              <div className="p-3.5 rounded-2xl v2-neu-inset border border-white/10 space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <span className="font-bold text-white flex items-center gap-1.5">
-                    <Cpu className="w-4 h-4 text-sky-400" />
-                    <span>Google Gemini Engine</span>
-                  </span>
-                  <span
-                    className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
-                      aiHealth?.state === 'connected'
-                        ? 'bg-emerald-500/20 text-emerald-300'
-                        : aiHealth?.state === 'offline'
-                        ? 'bg-amber-500/20 text-amber-300'
-                        : 'bg-purple-500/20 text-purple-200'
-                    }`}
+              {(() => {
+                const activeProviderId: AIProviderId = settings.aiProvider || aiHealth?.activeProvider || 'gemini';
+                const providerMeta = AI_PROVIDER_METADATA[activeProviderId];
+                const rawProviderStatus = (providersStatus || aiHealth?.providers)?.[activeProviderId];
+                const normalizedStatus = normalizeProviderStatusInfo(activeProviderId, rawProviderStatus);
+                const healthDisplay = resolveProviderHealthDisplay(normalizedStatus, {
+                  isTesting: testingProviderId === activeProviderId,
+                  isRefreshing: isLoadingProvidersStatus,
+                });
+                const resolvedStatus =
+                  rawProviderStatus?.status ||
+                  (aiHealth?.state === 'connected'
+                    ? 'connected'
+                    : aiHealth?.activeProviderConfigured === false
+                    ? 'not_configured'
+                    : 'error');
+                const compactLatencyText =
+                  typeof normalizedStatus.latencyMs === 'number'
+                    ? `${Math.round(normalizedStatus.latencyMs)}ms`
+                    : 'Untested';
+                return (
+                  <div
+                    className="p-3.5 rounded-2xl v2-neu-inset border border-white/10 space-y-1.5"
+                    title={healthDisplay.tooltip}
                   >
-                    {aiHealth?.state || (isOnline ? 'Ready' : 'Offline')}
-                  </span>
-                </div>
-                <div className="text-[11px] text-purple-200/75 tabular-nums">
-                  Model: {aiHealth?.model || settings.geminiModel || 'gemini-4-hydrogen'}
-                  {aiHealth?.latencyMs ? ` · ${aiHealth.latencyMs} ms` : ''}
-                </div>
-              </div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-bold text-white flex items-center gap-2 min-w-0">
+                        <span
+                          role="status"
+                          aria-label={healthDisplay.tooltip}
+                          className={`w-2.5 h-2.5 rounded-full shrink-0 ${healthDisplay.dotClass}`}
+                        />
+                        <span
+                          className={`text-[11px] font-semibold tabular-nums shrink-0 ${
+                            healthDisplay.tone === 'green'
+                              ? 'text-emerald-300'
+                              : healthDisplay.tone === 'yellow'
+                              ? 'text-amber-300'
+                              : 'text-rose-300'
+                          }`}
+                        >
+                          {compactLatencyText}
+                        </span>
+                        <Cpu className="w-4 h-4 text-sky-400 shrink-0" />
+                        <span className="truncate">{providerMeta.name} Engine</span>
+                      </span>
+                      <span
+                        className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase shrink-0 ${
+                          healthDisplay.tone === 'green'
+                            ? 'bg-emerald-500/20 text-emerald-300'
+                            : healthDisplay.tone === 'yellow'
+                            ? 'bg-amber-500/20 text-amber-300'
+                            : 'bg-rose-500/20 text-rose-300'
+                        }`}
+                      >
+                        {isOnline ? healthDisplay.label : 'Offline'}
+                      </span>
+                    </div>
+                    <div className="text-[11px] text-purple-200/75 tabular-nums truncate">
+                      Model:{' '}
+                      {(activeProviderId === 'openrouter' ? settings.openRouterModel : undefined) ||
+                        settings.aiModel ||
+                        aiHealth?.model ||
+                        providerMeta.defaultModel}
+                      {` · ${healthDisplay.latencyText} · ${healthDisplay.timestampText}`}
+                    </div>
+                  </div>
+                );
+              })()}
 
               <div className="p-3.5 rounded-2xl v2-neu-inset border border-white/10 space-y-1.5">
                 <div className="flex items-center justify-between">
@@ -1355,6 +2300,87 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               </button>
             </div>
 
+            {/* Real Backend Connection History Log */}
+            <div
+              aria-label="Connection History"
+              className="p-4 rounded-2xl v2-neu-inset border border-white/10 space-y-3"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-xs font-bold text-white">
+                  <History className="w-4 h-4 text-sky-400" />
+                  <span>Connection History</span>
+                </div>
+                {onRefreshProvidersStatus && (
+                  <button
+                    type="button"
+                    onClick={onRefreshProvidersStatus}
+                    disabled={isLoadingProvidersStatus}
+                    className="px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-[10.5px] font-semibold text-purple-200 inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-3 h-3 ${isLoadingProvidersStatus ? 'animate-spin' : ''}`} />
+                    <span>Refresh</span>
+                  </button>
+                )}
+              </div>
+
+              {aiHealth?.connectionHistory && aiHealth.connectionHistory.length > 0 ? (
+                <div className="overflow-x-auto max-h-60 overflow-y-auto">
+                  <table className="w-full text-left border-collapse text-[11px]">
+                    <thead>
+                      <tr className="border-b border-white/10 text-[10px] uppercase tracking-wider text-purple-200/65">
+                        <th className="py-1.5 pr-2">Provider</th>
+                        <th className="py-1.5 pr-2">Model</th>
+                        <th className="py-1.5 pr-2">Status</th>
+                        <th className="py-1.5 pr-2">Latency</th>
+                        <th className="py-1.5 pr-2">Time</th>
+                        <th className="py-1.5">Details</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-white/5">
+                      {aiHealth.connectionHistory.slice(0, 15).map((entry) => (
+                        <tr key={entry.id} className="text-purple-100/90">
+                          <td className="py-1.5 pr-2 font-semibold whitespace-nowrap">
+                            {AI_PROVIDER_METADATA[entry.provider]?.shortName || entry.provider}
+                          </td>
+                          <td className="py-1.5 pr-2 font-mono text-[10px] text-sky-300 max-w-[140px] truncate" title={entry.model}>
+                            {entry.model}
+                          </td>
+                          <td className="py-1.5 pr-2 whitespace-nowrap">
+                            <span
+                              className={`px-1.5 py-0.5 rounded text-[9.5px] font-bold uppercase ${
+                                entry.status === 'success'
+                                  ? 'bg-emerald-500/20 text-emerald-300'
+                                  : 'bg-rose-500/20 text-rose-300'
+                              }`}
+                            >
+                              {entry.status}
+                            </span>
+                          </td>
+                          <td className="py-1.5 pr-2 font-mono tabular-nums whitespace-nowrap">
+                            {typeof entry.latencyMs === 'number' && entry.latencyMs > 0 ? `${entry.latencyMs} ms` : '—'}
+                          </td>
+                          <td className="py-1.5 pr-2 font-mono tabular-nums text-[10px] text-purple-200/70 whitespace-nowrap">
+                            {new Date(entry.timestamp).toLocaleTimeString([], {
+                              hour: '2-digit',
+                              minute: '2-digit',
+                              second: '2-digit',
+                            })}
+                          </td>
+                          <td className="py-1.5 text-[10px] text-rose-200/85 max-w-[200px] truncate" title={entry.error || entry.source}>
+                            {entry.error || (entry.source === 'test' ? 'Connection Test' : 'Chat Request')}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="text-[11px] text-purple-200/65">
+                  No connection tests or generation events recorded yet in this server session. Run Test Connection above to record live telemetry.
+                </p>
+              )}
+            </div>
+
             <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-white/10">
               {isOwnerAdmin ? (
                 <button
@@ -1385,11 +2411,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       )}
 
       {/* Terms of Service & Privacy Policy Modal */}
-      <TermsPrivacyModal
-        isOpen={isTermsModalOpen}
-        onClose={() => setIsTermsModalOpen(false)}
-        initialTab={termsModalTab}
-      />
+      {isTermsModalOpen && (
+        <Suspense fallback={null}>
+          <LazyTermsPrivacyModal
+            isOpen={isTermsModalOpen}
+            onClose={() => setIsTermsModalOpen(false)}
+            initialTab={termsModalTab}
+          />
+        </Suspense>
+      )}
     </div>
   );
 };

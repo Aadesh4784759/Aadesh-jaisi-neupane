@@ -268,7 +268,7 @@ export const MandatoryAuthGate: React.FC<MandatoryAuthGateProps> = ({
 
   return (
     <div
-      className="min-h-screen w-full bg-[#090a0f] text-gray-100 flex flex-col items-center justify-center px-4 py-8 relative overflow-y-auto"
+      className="min-h-screen min-h-[100dvh] w-full bg-[#090a0f] text-gray-100 flex flex-col items-center px-4 py-8 relative"
       role="main"
       aria-label="Aadesh AI Authentication"
     >
@@ -281,7 +281,7 @@ export const MandatoryAuthGate: React.FC<MandatoryAuthGateProps> = ({
         <div className="absolute -bottom-32 right-1/4 w-[420px] h-[420px] rounded-full bg-cyan-500/12 blur-3xl" />
       </div>
 
-      <div className="relative z-10 w-full max-w-md space-y-5">
+      <div className="relative z-10 w-full max-w-md space-y-5 my-auto">
         {/* Official Aadesh AI Brand Header */}
         <div className="text-center space-y-2.5">
           <div className="mx-auto flex justify-center">

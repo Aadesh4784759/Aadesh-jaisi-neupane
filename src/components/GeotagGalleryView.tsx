@@ -52,7 +52,6 @@ interface GeotagGalleryViewProps {
   onAddMedia: (media: GeotaggedMedia) => void;
   onDeleteMedia: (id: string) => void;
   isOnline: boolean;
-  customGeminiApiKey?: string;
 }
 
 export const GeotagGalleryView: React.FC<GeotagGalleryViewProps> = ({
@@ -60,7 +59,6 @@ export const GeotagGalleryView: React.FC<GeotagGalleryViewProps> = ({
   onAddMedia,
   onDeleteMedia,
   isOnline,
-  customGeminiApiKey,
 }) => {
   const [selectedLocationFilter, setSelectedLocationFilter] = useState<string>('all');
   const [selectedTagFilter, setSelectedTagFilter] = useState<string>('all');
@@ -212,7 +210,6 @@ export const GeotagGalleryView: React.FC<GeotagGalleryViewProps> = ({
 
       const headers = await getAuthHeaders({
         'Content-Type': 'application/json',
-        ...(customGeminiApiKey ? { 'x-gemini-api-key': customGeminiApiKey } : {}),
       });
       const res = await fetch('/api/analyze-geotag', {
         method: 'POST',
@@ -223,7 +220,6 @@ export const GeotagGalleryView: React.FC<GeotagGalleryViewProps> = ({
           locationName: uploadLocation.name,
           lat: uploadLocation.lat,
           lng: uploadLocation.lng,
-          customApiKey: customGeminiApiKey,
         }),
       });
 
@@ -774,7 +770,7 @@ export const GeotagGalleryView: React.FC<GeotagGalleryViewProps> = ({
       {/* UPLOAD GEOTAGGED MEDIA MODAL */}
       {isUploadModalOpen && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
-          <div className="glass-card rounded-3xl p-5 sm:p-7 max-w-lg w-full border border-purple-500/50 shadow-2xl relative space-y-4 max-h-[90vh] overflow-y-auto">
+          <div className="glass-card rounded-3xl p-5 sm:p-7 max-w-lg w-full border border-purple-500/50 shadow-2xl relative space-y-4 max-h-[90vh] max-h-[90dvh] overflow-y-auto scroll-pane">
             <div className="flex items-center justify-between border-b border-white/10 pb-3">
               <h3 className="text-base font-bold text-white flex items-center gap-2">
                 <Upload className="w-4 h-4 text-purple-400" />

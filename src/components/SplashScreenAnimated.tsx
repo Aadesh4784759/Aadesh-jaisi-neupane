@@ -16,8 +16,8 @@ export interface SplashScreenProps {
 }
 
 const LOADING_MESSAGES = {
-  initializing: 'Initializing Aadesh AI...',
-  connecting: 'Connecting to Google Gemini...',
+  initializing: 'Initializing AI...',
+  connecting: 'Connecting to AI Engine...',
   welcome: 'Welcome to Aadesh AI',
 } as const;
 
@@ -261,7 +261,7 @@ const SplashScreenAnimated: React.FC<SplashScreenProps> = ({
                 isLightTheme ? 'text-slate-600' : 'text-purple-200/80'
               }`}
             >
-              Powered by Google Gemini
+              One AI. Endless Possibilities.
             </motion.p>
           </div>
 
@@ -328,7 +328,7 @@ const SplashScreenAnimated: React.FC<SplashScreenProps> = ({
             {/* Real Connection Verification Pill inside HUD */}
             <div className="mt-2.5 flex items-center justify-between text-[11px]">
               <span className={isLightTheme ? 'text-slate-500' : 'text-purple-300/75'}>
-                Gemini Link
+                AI Service
               </span>
               <span
                 className={`inline-flex items-center gap-1.5 font-semibold ${
@@ -370,7 +370,7 @@ const SplashScreenAnimated: React.FC<SplashScreenProps> = ({
                     <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
                   )}
                   <span>
-                    {initError || 'Unable to confirm live Gemini service yet. Retry or enter offline mode.'}
+                    {initError || 'Unable to confirm live AI service yet. Retry or continue.'}
                   </span>
                 </div>
                 <div className="flex items-center gap-2">

@@ -58,6 +58,39 @@
           "description": "Preferred application visual theme ID",
           "maxLength": 40
         },
+        "aiProvider": {
+          "type": "string",
+          "description": "User selected AI provider ID",
+          "enum": ["gemini", "groq", "openrouter"]
+        },
+        "aiModel": {
+          "type": "string",
+          "description": "User selected model ID for the active AI provider",
+          "maxLength": 120
+        },
+        "openRouterModel": {
+          "type": "string",
+          "description": "User selected OpenRouter model ID",
+          "maxLength": 120
+        },
+        "aiResponseLanguage": {
+          "type": "string",
+          "description": "Preferred AI response language ISO code (default en)",
+          "maxLength": 20
+        },
+        "autoDetectInputLanguage": {
+          "type": "boolean",
+          "description": "Whether AI replies should auto-detect and match user input language"
+        },
+        "translationEnabled": {
+          "type": "boolean",
+          "description": "Whether AI messages automatically generate secondary translations (default false)"
+        },
+        "translationLanguage": {
+          "type": "string",
+          "description": "Target language ISO code for secondary translations",
+          "maxLength": 20
+        },
         "termsAccepted": {
           "type": "boolean",
           "description": "Whether the user explicitly accepted Terms of Service and Privacy Policy"
@@ -115,7 +148,7 @@
         },
         "recoveryCount": {
           "type": "number",
-          "description": "Number of streak recoveries used in recoveryMonth (max 3 per calendar month)"
+          "description": "Number of streak recoveries used in recoveryMonth (max 5 per calendar month)"
         },
         "recoveryMonth": {
           "type": "string",
@@ -130,6 +163,27 @@
           "type": "string",
           "description": "YYYY-MM-DD of the last active day prior to streak break",
           "maxLength": 20
+        },
+        "xp": {
+          "type": "number",
+          "description": "Cumulative user experience points"
+        },
+        "level": {
+          "type": "number",
+          "description": "User experience level derived from usage XP and streak consistency"
+        },
+        "levelTitle": {
+          "type": "string",
+          "description": "Display badge title for current experience level",
+          "maxLength": 40
+        },
+        "streakGoalDays": {
+          "type": "number",
+          "description": "User target streak goal in days (1-365)"
+        },
+        "recoveredDates": {
+          "type": "array",
+          "description": "Recovered YYYY-MM-DD calendar date keys bridged via streak recovery"
         },
         "status": {
           "type": "string",
@@ -426,14 +480,20 @@
     },
     "AIMemory": {
       "title": "AIMemory",
-      "description": "User-approved AI memory preference or instruction",
+      "description": "User-approved Power Memory item persisted per Firebase UID",
       "type": "object",
       "properties": {
         "id": { "type": "string", "maxLength": 128 },
         "userId": { "type": "string", "maxLength": 128 },
-        "category": { "type": "string", "enum": ["preference", "instruction", "fact", "goal"] },
+        "category": {
+          "type": "string",
+          "enum": ["identity", "preference", "goal", "project", "interest", "comedy", "instruction", "fact", "conversation"]
+        },
         "content": { "type": "string", "maxLength": 2000 },
         "approved": { "type": "boolean" },
+        "source": { "type": "string", "enum": ["manual", "smart_auto", "command", "chat"] },
+        "isSensitive": { "type": "boolean" },
+        "keywords": { "type": "array" },
         "createdAt": { "type": "string", "maxLength": 50 },
         "updatedAt": { "type": "string", "maxLength": 50 }
       },
@@ -548,6 +608,55 @@
         "completedAt": { "type": "string", "maxLength": 50 }
       },
       "required": ["id", "userId", "taskTitle", "category", "tone", "triggerType", "status", "statusMessage", "outputSummary", "startedAt"]
+    },
+    "StreakLeaderboardEntry": {
+      "title": "StreakLeaderboardEntry",
+      "description": "Public non-PII streak leaderboard record for real-time top 10 global streak rankings",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "maxLength": 128 },
+        "displayName": { "type": "string", "maxLength": 64 },
+        "avatarUrl": { "type": "string", "maxLength": 1000 },
+        "avatarColor": { "type": "string", "maxLength": 24 },
+        "country": { "type": "string", "maxLength": 80 },
+        "countryFlag": { "type": "string", "maxLength": 16 },
+        "currentStreak": { "type": "number" },
+        "longestStreak": { "type": "number" },
+        "lastActiveDate": { "type": "string", "maxLength": 20 },
+        "level": { "type": "number" },
+        "updatedAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["userId", "displayName", "currentStreak", "longestStreak", "updatedAt"]
+    },
+    "SuggestionAnalytics": {
+      "title": "SuggestionAnalytics",
+      "description": "Tracks user engagement click counts on AI Suggested Replies to personalize future suggestions",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "normalizedKey": { "type": "string", "maxLength": 120 },
+        "sampleText": { "type": "string", "maxLength": 160 },
+        "category": {
+          "type": "string",
+          "enum": ["deep_dive", "examples", "summary", "translate", "action_steps", "compare", "explore_local", "visual", "general"]
+        },
+        "language": { "type": "string", "maxLength": 20 },
+        "clickCount": { "type": "number" },
+        "lastClickedAt": { "type": "string", "maxLength": 50 },
+        "createdAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "userId", "normalizedKey", "sampleText", "category", "clickCount", "lastClickedAt", "createdAt"]
+    },
+    "AdminAllowlist": {
+      "title": "AdminAllowlist",
+      "description": "Strict read-only admin UID marker records managed out-of-band; never client-writable",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "email": { "type": "string", "maxLength": 160 }
+      },
+      "required": ["uid"]
     }
   },
   "firestore": {
@@ -591,6 +700,10 @@
       "schema": "AutomationRunLog",
       "description": "User automation execution activity log entries with status and results"
     },
+    "/users/{userId}/suggestionAnalytics/{statId}": {
+      "schema": "SuggestionAnalytics",
+      "description": "Per-user click frequency analytics for Suggested Replies to personalize future AI suggestions"
+    },
     "/usage_analytics/{eventId}": {
       "schema": "UsageAnalytics",
       "description": "Platform usage analytics written and read by the owning authenticated user for streaks/metrics, and read globally by owner admin"
@@ -598,6 +711,14 @@
     "/admin_settings/{docId}": {
       "schema": "AdminSettings",
       "description": "Platform settings managed strictly by verified owner admin"
+    },
+    "/admins/{adminUid}": {
+      "schema": "AdminAllowlist",
+      "description": "Read-only admin verification marker strictly readable by own UID and never client-writable"
+    },
+    "/streak_leaderboard/{userId}": {
+      "schema": "StreakLeaderboardEntry",
+      "description": "Non-PII global streak leaderboard readable by authenticated users for top-10 streak rankings and writable only by the owning user"
     }
   }
 }

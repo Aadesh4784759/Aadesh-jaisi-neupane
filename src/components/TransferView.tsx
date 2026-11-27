@@ -215,8 +215,12 @@ export const TransferView: React.FC<TransferViewProps> = ({
     try {
       const headers = await getAuthHeaders({
         'Content-Type': 'application/json',
-        ...(settings?.customGeminiApiKey ? { 'x-gemini-api-key': settings.customGeminiApiKey } : {}),
       });
+      const activeProvider = settings?.aiProvider || 'gemini';
+      const activeModel =
+        activeProvider === 'openrouter'
+          ? settings?.openRouterModel || settings?.aiModel
+          : settings?.aiModel;
 
       const res = await fetch('/api/translate', {
         method: 'POST',
@@ -225,7 +229,8 @@ export const TransferView: React.FC<TransferViewProps> = ({
           text: cleanText,
           sourceLang,
           targetLang,
-          customApiKey: settings?.customGeminiApiKey,
+          aiProvider: activeProvider,
+          aiModel: activeModel,
         }),
       });
 

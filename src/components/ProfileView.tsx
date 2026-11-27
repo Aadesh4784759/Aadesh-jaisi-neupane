@@ -376,10 +376,15 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
 
             <div className="space-y-2 text-xs">
               <div className="p-3 rounded-xl bg-[#090a0f] border border-[#232738] flex items-center justify-between">
-                <span className="text-gray-300">Default Translation Target</span>
+                <span className="text-gray-300">AI Response Language</span>
                 <select
-                  value={settings.defaultTargetLanguage}
-                  onChange={(e) => onUpdateSettings({ defaultTargetLanguage: e.target.value })}
+                  value={settings.aiResponseLanguage || settings.defaultTargetLanguage || 'en'}
+                  onChange={(e) =>
+                    onUpdateSettings({
+                      aiResponseLanguage: e.target.value,
+                      defaultTargetLanguage: e.target.value,
+                    })
+                  }
                   className="bg-[#131520] border border-purple-500/30 rounded-lg px-2 py-1 text-purple-200 font-semibold outline-none"
                 >
                   {SUPPORTED_LANGUAGES.map((l) => (

@@ -22,7 +22,11 @@ import {
   logOut,
   formatAuthError,
 } from '../utils/firebase';
-import { OWNER_ADMIN_EMAIL } from '../utils/storage';
+import {
+  getStoredUserStreakBackup,
+  getUserLocalExtras,
+  OWNER_ADMIN_EMAIL,
+} from '../utils/storage';
 import { TermsPrivacyModal } from './TermsPrivacyModal';
 
 interface AuthModalProps {
@@ -88,6 +92,26 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         ? new Date(fbUser.metadata.creationTime).getTime()
         : Date.now();
 
+      const savedBackup = getStoredUserStreakBackup(fbUser.uid);
+      const savedExtras = getUserLocalExtras(fbUser.uid);
+      const sameAccount = currentUser.id === fbUser.uid;
+      const preservedStreak = Math.max(
+        sameAccount ? currentUser.currentStreak ?? currentUser.streakDays ?? 0 : 0,
+        savedBackup?.currentStreak ?? 0,
+        savedExtras.currentStreak ?? 0
+      );
+      const preservedLongest = Math.max(
+        preservedStreak,
+        sameAccount ? currentUser.longestStreak ?? 0 : 0,
+        savedBackup?.longestStreak ?? 0,
+        savedExtras.longestStreak ?? 0
+      );
+      const preservedXp = Math.max(
+        sameAccount ? currentUser.xp ?? 0 : 0,
+        savedBackup?.xp ?? 0,
+        savedExtras.xp ?? 0
+      );
+
       const updatedUser: UserProfile = {
         ...currentUser,
         id: fbUser.uid,
@@ -101,8 +125,14 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         role: userEmail.toLowerCase() === OWNER_ADMIN_EMAIL && fbUser.emailVerified ? 'admin' : 'user',
         createdAt: createdAtMs,
         lastActiveAt: Date.now(),
-        streakDays: currentUser.streakDays || 0,
-        xp: currentUser.xp || 0,
+        streakDays: preservedStreak,
+        currentStreak: preservedStreak,
+        longestStreak: preservedLongest,
+        lastActiveDate:
+          savedBackup?.lastActiveDate ||
+          savedExtras.lastActiveDate ||
+          (sameAccount ? currentUser.lastActiveDate : ''),
+        xp: preservedXp,
       };
 
       onUpdateUser(updatedUser);
@@ -139,6 +169,26 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         ? new Date(fbUser.metadata.creationTime).getTime()
         : Date.now();
 
+      const savedBackup = getStoredUserStreakBackup(fbUser.uid);
+      const savedExtras = getUserLocalExtras(fbUser.uid);
+      const sameAccount = currentUser.id === fbUser.uid;
+      const preservedStreak = Math.max(
+        sameAccount ? currentUser.currentStreak ?? currentUser.streakDays ?? 0 : 0,
+        savedBackup?.currentStreak ?? 0,
+        savedExtras.currentStreak ?? 0
+      );
+      const preservedLongest = Math.max(
+        preservedStreak,
+        sameAccount ? currentUser.longestStreak ?? 0 : 0,
+        savedBackup?.longestStreak ?? 0,
+        savedExtras.longestStreak ?? 0
+      );
+      const preservedXp = Math.max(
+        sameAccount ? currentUser.xp ?? 0 : 0,
+        savedBackup?.xp ?? 0,
+        savedExtras.xp ?? 0
+      );
+
       const updatedUser: UserProfile = {
         ...currentUser,
         id: fbUser.uid,
@@ -152,8 +202,14 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         role: userEmail.toLowerCase() === OWNER_ADMIN_EMAIL && fbUser.emailVerified ? 'admin' : 'user',
         createdAt: createdAtMs,
         lastActiveAt: Date.now(),
-        streakDays: currentUser.streakDays || 0,
-        xp: currentUser.xp || 0,
+        streakDays: preservedStreak,
+        currentStreak: preservedStreak,
+        longestStreak: preservedLongest,
+        lastActiveDate:
+          savedBackup?.lastActiveDate ||
+          savedExtras.lastActiveDate ||
+          (sameAccount ? currentUser.lastActiveDate : ''),
+        xp: preservedXp,
       };
       onUpdateUser(updatedUser);
       showToast(`Welcome back, ${updatedUser.name}!`);
@@ -290,9 +346,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-3 sm:p-5 animate-in fade-in duration-200">
-      <div className="glass-card rounded-3xl max-w-md w-full border border-purple-500/50 shadow-2xl relative flex flex-col max-h-[92vh] overflow-hidden">
+      <div className="glass-card rounded-3xl max-w-md w-full border border-purple-500/50 shadow-2xl relative flex flex-col max-h-[92vh] max-h-[92dvh] overflow-hidden">
         {/* Top Header */}
-        <div className="p-4 sm:p-5 border-b border-white/10 flex items-center justify-between">
+        <div className="p-4 sm:p-5 border-b border-white/10 flex items-center justify-between shrink-0">
           <div className="flex items-center gap-2.5">
             <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-purple-600 to-indigo-600 flex items-center justify-center text-white shadow-md">
               <ShieldCheck className="w-5 h-5 text-white" />
@@ -321,7 +377,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         </div>
 
         {/* Modal Body */}
-        <div className="p-4 sm:p-5 overflow-y-auto space-y-4">
+        <div className="p-4 sm:p-5 flex-1 min-h-0 overflow-y-auto scroll-pane space-y-4">
           {currentUser.isLoggedIn ? (
             <div className="p-3.5 rounded-2xl bg-[#090a0f] border border-purple-500/30 flex items-center justify-between">
               <div className="flex items-center gap-3 min-w-0">

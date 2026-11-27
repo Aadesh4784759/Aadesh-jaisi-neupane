@@ -140,8 +140,12 @@ export const DocumentAssistantModal: React.FC<DocumentAssistantModalProps> = ({
 
       const headers = await getAuthHeaders({
         'Content-Type': 'application/json',
-        ...(settings.customGeminiApiKey ? { 'x-gemini-api-key': settings.customGeminiApiKey } : {}),
       });
+      const activeProvider = settings.aiProvider || 'gemini';
+      const activeModel =
+        activeProvider === 'openrouter'
+          ? settings.openRouterModel || settings.aiModel
+          : settings.aiModel;
 
       const res = await fetch('/api/summarize', {
         method: 'POST',
@@ -149,7 +153,8 @@ export const DocumentAssistantModal: React.FC<DocumentAssistantModalProps> = ({
         body: JSON.stringify({
           text: contentText.slice(0, 8000),
           targetLanguage: settings.defaultTargetLanguage || 'ne',
-          customApiKey: settings.customGeminiApiKey,
+          aiProvider: activeProvider,
+          aiModel: activeModel,
         }),
       });
 
@@ -192,9 +197,9 @@ export const DocumentAssistantModal: React.FC<DocumentAssistantModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-3 sm:p-6 animate-in fade-in duration-200">
-      <div className="glass-card rounded-3xl max-w-4xl w-full border border-purple-500/50 shadow-2xl relative flex flex-col max-h-[92vh] overflow-hidden">
+      <div className="glass-card rounded-3xl max-w-4xl w-full border border-purple-500/50 shadow-2xl relative flex flex-col max-h-[92vh] max-h-[92dvh] overflow-hidden">
         {/* Modal Header */}
-        <div className="p-4 sm:p-6 border-b border-white/10 flex items-center justify-between bg-gradient-to-r from-purple-950/40 via-indigo-950/20 to-transparent">
+        <div className="p-4 sm:p-6 border-b border-white/10 flex items-center justify-between bg-gradient-to-r from-purple-950/40 via-indigo-950/20 to-transparent shrink-0">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-2xl purple-glow-btn flex items-center justify-center text-white font-bold shadow-md">
               <BookOpen className="w-5 h-5" />
@@ -222,7 +227,7 @@ export const DocumentAssistantModal: React.FC<DocumentAssistantModalProps> = ({
         {/* Modal Body: Sidebar List + Document Inspector */}
         <div className="flex-1 min-h-0 flex flex-col md:flex-row overflow-hidden">
           {/* Left Sidebar: Document List & Upload Button */}
-          <div className="w-full md:w-72 border-r border-white/10 p-3 sm:p-4 flex flex-col gap-3 bg-[#090a0f]/60 overflow-hidden shrink-0">
+          <div className="w-full md:w-72 max-h-52 md:max-h-none border-b md:border-b-0 md:border-r border-white/10 p-3 sm:p-4 flex flex-col gap-3 bg-[#090a0f]/60 overflow-hidden shrink-0 min-h-0">
             <input
               type="file"
               ref={fileInputRef}
@@ -263,7 +268,7 @@ export const DocumentAssistantModal: React.FC<DocumentAssistantModalProps> = ({
             </div>
 
             {/* Document Items */}
-            <div className="overflow-y-auto space-y-1.5 flex-grow pr-1">
+            <div className="overflow-y-auto scroll-pane space-y-1.5 flex-1 min-h-0 pr-1">
               {filteredDocs.length === 0 ? (
                 <div className="py-8 text-center text-xs text-gray-500">
                   No documents found. Upload one above!
@@ -310,7 +315,7 @@ export const DocumentAssistantModal: React.FC<DocumentAssistantModalProps> = ({
           </div>
 
           {/* Right Inspector: Active Document Summary, Key Points & Content Preview */}
-          <div className="flex-1 min-w-0 p-4 sm:p-6 overflow-y-auto space-y-4 flex flex-col justify-between">
+          <div className="flex-1 min-h-0 min-w-0 p-4 sm:p-6 overflow-y-auto scroll-pane space-y-4 flex flex-col justify-between">
             {activeDoc ? (
               <div className="space-y-4">
                 {/* Active Header */}

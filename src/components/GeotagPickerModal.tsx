@@ -261,7 +261,7 @@ export const GeotagPickerModal: React.FC<GeotagPickerModalProps> = ({
         aria-modal="true"
         aria-label="Interactive Location Sharing and Map"
         onClick={(e) => e.stopPropagation()}
-        className="glass-card rounded-t-3xl sm:rounded-3xl p-4 sm:p-6 max-w-2xl w-full max-h-[92vh] overflow-y-auto border border-purple-500/40 shadow-2xl relative space-y-4"
+        className="glass-card rounded-t-3xl sm:rounded-3xl p-4 sm:p-6 max-w-2xl w-full max-h-[92vh] max-h-[92dvh] overflow-y-auto scroll-pane border border-purple-500/40 shadow-2xl relative space-y-4"
       >
         {/* Header */}
         <div className="flex items-center justify-between border-b border-white/10 pb-3">
