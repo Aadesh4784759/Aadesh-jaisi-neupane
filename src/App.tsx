@@ -1403,7 +1403,7 @@ export default function App() {
     }));
 
     const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), 7500);
+    const timeoutId = window.setTimeout(() => controller.abort(), 12000);
 
     try {
       const params = new URLSearchParams({ provider: activeProvider });

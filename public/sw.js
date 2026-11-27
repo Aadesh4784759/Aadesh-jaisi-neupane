@@ -1,8 +1,6 @@
 // Aadesh AI Global Hub Service Worker
-const CACHE_NAME = 'aadesh-ai-v3';
+const CACHE_NAME = 'aadesh-ai-v4';
 const STATIC_ASSETS = [
-  '/',
-  '/index.html',
   '/manifest.json',
   '/icon.svg',
 ];
@@ -28,29 +26,58 @@ self.addEventListener('activate', (event) => {
 });
 
 self.addEventListener('fetch', (event) => {
-  // Only cache GET requests, skip /api calls so API is always live
-  if (event.request.method !== 'GET' || event.request.url.includes('/api/')) {
+  const reqUrl = event.request.url;
+  // Skip non-GET, cross-origin backend calls (e.g. Vercel API), and /api/ routes
+  if (
+    event.request.method !== 'GET' ||
+    !reqUrl.startsWith(self.location.origin) ||
+    reqUrl.includes('/api/')
+  ) {
     return;
   }
 
+  // Always network-first for HTML / navigation so deployments never serve stale index.html -> old JS hashes
+  const acceptHeader = event.request.headers.get('accept') || '';
+  const pathname = new URL(reqUrl).pathname;
+  const isNavigationOrHtml =
+    event.request.mode === 'navigate' ||
+    acceptHeader.includes('text/html') ||
+    pathname === '/' ||
+    pathname.endsWith('/index.html');
+
+  if (isNavigationOrHtml) {
+    event.respondWith(
+      fetch(event.request, { cache: 'no-cache' })
+        .then((networkResponse) => {
+          if (networkResponse && networkResponse.status === 200) {
+            const copy = networkResponse.clone();
+            caches.open(CACHE_NAME).then((cache) => {
+              cache.put(event.request, copy);
+            });
+          }
+          return networkResponse;
+        })
+        .catch(() =>
+          caches.match(event.request).then((cached) => cached || caches.match('/index.html'))
+        )
+    );
+    return;
+  }
+
+  // Cache-first only for hashed immutable static assets and icons
   event.respondWith(
     caches.match(event.request).then((cachedResponse) => {
       if (cachedResponse) {
-        // Return cached and fetch in background (stale-while-revalidate)
-        fetch(event.request).then((networkResponse) => {
-          if (networkResponse && networkResponse.status === 200) {
-            caches.open(CACHE_NAME).then((cache) => {
-              cache.put(event.request, networkResponse);
-            });
-          }
-        }).catch(() => {});
         return cachedResponse;
       }
-      return fetch(event.request).catch(() => {
-        // Offline fallback to index
-        if (event.request.mode === 'navigate') {
-          return caches.match('/');
+      return fetch(event.request).then((networkResponse) => {
+        if (networkResponse && networkResponse.status === 200) {
+          const copy = networkResponse.clone();
+          caches.open(CACHE_NAME).then((cache) => {
+            cache.put(event.request, copy);
+          });
         }
+        return networkResponse;
       });
     })
   );

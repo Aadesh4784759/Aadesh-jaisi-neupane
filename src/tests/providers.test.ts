@@ -1055,5 +1055,32 @@ test('P28: Firebase Hosting routes /api requests to Vercel backend with strict o
       server.close((err) => (err ? reject(err) : resolve()))
     );
   }
+
+  // 5. Self-referential Firebase VITE_API_BASE_URL must still resolve to Vercel backend
+  assert.equal(
+    resolveApiBaseUrl({
+      envApiBaseUrl: 'https://aadesh-ai-global.web.app',
+      windowOrigin: 'https://aadesh-ai-global.web.app',
+      windowHostname: 'aadesh-ai-global.web.app',
+    }),
+    PRODUCTION_VERCEL_API_ORIGIN
+  );
+
+  // 6. Service Worker uses network-first HTML navigation and firebase.json sets no-cache on /
+  const swContent = fs.readFileSync(path.resolve(process.cwd(), 'public/sw.js'), 'utf8');
+  assert.doesNotMatch(swContent, /const CACHE_NAME = 'aadesh-ai-v3'/);
+  assert.match(swContent, /isNavigationOrHtml/);
+  assert.match(swContent, /cache:\s*'no-cache'/);
+
+  const firebaseConfig = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), 'firebase.json'), 'utf8'));
+  const hasRootNoCache =
+    Array.isArray(firebaseConfig?.hosting?.headers) &&
+    firebaseConfig.hosting.headers.some(
+      (h: any) =>
+        h.source === '/' &&
+        Array.isArray(h.headers) &&
+        h.headers.some((hdr: any) => hdr.key === 'Cache-Control' && /no-cache/.test(hdr.value))
+    );
+  assert.equal(hasRootNoCache, true);
 });
 

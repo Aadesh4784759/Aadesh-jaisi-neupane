@@ -57,10 +57,17 @@ export function resolveApiBaseUrl(options?: {
 
   const normalizedEnv = normalizeApiBaseUrl(envRaw);
   if (normalizedEnv) {
-    if (currentOrigin && normalizedEnv === currentOrigin.replace(/\/+$/, '')) {
-      return '';
+    try {
+      const envHost = new URL(normalizedEnv).hostname.toLowerCase();
+      if (!isFirebaseHostingHostname(envHost)) {
+        if (currentOrigin && normalizedEnv === currentOrigin.replace(/\/+$/, '')) {
+          return '';
+        }
+        return normalizedEnv;
+      }
+    } catch {
+      // Ignore malformed env URL
     }
-    return normalizedEnv;
   }
 
   if (isFirebaseHostingHostname(currentHostname)) {
