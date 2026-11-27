@@ -36,6 +36,7 @@ import { OWNER_ADMIN_EMAIL } from '../utils/storage';
 import { buildApiUrl } from '../utils/apiConfig';
 import { AdminAnalyticsChart } from './AdminAnalyticsChart';
 import { SecureBackupCenter } from './SecureBackupCenter';
+import { SecureRestoreCenter } from './SecureRestoreCenter';
 
 interface AdminDashboardViewProps {
   currentUser: UserProfile;
@@ -421,6 +422,9 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
 
       {/* Secure Backup Center */}
       <SecureBackupCenter userEmail={currentUser.email || OWNER_ADMIN_EMAIL} />
+
+      {/* Secure Restore Center */}
+      <SecureRestoreCenter userEmail={currentUser.email || OWNER_ADMIN_EMAIL} />
 
       {/* Daily Registrations + Owner Broadcast Banner */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
