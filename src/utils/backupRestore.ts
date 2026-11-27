@@ -4,6 +4,7 @@ import {
   writeBatch,
 } from 'firebase/firestore';
 import { db } from './firebase';
+import { validateRestoreBackupPayload } from './backupValidation';
 
 export type RestoreMode = 'missing_only' | 'selected_collections' | 'full_restore';
 
@@ -96,6 +97,11 @@ export async function performDryRunPreview(
   if (!db) throw new Error('Firestore is not initialized.');
   const firestoreDb = db;
 
+  const validation = validateRestoreBackupPayload(backupPayload);
+  if (!validation.valid) {
+    throw new Error(`Payload validation failed: ${validation.errors[0]}`);
+  }
+
   let totalBackupDocs = 0;
   let newDocsCount = 0;
   let existingDocsCount = 0;
@@ -174,6 +180,11 @@ export async function executeSecureRestore(
 ): Promise<RestoreExecutionResult> {
   if (!db) throw new Error('Firestore is not initialized.');
   const firestoreDb = db;
+
+  const validation = validateRestoreBackupPayload(backupPayload);
+  if (!validation.valid) {
+    throw new Error(`Security validation rejected restore: ${validation.errors[0]}`);
+  }
 
   const startedAt = new Date().toISOString();
   let restoredCount = 0;

@@ -27,6 +27,7 @@ import {
   resolveSafeModelForProvider,
   sanitizeProviderSecretText,
 } from './src/utils/aiProviders';
+import { validateRestoreBackupPayload } from './src/utils/backupValidation';
 
 dotenv.config();
 
@@ -234,6 +235,73 @@ async function verifyOwnerFromRequest(req: Request): Promise<{
     status: 200,
     user: result.user,
   };
+}
+
+export async function requireAadeshAdmin(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  const result = await verifyFirebaseUserFromRequest(req);
+  if (!result.ok || !result.user) {
+    res.status(result.status || 401).json({
+      ok: false,
+      authorized: false,
+      code: result.code || 'AUTH_REQUIRED',
+      error: result.error || 'Authentication required.',
+    });
+    return;
+  }
+
+  const email = (result.user.email || '').trim().toLowerCase();
+  if (email !== 'aadeshjaisi6@gmail.com' || !result.user.emailVerified) {
+    res.status(403).json({
+      ok: false,
+      authorized: false,
+      code: 'FORBIDDEN_NOT_ADMIN',
+      error: 'Access denied: Only aadeshjaisi6@gmail.com has administrator privileges to trigger database restoration.',
+    });
+    return;
+  }
+
+  (req as Request & { authUser?: AuthenticatedFirebaseUser }).authUser = result.user;
+  next();
+}
+
+export function validateRestorePayloadMiddleware(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): void {
+  const candidatePayload =
+    req.body?.payload || req.body?.backupPayload || (req.body?.metadata ? req.body : null);
+
+  if (!candidatePayload) {
+    if (req.body && Object.keys(req.body).length > 0 && !req.body.isPreflight) {
+      res.status(400).json({
+        ok: false,
+        code: 'MISSING_BACKUP_PAYLOAD',
+        error: 'Invalid request: JSON backup payload is required for restoration.',
+      });
+      return;
+    }
+    next();
+    return;
+  }
+
+  const validation = validateRestoreBackupPayload(candidatePayload);
+  if (!validation.valid) {
+    res.status(400).json({
+      ok: false,
+      code: 'INVALID_BACKUP_PAYLOAD',
+      error: `Backup payload security validation failed: ${validation.errors[0]}`,
+      errors: validation.errors,
+    });
+    return;
+  }
+
+  (req as Request & { restoreStats?: any }).restoreStats = validation.stats;
+  next();
 }
 
 const getCliArg = (flag: string): string | undefined => {
@@ -3852,6 +3920,26 @@ app.get('/api/admin/backup', async (req: Request, res: Response): Promise<void> 
     timestamp: new Date().toISOString(),
   });
 });
+
+app.post(
+  '/api/admin/restore',
+  requireAadeshAdmin,
+  validateRestorePayloadMiddleware,
+  async (req: Request, res: Response): Promise<void> => {
+    const authUser = (req as Request & { authUser?: AuthenticatedFirebaseUser }).authUser;
+    const restoreStats = (req as Request & { restoreStats?: any }).restoreStats;
+    res.json({
+      ok: true,
+      authorized: true,
+      owner: authUser,
+      message: 'Admin restore authorization and payload security validation verified successfully.',
+      projectIdentifier: 'aadesh-ai-global',
+      schemaVersion: '1.0',
+      ...(restoreStats ? { stats: restoreStats } : {}),
+      timestamp: new Date().toISOString(),
+    });
+  }
+);
 
 // 5. IMAGE GENERATION & STUDIO ENDPOINTS
 const IMAGE_MODEL_CAPABILITIES = {

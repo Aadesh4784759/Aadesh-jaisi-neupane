@@ -113,8 +113,17 @@ export const SecureRestoreCenter: React.FC<SecureRestoreCenterProps> = ({ userEm
       const idToken = await getCurrentIdToken();
       if (!idToken) throw new Error('Authentication required.');
 
-      const res = await fetch(buildApiUrl('/api/admin/backup'), {
-        headers: { Authorization: `Bearer ${idToken}` },
+      const res = await fetch(buildApiUrl('/api/admin/restore'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${idToken}`,
+        },
+        body: JSON.stringify({
+          payload: uploadedPayload,
+          selectedCollections,
+          restoreMode,
+        }),
       });
       const data = await res.json();
       if (!res.ok || !data.authorized) {
