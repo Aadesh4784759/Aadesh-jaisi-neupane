@@ -275,6 +275,72 @@ app.use((_req: Request, res: Response, next: NextFunction): void => {
   next();
 });
 
+const STATIC_ALLOWED_CORS_ORIGINS = new Set<string>([
+  'https://aadesh-ai-global.web.app',
+  'https://aadesh-ai-global.firebaseapp.com',
+  'https://aadesh-jaisi-neupane.vercel.app',
+]);
+
+const ALLOWED_CORS_ORIGIN_PATTERNS: RegExp[] = [
+  /^https:\/\/aadesh-ai-global(?:--[a-z0-9-]+)?\.(?:web\.app|firebaseapp\.com)$/i,
+  /^https:\/\/aadesh-jaisi-neupane(?:-[a-z0-9-]+)?\.vercel\.app$/i,
+  /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d{1,5})?$/i,
+  /^https:\/\/ais-[a-z0-9-]+\.[a-z0-9-]+\.run\.app$/i,
+];
+
+export function isAllowedCorsOrigin(
+  origin?: string | null,
+  extraOriginsRaw: string | null | undefined = process.env.ALLOWED_ORIGINS
+): boolean {
+  const cleanOrigin = String(origin || '').trim().replace(/\/+$/, '');
+  if (!cleanOrigin) return false;
+  if (STATIC_ALLOWED_CORS_ORIGINS.has(cleanOrigin)) return true;
+  if (extraOriginsRaw) {
+    const extras = extraOriginsRaw
+      .split(',')
+      .map((s) => s.trim().replace(/\/+$/, ''))
+      .filter(Boolean);
+    if (extras.includes(cleanOrigin)) return true;
+  }
+  return ALLOWED_CORS_ORIGIN_PATTERNS.some((pattern) => pattern.test(cleanOrigin));
+}
+
+app.use('/api', (req: Request, res: Response, next: NextFunction): void => {
+  const rawOrigin = typeof req.headers.origin === 'string' ? req.headers.origin.trim() : '';
+  res.setHeader('Vary', 'Origin');
+
+  if (rawOrigin) {
+    if (isAllowedCorsOrigin(rawOrigin)) {
+      res.setHeader('Access-Control-Allow-Origin', rawOrigin);
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+      res.setHeader(
+        'Access-Control-Allow-Headers',
+        'Content-Type, Authorization, X-Requested-With, Accept, Cache-Control'
+      );
+      res.setHeader(
+        'Access-Control-Expose-Headers',
+        'X-RateLimit-Limit, X-RateLimit-Remaining, Retry-After'
+      );
+      res.setHeader('Access-Control-Max-Age', '86400');
+      if (req.method === 'OPTIONS') {
+        res.status(204).end();
+        return;
+      }
+    } else if (req.method === 'OPTIONS') {
+      res.status(403).json({
+        ok: false,
+        error: 'Origin not allowed by CORS policy.',
+      });
+      return;
+    }
+  } else if (req.method === 'OPTIONS') {
+    res.status(204).end();
+    return;
+  }
+
+  next();
+});
+
 export function createSlidingWindowRateLimiter(options: {
   maxRequests: number;
   windowMs: number;

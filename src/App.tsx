@@ -58,6 +58,7 @@ import {
 } from './utils/storage';
 import { SUPPORTED_LANGUAGES } from './data/languages';
 import { detectUserCountry, detectCountryApproxViaIP, resolveCountryForProfile } from './utils/country';
+import { buildApiUrl } from './utils/apiConfig';
 import { Header } from './components/Header';
 import { NavigationDock, BottomNavTab } from './components/NavigationDock';
 import { FuturisticBackground } from './components/FuturisticBackground';
@@ -1036,7 +1037,7 @@ export default function App() {
 
     try {
       const sessionHeaders = await getAuthHeaders();
-      fetch('/api/auth/session', { headers: sessionHeaders }).catch(() => {});
+      fetch(buildApiUrl('/api/auth/session'), { headers: sessionHeaders }).catch(() => {});
     } catch {}
 
     try {
@@ -1203,7 +1204,7 @@ export default function App() {
     setIsLoadingProvidersStatus(true);
     try {
       const headers = await getAuthHeaders();
-      const res = await fetch(`/api/providers/status${forceRefresh ? '?force=1' : ''}`, {
+      const res = await fetch(buildApiUrl(`/api/providers/status${forceRefresh ? '?force=1' : ''}`), {
         headers,
         cache: 'no-store',
       });
@@ -1279,7 +1280,7 @@ export default function App() {
           ? settingsRef.current.aiModel
           : AI_PROVIDER_METADATA[providerId].defaultModel;
 
-      const res = await fetch('/api/providers/test', {
+      const res = await fetch(buildApiUrl('/api/providers/test'), {
         method: 'POST',
         headers,
         body: JSON.stringify({
@@ -1408,7 +1409,7 @@ export default function App() {
       const params = new URLSearchParams({ provider: activeProvider });
       if (activeSelectedModel) params.set('model', activeSelectedModel);
       if (forceRefresh) params.set('force', '1');
-      const url = `/api/health?${params.toString()}`;
+      const url = buildApiUrl(`/api/health?${params.toString()}`);
       const res = await fetch(url, {
         cache: 'no-store',
         signal: controller.signal,
@@ -1425,6 +1426,22 @@ export default function App() {
           error: `Backend returned HTTP ${res.status}.`,
         }));
         setInitError(`Backend server unavailable (HTTP ${res.status}).`);
+        return;
+      }
+
+      const contentType = String(res.headers.get('content-type') || '').toLowerCase();
+      if (!contentType.includes('application/json')) {
+        const msg = 'Backend health endpoint returned non-JSON content. Check API routing.';
+        setAiHealth((prev) => ({
+          ...prev,
+          state: 'offline',
+          backendConnected: false,
+          geminiConnected: false,
+          activeProvider,
+          checkedAt: Date.now(),
+          error: msg,
+        }));
+        setInitError(msg);
         return;
       }
 
@@ -2197,7 +2214,7 @@ export default function App() {
           'Content-Type': 'application/json',
         });
 
-        const streamRes = await fetch('/api/chat/stream', {
+        const streamRes = await fetch(buildApiUrl('/api/chat/stream'), {
           method: 'POST',
           headers,
           signal: requestController.signal,
@@ -2342,7 +2359,7 @@ export default function App() {
         if (settingsRef.current.translationEnabled && reply.trim() && !translation) {
           const autoTransTarget = settingsRef.current.translationLanguage || 'ne';
           try {
-            const transRes = await fetch('/api/translate', {
+            const transRes = await fetch(buildApiUrl('/api/translate'), {
               method: 'POST',
               headers,
               signal: requestController.signal,
@@ -2383,7 +2400,7 @@ export default function App() {
           'Content-Type': 'application/json',
         });
 
-        const res = await fetch('/api/chat', {
+        const res = await fetch(buildApiUrl('/api/chat'), {
           method: 'POST',
           headers,
           signal: requestController.signal,
@@ -2535,7 +2552,7 @@ export default function App() {
         const suggestHeaders = await getAuthHeaders({
           'Content-Type': 'application/json',
         });
-        void fetch('/api/chat/suggested-replies', {
+        void fetch(buildApiUrl('/api/chat/suggested-replies'), {
           method: 'POST',
           headers: suggestHeaders,
           body: JSON.stringify({
@@ -3316,7 +3333,7 @@ export default function App() {
         'Content-Type': 'application/json',
       });
 
-      const res = await fetch('/api/translate', {
+      const res = await fetch(buildApiUrl('/api/translate'), {
         method: 'POST',
         headers,
         body: JSON.stringify({

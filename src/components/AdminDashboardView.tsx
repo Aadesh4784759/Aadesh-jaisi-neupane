@@ -33,6 +33,7 @@ import {
   updateAdminUserStatusInFirestore,
 } from '../utils/firebase';
 import { OWNER_ADMIN_EMAIL } from '../utils/storage';
+import { buildApiUrl } from '../utils/apiConfig';
 
 interface AdminDashboardViewProps {
   currentUser: UserProfile;
@@ -94,7 +95,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
         return;
       }
 
-      const res = await fetch('/api/admin/overview', {
+      const res = await fetch(buildApiUrl('/api/admin/overview'), {
         headers: { Authorization: `Bearer ${idToken}` },
       });
       const data = await res.json();

@@ -37,6 +37,7 @@ import {
 import { SUPPORTED_LANGUAGES, isRtlLanguage } from '../data/languages';
 import { voiceAssistant } from '../utils/speech';
 import { getAuthHeaders } from '../utils/firebase';
+import { buildApiUrl } from '../utils/apiConfig';
 
 interface QueuedFileItem {
   id: string;
@@ -222,7 +223,7 @@ export const TransferView: React.FC<TransferViewProps> = ({
           ? settings?.openRouterModel || settings?.aiModel
           : settings?.aiModel;
 
-      const res = await fetch('/api/translate', {
+      const res = await fetch(buildApiUrl('/api/translate'), {
         method: 'POST',
         headers,
         body: JSON.stringify({

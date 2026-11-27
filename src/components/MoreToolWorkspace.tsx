@@ -24,6 +24,7 @@ import {
 import { AppSettings } from '../types';
 import { SUPPORTED_LANGUAGES } from '../data/languages';
 import { getAuthHeaders } from '../utils/firebase';
+import { buildApiUrl } from '../utils/apiConfig';
 import { voiceAssistant } from '../utils/speech';
 import { MarkdownRenderer } from './MarkdownRenderer';
 
@@ -169,7 +170,7 @@ export const MoreToolWorkspace: React.FC<MoreToolWorkspaceProps> = ({
           : settings.aiModel;
 
       if (toolId === 'doc-translate') {
-        const res = await fetch('/api/translate', {
+        const res = await fetch(buildApiUrl('/api/translate'), {
           method: 'POST',
           headers,
           body: JSON.stringify({
@@ -188,7 +189,7 @@ export const MoreToolWorkspace: React.FC<MoreToolWorkspaceProps> = ({
         if (data.culturalNote) setKeyPoints([data.culturalNote]);
         onRecordTranslationMetric?.('auto', targetLang, data.latencyMs || Date.now() - started);
       } else if (toolId === 'email-write') {
-        const res = await fetch('/api/assistant', {
+        const res = await fetch(buildApiUrl('/api/assistant'), {
           method: 'POST',
           headers,
           body: JSON.stringify({
@@ -208,7 +209,7 @@ export const MoreToolWorkspace: React.FC<MoreToolWorkspaceProps> = ({
           tasks: 'Extract every action item, owner, and deadline from this email',
           polish: 'Rewrite and polish this email draft for maximum clarity and professionalism',
         };
-        const res = await fetch('/api/assistant', {
+        const res = await fetch(buildApiUrl('/api/assistant'), {
           method: 'POST',
           headers,
           body: JSON.stringify({
@@ -222,7 +223,7 @@ export const MoreToolWorkspace: React.FC<MoreToolWorkspaceProps> = ({
         setOutputTitle(data.emailSubject ? `Subject: ${data.emailSubject}` : data.title || 'Email Assistant Output');
         setOutputText(data.content || '');
       } else if (toolId === 'writing-assist') {
-        const res = await fetch('/api/assistant', {
+        const res = await fetch(buildApiUrl('/api/assistant'), {
           method: 'POST',
           headers,
           body: JSON.stringify({
@@ -236,7 +237,7 @@ export const MoreToolWorkspace: React.FC<MoreToolWorkspaceProps> = ({
         setOutputTitle(data.title || 'Written Draft');
         setOutputText(data.content || '');
       } else if (toolId === 'grammar') {
-        const res = await fetch('/api/chat', {
+        const res = await fetch(buildApiUrl('/api/chat'), {
           method: 'POST',
           headers,
           body: JSON.stringify({
@@ -253,7 +254,7 @@ export const MoreToolWorkspace: React.FC<MoreToolWorkspaceProps> = ({
         setOutputTitle('Corrected Text & Notes');
         setOutputText(data.reply || '');
       } else if (toolId === 'summarizer') {
-        const res = await fetch('/api/summarize', {
+        const res = await fetch(buildApiUrl('/api/summarize'), {
           method: 'POST',
           headers,
           body: JSON.stringify({
@@ -270,7 +271,7 @@ export const MoreToolWorkspace: React.FC<MoreToolWorkspaceProps> = ({
         if (Array.isArray(data.keyPoints)) setKeyPoints(data.keyPoints);
       } else if (toolId === 'extra-tools') {
         if (extraMode === 'code') {
-          const res = await fetch('/api/coding', {
+          const res = await fetch(buildApiUrl('/api/coding'), {
             method: 'POST',
             headers,
             body: JSON.stringify({
@@ -293,7 +294,7 @@ export const MoreToolWorkspace: React.FC<MoreToolWorkspaceProps> = ({
           );
           if (Array.isArray(data.tips)) setKeyPoints(data.tips);
         } else if (extraMode === 'study') {
-          const res = await fetch('/api/study', {
+          const res = await fetch(buildApiUrl('/api/study'), {
             method: 'POST',
             headers,
             body: JSON.stringify({
@@ -308,7 +309,7 @@ export const MoreToolWorkspace: React.FC<MoreToolWorkspaceProps> = ({
           setOutputText(data.content || data.summary || '');
           if (Array.isArray(data.keyPoints)) setKeyPoints(data.keyPoints);
         } else {
-          const res = await fetch('/api/research', {
+          const res = await fetch(buildApiUrl('/api/research'), {
             method: 'POST',
             headers,
             body: JSON.stringify({

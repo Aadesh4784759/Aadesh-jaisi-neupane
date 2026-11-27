@@ -38,6 +38,7 @@ import {
   recordUsageAnalyticsToFirestore,
   saveGeneratedImageMetaToFirestore,
 } from '../utils/firebase';
+import { buildApiUrl } from '../utils/apiConfig';
 
 interface ImageModelOption {
   id: string;
@@ -161,7 +162,7 @@ export const ImageStudioView: React.FC<ImageStudioViewProps> = ({
     (async () => {
       try {
         const headers = await getAuthHeaders();
-        const res = await fetch('/api/images/models', { headers });
+        const res = await fetch(buildApiUrl('/api/images/models'), { headers });
         const data = res.ok ? await res.json() : null;
         if (cancelled || !data?.models?.length) return;
         setModels(data.models);
@@ -268,7 +269,7 @@ export const ImageStudioView: React.FC<ImageStudioViewProps> = ({
         payload.resolution = resolution;
       }
 
-      const res = await fetch('/api/images/generate', {
+      const res = await fetch(buildApiUrl('/api/images/generate'), {
         method: 'POST',
         headers,
         body: JSON.stringify(payload),

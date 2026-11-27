@@ -27,6 +27,7 @@ import {
 import { AppSettings, ChatSession, EngagementMetrics, UserProfile } from '../types';
 import { SUPPORTED_LANGUAGES } from '../data/languages';
 import { getAuthHeaders } from '../utils/firebase';
+import { buildApiUrl } from '../utils/apiConfig';
 import { MarkdownRenderer } from './MarkdownRenderer';
 
 interface AnalyticsDashboardProps {
@@ -211,7 +212,7 @@ ${trimmed}`;
           ? settings?.openRouterModel || settings?.aiModel
           : settings?.aiModel;
 
-      const res = await fetch('/api/chat', {
+      const res = await fetch(buildApiUrl('/api/chat'), {
         method: 'POST',
         headers,
         body: JSON.stringify({

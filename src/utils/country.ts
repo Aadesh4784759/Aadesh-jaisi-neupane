@@ -1,4 +1,5 @@
 import { ALL_COUNTRY_CLOCKS, CountryClockEntry } from '../data/worldClocks';
+import { buildApiUrl } from './apiConfig';
 
 export interface CountryOption {
   code: string;
@@ -149,7 +150,7 @@ export function resolveCountryForProfile(params: {
 
 export async function detectCountryApproxViaIP(): Promise<CountryOption | null> {
   try {
-    const res = await fetch('/api/geo/ip-country', { cache: 'no-store' });
+    const res = await fetch(buildApiUrl('/api/geo/ip-country'), { cache: 'no-store' });
     if (!res.ok) return null;
     const data = await res.json();
     if (!data?.ok) return null;
@@ -220,7 +221,7 @@ export async function reverseGeocodeCountryFromCoords(
 ): Promise<{ option: CountryOption | null; provider?: string; errorCode?: GpsCountryDetectionResult['errorCode']; error?: string }> {
   try {
     const geoRes = await fetchImpl(
-      `/api/geo/reverse-country?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}`,
+      buildApiUrl(`/api/geo/reverse-country?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}`),
       { cache: 'no-store' }
     );
     if (!geoRes.ok) {

@@ -106,6 +106,7 @@ import { DEFAULT_SESSION_CATEGORIES } from '../utils/storage';
 import { BrandLogo } from './BrandLogo';
 import type { PlusToolModalId } from './ChatToolOverlay';
 import { getAuthHeaders } from '../utils/firebase';
+import { buildApiUrl } from '../utils/apiConfig';
 import { isScrollContainerNearBottom, shouldAutoScrollChatFeed } from '../utils/scroll';
 
 const GeotagPickerModal = lazy(() =>
@@ -581,7 +582,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
         'Content-Type': 'application/json',
       });
 
-      const res = await fetch('/api/summarize', {
+      const res = await fetch(buildApiUrl('/api/summarize'), {
         method: 'POST',
         headers,
         body: JSON.stringify({

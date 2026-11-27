@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { AppSettings } from '../types';
 import { getAuthHeaders } from '../utils/firebase';
+import { buildApiUrl } from '../utils/apiConfig';
 
 interface UploadedDocument {
   id: string;
@@ -147,7 +148,7 @@ export const DocumentAssistantModal: React.FC<DocumentAssistantModalProps> = ({
           ? settings.openRouterModel || settings.aiModel
           : settings.aiModel;
 
-      const res = await fetch('/api/summarize', {
+      const res = await fetch(buildApiUrl('/api/summarize'), {
         method: 'POST',
         headers,
         body: JSON.stringify({

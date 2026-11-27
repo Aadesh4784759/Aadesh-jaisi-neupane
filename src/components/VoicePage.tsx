@@ -26,6 +26,7 @@ import { AppSettings } from '../types';
 import { SUPPORTED_LANGUAGES, VOICE_PERSONAS, isRtlLanguage } from '../data/languages';
 import { voiceAssistant, VoicePlaybackState } from '../utils/speech';
 import { getAuthHeaders } from '../utils/firebase';
+import { buildApiUrl } from '../utils/apiConfig';
 
 export type VoiceToolId =
   | 'assistant'
@@ -315,7 +316,7 @@ export const VoicePage: React.FC<VoicePageProps> = ({
           activeProvider === 'openrouter'
             ? settings.openRouterModel || settings.aiModel
             : settings.aiModel;
-        const res = await fetch('/api/translate', {
+        const res = await fetch(buildApiUrl('/api/translate'), {
           method: 'POST',
           headers,
           body: JSON.stringify({
@@ -527,7 +528,7 @@ export const VoicePage: React.FC<VoicePageProps> = ({
             const headers = await getAuthHeaders({
               'Content-Type': 'application/json',
             });
-            const res = await fetch('/api/voice/transcribe', {
+            const res = await fetch(buildApiUrl('/api/voice/transcribe'), {
               method: 'POST',
               headers,
               body: JSON.stringify({
@@ -585,7 +586,7 @@ export const VoicePage: React.FC<VoicePageProps> = ({
       const headers = await getAuthHeaders({
         'Content-Type': 'application/json',
       });
-      const res = await fetch('/api/voice/tts', {
+      const res = await fetch(buildApiUrl('/api/voice/tts'), {
         method: 'POST',
         headers,
         body: JSON.stringify({

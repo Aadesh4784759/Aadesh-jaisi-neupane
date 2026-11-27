@@ -15,6 +15,7 @@ import { AppSettings, LanguageOption } from '../types';
 import { SUPPORTED_LANGUAGES, UI_TRANSLATIONS } from '../data/languages';
 import { voiceAssistant } from '../utils/speech';
 import { getAuthHeaders } from '../utils/firebase';
+import { buildApiUrl } from '../utils/apiConfig';
 
 interface InterpreterViewProps {
   settings: AppSettings;
@@ -118,7 +119,7 @@ export const InterpreterView: React.FC<InterpreterViewProps> = ({
           activeProvider === 'openrouter'
             ? settings.openRouterModel || settings.aiModel
             : settings.aiModel;
-        const res = await fetch('/api/translate', {
+        const res = await fetch(buildApiUrl('/api/translate'), {
           method: 'POST',
           headers,
           body: JSON.stringify({

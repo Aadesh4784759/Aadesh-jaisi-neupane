@@ -40,6 +40,13 @@ import {
   getLastMemoryUpdatedAt,
   retrieveRelevantMemories,
 } from '../utils/powerMemory';
+import {
+  PRODUCTION_VERCEL_API_ORIGIN,
+  buildApiUrl,
+  isFirebaseHostingHostname,
+  normalizeApiBaseUrl,
+  resolveApiBaseUrl,
+} from '../utils/apiConfig';
 import type { AIMemoryItem } from '../types';
 
 test('P1: Gemini is the default provider and valid provider IDs switch cleanly', () => {
@@ -912,5 +919,141 @@ test('P27: Settings shows inline dot + latency (ms) and Firebase Hosting (aadesh
   assert.match(settingsContent, /compactLatencyText/);
   assert.match(settingsContent, /<PowerMemorySection/);
   assert.match(powerMemoryUi, /Power Memory/);
+});
+
+test('P28: Firebase Hosting routes /api requests to Vercel backend with strict origin-allowlisted CORS', async () => {
+  // 1. Firebase Hosting domains resolve to Vercel production backend automatically
+  assert.equal(isFirebaseHostingHostname('aadesh-ai-global.web.app'), true);
+  assert.equal(isFirebaseHostingHostname('aadesh-ai-global.firebaseapp.com'), true);
+  assert.equal(isFirebaseHostingHostname('aadesh-ai-global--pr-42.web.app'), true);
+  assert.equal(isFirebaseHostingHostname('aadesh-jaisi-neupane.vercel.app'), false);
+
+  assert.equal(
+    resolveApiBaseUrl({
+      envApiBaseUrl: '',
+      windowOrigin: 'https://aadesh-ai-global.web.app',
+      windowHostname: 'aadesh-ai-global.web.app',
+    }),
+    PRODUCTION_VERCEL_API_ORIGIN
+  );
+  assert.equal(
+    resolveApiBaseUrl({
+      envApiBaseUrl: '',
+      windowOrigin: 'https://aadesh-ai-global.firebaseapp.com',
+      windowHostname: 'aadesh-ai-global.firebaseapp.com',
+    }),
+    PRODUCTION_VERCEL_API_ORIGIN
+  );
+  assert.equal(
+    buildApiUrl('/api/health', {
+      envApiBaseUrl: '',
+      windowOrigin: 'https://aadesh-ai-global.web.app',
+      windowHostname: 'aadesh-ai-global.web.app',
+    }),
+    `${PRODUCTION_VERCEL_API_ORIGIN}/api/health`
+  );
+
+  // 2. Vercel, localhost, and Cloud Run keep same-origin /api paths even when VITE_API_BASE_URL matches Vercel
+  assert.equal(
+    resolveApiBaseUrl({
+      envApiBaseUrl: PRODUCTION_VERCEL_API_ORIGIN,
+      windowOrigin: 'https://aadesh-jaisi-neupane.vercel.app',
+      windowHostname: 'aadesh-jaisi-neupane.vercel.app',
+    }),
+    ''
+  );
+  assert.equal(
+    resolveApiBaseUrl({
+      envApiBaseUrl: '',
+      windowOrigin: 'https://aadesh-jaisi-neupane-git-main.vercel.app',
+      windowHostname: 'aadesh-jaisi-neupane-git-main.vercel.app',
+    }),
+    ''
+  );
+  assert.equal(
+    resolveApiBaseUrl({
+      envApiBaseUrl: '',
+      windowOrigin: 'http://localhost:3000',
+      windowHostname: 'localhost',
+    }),
+    ''
+  );
+  assert.equal(normalizeApiBaseUrl('javascript:alert(1)'), '');
+
+  // 3. Ensure every fetch call under src/ uses buildApiUrl rather than bare relative /api paths
+  const srcRoot = path.resolve(process.cwd(), 'src');
+  const bareFetchViolations: string[] = [];
+  const walkSrc = (dir: string) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name === 'tests') continue;
+        walkSrc(fullPath);
+      } else if (entry.name.endsWith('.ts') || entry.name.endsWith('.tsx')) {
+        const content = fs.readFileSync(fullPath, 'utf8');
+        if (/fetch\s*\(\s*['"`]\/api(?:\/|['"`])/.test(content)) {
+          bareFetchViolations.push(path.relative(process.cwd(), fullPath));
+        }
+      }
+    }
+  };
+  walkSrc(srcRoot);
+  assert.deepEqual(bareFetchViolations, []);
+
+  // 4. Verify strict CORS allowlist + real Express HTTP preflight/GET behavior
+  process.env.AADESH_SKIP_SERVER_LISTEN = '1';
+  const { app, isAllowedCorsOrigin } = await import('../../server');
+  assert.equal(isAllowedCorsOrigin('https://aadesh-ai-global.web.app'), true);
+  assert.equal(isAllowedCorsOrigin('https://aadesh-ai-global.firebaseapp.com'), true);
+  assert.equal(isAllowedCorsOrigin('https://aadesh-jaisi-neupane.vercel.app'), true);
+  assert.equal(isAllowedCorsOrigin('http://localhost:3000'), true);
+  assert.equal(isAllowedCorsOrigin('https://evil.example.com'), false);
+  assert.equal(isAllowedCorsOrigin('*'), false);
+
+  const server = app.listen(0, '127.0.0.1');
+  try {
+    await new Promise<void>((resolve) => server.once('listening', resolve));
+    const addr = server.address();
+    assert.ok(addr && typeof addr === 'object');
+    const baseUrl = `http://127.0.0.1:${addr.port}`;
+
+    const preflightRes = await fetch(`${baseUrl}/api/health`, {
+      method: 'OPTIONS',
+      headers: {
+        Origin: 'https://aadesh-ai-global.web.app',
+        'Access-Control-Request-Method': 'POST',
+        'Access-Control-Request-Headers': 'Authorization, Content-Type',
+      },
+    });
+    assert.equal(preflightRes.status, 204);
+    assert.equal(
+      preflightRes.headers.get('access-control-allow-origin'),
+      'https://aadesh-ai-global.web.app'
+    );
+    assert.match(preflightRes.headers.get('access-control-allow-headers') || '', /Authorization/);
+
+    const healthRes = await fetch(`${baseUrl}/api/health`, {
+      headers: { Origin: 'https://aadesh-ai-global.firebaseapp.com' },
+    });
+    assert.equal(healthRes.status, 200);
+    assert.equal(
+      healthRes.headers.get('access-control-allow-origin'),
+      'https://aadesh-ai-global.firebaseapp.com'
+    );
+    const healthJson = await healthRes.json();
+    assert.equal(healthJson.status, 'ok');
+    assert.equal(healthJson.backendConnected, true);
+
+    const blockedPreflight = await fetch(`${baseUrl}/api/chat`, {
+      method: 'OPTIONS',
+      headers: { Origin: 'https://evil.example.com' },
+    });
+    assert.equal(blockedPreflight.status, 403);
+    assert.equal(blockedPreflight.headers.get('access-control-allow-origin'), null);
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((err) => (err ? reject(err) : resolve()))
+    );
+  }
 });
 

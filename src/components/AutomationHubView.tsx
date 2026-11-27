@@ -34,6 +34,7 @@ import {
   saveAutomationLogToFirestore,
   saveAutomationScheduleToFirestore,
 } from '../utils/firebase';
+import { buildApiUrl } from '../utils/apiConfig';
 import {
   getStoredAutomationHistory,
   getStoredAutomationLogs,
@@ -286,7 +287,7 @@ export const AutomationHubView: React.FC<AutomationHubViewProps> = ({
         'Content-Type': 'application/json',
       });
 
-      const res = await fetch('/api/automation/execute', {
+      const res = await fetch(buildApiUrl('/api/automation/execute'), {
         method: 'POST',
         headers,
         body: JSON.stringify({
@@ -468,7 +469,7 @@ export const AutomationHubView: React.FC<AutomationHubViewProps> = ({
           assistantMessage: t.response.assistantMessage,
         }));
 
-      const res = await fetch('/api/automation/suggest', {
+      const res = await fetch(buildApiUrl('/api/automation/suggest'), {
         method: 'POST',
         headers,
         body: JSON.stringify({

@@ -22,6 +22,7 @@ import { GeotaggedMedia, LocationData } from '../types';
 import { PRESET_LOCATIONS, SUPPORTED_LANGUAGES } from '../data/languages';
 import { GeotagPickerModal } from './GeotagPickerModal';
 import { getAuthHeaders } from '../utils/firebase';
+import { buildApiUrl } from '../utils/apiConfig';
 
 const NEAR_ME_RADIUS_KM = 5;
 
@@ -211,7 +212,7 @@ export const GeotagGalleryView: React.FC<GeotagGalleryViewProps> = ({
       const headers = await getAuthHeaders({
         'Content-Type': 'application/json',
       });
-      const res = await fetch('/api/analyze-geotag', {
+      const res = await fetch(buildApiUrl('/api/analyze-geotag'), {
         method: 'POST',
         headers,
         body: JSON.stringify({

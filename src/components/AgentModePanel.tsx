@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { AgentPersonaId, AgentProposedAction, AgentStepPlan, AgentTaskPriority, AppSettings } from '../types';
 import { getAuthHeaders } from '../utils/firebase';
+import { buildApiUrl } from '../utils/apiConfig';
 import { AgentProgressBar } from './AgentProgressBar';
 import { AgentTaskHierarchy } from './AgentTaskHierarchy';
 import {
@@ -202,7 +203,7 @@ export const AgentModePanel: React.FC<AgentModePanelProps> = ({
         'Content-Type': 'application/json',
       });
 
-      const res = await fetch('/api/agent', {
+      const res = await fetch(buildApiUrl('/api/agent'), {
         method: 'POST',
         headers,
         body: JSON.stringify({

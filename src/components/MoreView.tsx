@@ -51,6 +51,7 @@ import {
   clearAllMemoriesFromFirestore,
 } from '../utils/firebase';
 import { getStoredMemories, saveStoredMemories } from '../utils/storage';
+import { buildApiUrl } from '../utils/apiConfig';
 import { containsSecretOrCredential, extractMemoryKeywords } from '../utils/powerMemory';
 import type { MoreWorkspaceToolId } from './MoreToolWorkspace';
 import { MarkdownRenderer } from './MarkdownRenderer';
@@ -578,7 +579,7 @@ export const MoreView: React.FC<MoreViewProps> = ({
       const headers = await getAuthHeaders({
         'Content-Type': 'application/json',
       });
-      const res = await fetch('/api/video', {
+      const res = await fetch(buildApiUrl('/api/video'), {
         method: 'POST',
         headers,
         body: JSON.stringify({
