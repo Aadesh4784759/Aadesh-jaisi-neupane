@@ -16,3 +16,4 @@ server.js
 google-services.json
 GoogleService-Info.plist
 DRAFT_firestore.rules
+.aistudio/

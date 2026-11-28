@@ -2003,124 +2003,164 @@ async function streamOpenAICompatibleCompletion(params: {
 // HEALTH & REAL-TIME MULTI-PROVIDER CONNECTION STATUS CHECK
 app.get('/api/health', async (req: Request, res: Response): Promise<void> => {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-  const forceRefresh = req.query.force === '1' || req.query.force === 'true';
-  const requestedProvider = normalizeAIProviderId(req.query.provider);
-  const requestedModelParam =
-    requestedProvider === 'gemini' && typeof req.query.model === 'string' && req.query.model.trim()
-      ? req.query.model.trim()
-      : undefined;
-  const { providers, geminiProbeOk, checkedAtIso } = await getAllProviderStatuses(
-    forceRefresh,
-    requestedModelParam
-  );
+  try {
+    const forceRefresh = req.query.force === '1' || req.query.force === 'true';
+    const requestedProvider = normalizeAIProviderId(req.query.provider);
+    const requestedModelParam =
+      requestedProvider === 'gemini' && typeof req.query.model === 'string' && req.query.model.trim()
+        ? req.query.model.trim()
+        : undefined;
+    const { providers, geminiProbeOk, checkedAtIso } = await getAllProviderStatuses(
+      forceRefresh,
+      requestedModelParam
+    );
 
-  const activeInfo = providers[requestedProvider];
-  const providerSummary: Record<
-    AIProviderId,
-    Pick<
-      AIProviderStatusInfo,
-      | 'id'
-      | 'name'
-      | 'badge'
-      | 'envVarName'
-      | 'configured'
-      | 'status'
-      | 'generationVerified'
-      | 'lastTestedAt'
-      | 'lastVerifiedModel'
-      | 'defaultModel'
-      | 'activeModel'
-      | 'freeModelsCount'
-      | 'paidModelsCount'
-      | 'latencyMs'
-      | 'checkedAt'
-      | 'error'
-      | 'errorLog'
-    >
-  > = {
-    gemini: {
-      id: providers.gemini.id,
-      name: providers.gemini.name,
-      badge: providers.gemini.badge,
-      envVarName: providers.gemini.envVarName,
-      configured: providers.gemini.configured,
-      status: providers.gemini.status,
-      generationVerified: Boolean(providers.gemini.generationVerified),
-      lastTestedAt: providers.gemini.lastTestedAt ?? null,
-      ...(providers.gemini.lastVerifiedModel ? { lastVerifiedModel: providers.gemini.lastVerifiedModel } : {}),
-      defaultModel: providers.gemini.defaultModel,
-      activeModel: providers.gemini.activeModel,
-      freeModelsCount: providers.gemini.freeModelsCount,
-      paidModelsCount: providers.gemini.paidModelsCount,
-      latencyMs: providers.gemini.latencyMs,
-      checkedAt: providers.gemini.checkedAt,
-      ...(providers.gemini.error ? { error: providers.gemini.error } : {}),
-      errorLog: providers.gemini.errorLog || [],
-    },
-    groq: {
-      id: providers.groq.id,
-      name: providers.groq.name,
-      badge: providers.groq.badge,
-      envVarName: providers.groq.envVarName,
-      configured: providers.groq.configured,
-      status: providers.groq.status,
-      generationVerified: Boolean(providers.groq.generationVerified),
-      lastTestedAt: providers.groq.lastTestedAt ?? null,
-      ...(providers.groq.lastVerifiedModel ? { lastVerifiedModel: providers.groq.lastVerifiedModel } : {}),
-      defaultModel: providers.groq.defaultModel,
-      activeModel: providers.groq.activeModel,
-      freeModelsCount: providers.groq.freeModelsCount,
-      paidModelsCount: providers.groq.paidModelsCount,
-      latencyMs: providers.groq.latencyMs,
-      checkedAt: providers.groq.checkedAt,
-      ...(providers.groq.error ? { error: providers.groq.error } : {}),
-      errorLog: providers.groq.errorLog || [],
-    },
-    openrouter: {
-      id: providers.openrouter.id,
-      name: providers.openrouter.name,
-      badge: providers.openrouter.badge,
-      envVarName: providers.openrouter.envVarName,
-      configured: providers.openrouter.configured,
-      status: providers.openrouter.status,
-      generationVerified: Boolean(providers.openrouter.generationVerified),
-      lastTestedAt: providers.openrouter.lastTestedAt ?? null,
-      ...(providers.openrouter.lastVerifiedModel ? { lastVerifiedModel: providers.openrouter.lastVerifiedModel } : {}),
-      defaultModel: providers.openrouter.defaultModel,
-      activeModel: providers.openrouter.activeModel,
-      freeModelsCount: providers.openrouter.freeModelsCount,
-      paidModelsCount: providers.openrouter.paidModelsCount,
-      latencyMs: providers.openrouter.latencyMs,
-      checkedAt: providers.openrouter.checkedAt,
-      ...(providers.openrouter.error ? { error: providers.openrouter.error } : {}),
-      errorLog: providers.openrouter.errorLog || [],
-    },
-  };
+    const activeInfo = providers[requestedProvider];
+    const providerSummary: Record<
+      AIProviderId,
+      Pick<
+        AIProviderStatusInfo,
+        | 'id'
+        | 'name'
+        | 'badge'
+        | 'envVarName'
+        | 'configured'
+        | 'status'
+        | 'generationVerified'
+        | 'lastTestedAt'
+        | 'lastVerifiedModel'
+        | 'defaultModel'
+        | 'activeModel'
+        | 'freeModelsCount'
+        | 'paidModelsCount'
+        | 'latencyMs'
+        | 'checkedAt'
+        | 'error'
+        | 'errorLog'
+      >
+    > = {
+      gemini: {
+        id: providers.gemini.id,
+        name: providers.gemini.name,
+        badge: providers.gemini.badge,
+        envVarName: providers.gemini.envVarName,
+        configured: providers.gemini.configured,
+        status: providers.gemini.status,
+        generationVerified: Boolean(providers.gemini.generationVerified),
+        lastTestedAt: providers.gemini.lastTestedAt ?? null,
+        ...(providers.gemini.lastVerifiedModel ? { lastVerifiedModel: providers.gemini.lastVerifiedModel } : {}),
+        defaultModel: providers.gemini.defaultModel,
+        activeModel: providers.gemini.activeModel,
+        freeModelsCount: providers.gemini.freeModelsCount,
+        paidModelsCount: providers.gemini.paidModelsCount,
+        latencyMs: providers.gemini.latencyMs,
+        checkedAt: providers.gemini.checkedAt,
+        ...(providers.gemini.error ? { error: providers.gemini.error } : {}),
+        errorLog: providers.gemini.errorLog || [],
+      },
+      groq: {
+        id: providers.groq.id,
+        name: providers.groq.name,
+        badge: providers.groq.badge,
+        envVarName: providers.groq.envVarName,
+        configured: providers.groq.configured,
+        status: providers.groq.status,
+        generationVerified: Boolean(providers.groq.generationVerified),
+        lastTestedAt: providers.groq.lastTestedAt ?? null,
+        ...(providers.groq.lastVerifiedModel ? { lastVerifiedModel: providers.groq.lastVerifiedModel } : {}),
+        defaultModel: providers.groq.defaultModel,
+        activeModel: providers.groq.activeModel,
+        freeModelsCount: providers.groq.freeModelsCount,
+        paidModelsCount: providers.groq.paidModelsCount,
+        latencyMs: providers.groq.latencyMs,
+        checkedAt: providers.groq.checkedAt,
+        ...(providers.groq.error ? { error: providers.groq.error } : {}),
+        errorLog: providers.groq.errorLog || [],
+      },
+      openrouter: {
+        id: providers.openrouter.id,
+        name: providers.openrouter.name,
+        badge: providers.openrouter.badge,
+        envVarName: providers.openrouter.envVarName,
+        configured: providers.openrouter.configured,
+        status: providers.openrouter.status,
+        generationVerified: Boolean(providers.openrouter.generationVerified),
+        lastTestedAt: providers.openrouter.lastTestedAt ?? null,
+        ...(providers.openrouter.lastVerifiedModel ? { lastVerifiedModel: providers.openrouter.lastVerifiedModel } : {}),
+        defaultModel: providers.openrouter.defaultModel,
+        activeModel: providers.openrouter.activeModel,
+        freeModelsCount: providers.openrouter.freeModelsCount,
+        paidModelsCount: providers.openrouter.paidModelsCount,
+        latencyMs: providers.openrouter.latencyMs,
+        checkedAt: providers.openrouter.checkedAt,
+        ...(providers.openrouter.error ? { error: providers.openrouter.error } : {}),
+        errorLog: providers.openrouter.errorLog || [],
+      },
+    };
 
-  res.json({
-    status: 'ok',
-    authRequired: true,
-    backendConnected: true,
-    activeProvider: requestedProvider,
-    activeProviderConfigured: activeInfo.configured,
-    activeProviderVerified: Boolean(activeInfo.generationVerified),
-    geminiConnected: geminiProbeOk,
-    aiService: activeInfo.status,
-    isLiveAI: activeInfo.status === 'connected' && Boolean(activeInfo.generationVerified),
-    model: activeInfo.activeModel,
-    fallbackModels: requestedProvider === 'gemini' ? getCandidateModels().filter((m) => m !== activeInfo.activeModel) : [],
-    providers: providerSummary,
-    connectionHistory: connectionHistory.slice(0, 30),
-    checkedAt: activeInfo.checkedAt || checkedAtIso,
-    lastConnectedAt:
-      lastSuccessfulProviderConnectedAt[requestedProvider] ||
-      (activeInfo.generationVerified ? activeInfo.lastTestedAt ?? null : null) ||
-      (requestedProvider === 'gemini' ? lastSuccessfulGeminiConnectedAt : null),
-    latencyMs: activeInfo.latencyMs ?? 0,
-    ...(activeInfo.error ? { error: activeInfo.error } : {}),
-    version: '2.6.0',
-    platform: 'Aadesh AI',
-  });
+    res.json({
+      status: 'ok',
+      authRequired: true,
+      backendConnected: true,
+      activeProvider: requestedProvider,
+      activeProviderConfigured: activeInfo.configured,
+      activeProviderVerified: Boolean(activeInfo.generationVerified),
+      geminiConnected: geminiProbeOk,
+      aiService: activeInfo.status,
+      isLiveAI: activeInfo.status === 'connected' && Boolean(activeInfo.generationVerified),
+      model: activeInfo.activeModel,
+      fallbackModels: requestedProvider === 'gemini' ? getCandidateModels().filter((m) => m !== activeInfo.activeModel) : [],
+      providers: providerSummary,
+      connectionHistory: connectionHistory.slice(0, 30),
+      checkedAt: activeInfo.checkedAt || checkedAtIso,
+      lastConnectedAt:
+        lastSuccessfulProviderConnectedAt[requestedProvider] ||
+        (activeInfo.generationVerified ? activeInfo.lastTestedAt ?? null : null) ||
+        (requestedProvider === 'gemini' ? lastSuccessfulGeminiConnectedAt : null),
+      latencyMs: activeInfo.latencyMs ?? 0,
+      ...(activeInfo.error ? { error: activeInfo.error } : {}),
+      version: '2.6.0',
+      platform: 'Aadesh AI',
+    });
+  } catch (err: any) {
+    const errorName = err?.name || 'HealthCheckError';
+    const safeError = sanitizeProviderSecretText(err?.message || err || 'Health probe failed');
+    const stackLocation =
+      typeof err?.stack === 'string'
+        ? err.stack
+            .split('\n')
+            .find((l: string) => l.trim().startsWith('at ') && !l.includes('node_modules'))
+            ?.trim() || 'unknown'
+        : 'unknown';
+
+    console.error(
+      JSON.stringify({
+        event: 'HEALTH_CHECK_ERROR',
+        errorName,
+        message: safeError,
+        stackLocation,
+        route: req.originalUrl || req.url,
+        timestamp: new Date().toISOString(),
+      })
+    );
+
+    res.status(200).json({
+      status: 'ok',
+      authRequired: true,
+      backendConnected: true,
+      activeProvider: 'gemini',
+      activeProviderConfigured: false,
+      activeProviderVerified: false,
+      geminiConnected: false,
+      aiService: 'degraded',
+      isLiveAI: false,
+      model: 'gemini-3.1-flash-lite',
+      error: safeError,
+      version: '2.6.0',
+      platform: 'Aadesh AI',
+      timestamp: new Date().toISOString(),
+    });
+  }
 });
 
 // FULL MULTI-PROVIDER STATUS & SUPPORTED MODEL CATALOGS (ZERO API KEYS EXPOSED)
@@ -6343,6 +6383,40 @@ app.all('/api/*', (req: Request, res: Response): void => {
     ok: false,
     error: `API endpoint not found: ${req.method} ${req.originalUrl}`,
   });
+});
+
+// Global Express error handler for /api routes with structured sanitized logging
+app.use((err: any, req: Request, res: Response, _next: NextFunction): void => {
+  const errorName = err?.name || 'InternalServerError';
+  const safeMessage = sanitizeProviderSecretText(err?.message || err || 'Internal Server Error');
+  const safeStack =
+    typeof err?.stack === 'string'
+      ? err.stack
+          .split('\n')
+          .find((l: string) => l.trim().startsWith('at ') && !l.includes('node_modules'))
+          ?.trim() || 'unknown'
+      : 'unknown';
+
+  console.error(
+    JSON.stringify({
+      event: 'EXPRESS_ROUTE_ERROR',
+      errorName,
+      message: safeMessage,
+      stackLocation: safeStack,
+      route: req.originalUrl || req.url,
+      method: req.method,
+      timestamp: new Date().toISOString(),
+    })
+  );
+
+  if (!res.headersSent) {
+    res.status(err?.status || err?.statusCode || 500).json({
+      ok: false,
+      code: err?.code || errorName,
+      error: safeMessage,
+      timestamp: new Date().toISOString(),
+    });
+  }
 });
 
 // Vite middleware in dev or static files in local production

@@ -25,5 +25,5 @@
     "noEmit": true
   },
   "exclude": ["dist", "server.js"],
-  "include": ["src/**/*", "server.ts"]
+  "include": ["src/**/*", "server.ts", "server/**/*", "api/**/*"]
 }

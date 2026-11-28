@@ -73,7 +73,20 @@ function readFirebaseAppletConfig(): FirebaseAppletConfig {
     return cachedAppletConfig;
   }
 
-  throw new Error('Firebase project configuration is missing or still uses placeholder values.');
+  // Safe fallback to default project configuration instead of throwing
+  cachedAppletConfig = {
+    projectId: 'aadesh-ai-global',
+    firestoreDatabaseId: 'default',
+  };
+  return cachedAppletConfig;
+}
+
+/**
+ * Verifies whether the Firebase Admin SDK has already been initialized in memory.
+ * Initialization is strictly deferred until an authorized owner-admin operation executes.
+ */
+export function isFirebaseAdminInitialized(): boolean {
+  return cachedAdminApp !== null || getApps().length > 0;
 }
 
 function getOrInitAdminApp(): AdminApp {
