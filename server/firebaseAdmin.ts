@@ -1,9 +1,9 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { App as AdminApp, cert, getApp, getApps, initializeApp } from 'firebase-admin/app';
-import { Auth, getAuth, UserRecord } from 'firebase-admin/auth';
-import { Firestore, getFirestore } from 'firebase-admin/firestore';
+import type { App as AdminApp } from 'firebase-admin/app';
+import type { Auth, UserRecord } from 'firebase-admin/auth';
+import type { Firestore } from 'firebase-admin/firestore';
 import {
   buildUserActivityTimeline,
   isValidSafePhotoUrl,
@@ -38,6 +38,36 @@ const safeDirname =
 let cachedAppletConfig: FirebaseAppletConfig | null = null;
 let cachedCredentialMode: 'service_account_json' | 'service_account_env' | 'adc' = 'adc';
 let cachedAdminApp: AdminApp | null = null;
+let cachedAdminInitPromise: Promise<AdminApp> | null = null;
+
+type FirebaseAdminAppModule = typeof import('firebase-admin/app');
+type FirebaseAdminAuthModule = typeof import('firebase-admin/auth');
+type FirebaseAdminFirestoreModule = typeof import('firebase-admin/firestore');
+
+let appModulePromise: Promise<FirebaseAdminAppModule> | null = null;
+let authModulePromise: Promise<FirebaseAdminAuthModule> | null = null;
+let firestoreModulePromise: Promise<FirebaseAdminFirestoreModule> | null = null;
+
+async function loadFirebaseAdminAppModule(): Promise<FirebaseAdminAppModule> {
+  if (!appModulePromise) {
+    appModulePromise = import('firebase-admin/app');
+  }
+  return appModulePromise;
+}
+
+async function loadFirebaseAdminAuthModule(): Promise<FirebaseAdminAuthModule> {
+  if (!authModulePromise) {
+    authModulePromise = import('firebase-admin/auth');
+  }
+  return authModulePromise;
+}
+
+async function loadFirebaseAdminFirestoreModule(): Promise<FirebaseAdminFirestoreModule> {
+  if (!firestoreModulePromise) {
+    firestoreModulePromise = import('firebase-admin/firestore');
+  }
+  return firestoreModulePromise;
+}
 
 function readFirebaseAppletConfig(): FirebaseAppletConfig {
   if (cachedAppletConfig) return cachedAppletConfig;
@@ -81,68 +111,213 @@ function readFirebaseAppletConfig(): FirebaseAppletConfig {
   return cachedAppletConfig;
 }
 
+export function isValidPemPrivateKey(raw?: string | null): boolean {
+  const normalized = String(raw || '')
+    .trim()
+    .replace(/\\n/g, '\n');
+  if (!normalized || normalized.length < 120) return false;
+  return (
+    /-----BEGIN (?:RSA )?PRIVATE KEY-----/.test(normalized) &&
+    /-----END (?:RSA )?PRIVATE KEY-----/.test(normalized)
+  );
+}
+
+export function isValidServiceAccountEmail(raw?: string | null): boolean {
+  const email = String(raw || '').trim();
+  if (!email || email.length > 254 || /\s/.test(email)) return false;
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+export function sanitizeAdminErrorMessage(raw: unknown): string {
+  return sanitizeProviderSecretText(String(raw ?? ''))
+    .replace(
+      /-----BEGIN (?:RSA )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA )?PRIVATE KEY-----/g,
+      '[REDACTED_PRIVATE_KEY]'
+    )
+    .replace(/"private_key"\s*:\s*"[^"]*"/g, '"private_key":"[REDACTED]"')
+    .replace(/FIREBASE_PRIVATE_KEY\s*=\s*\S+/gi, 'FIREBASE_PRIVATE_KEY=[REDACTED]')
+    .replace(/FIREBASE_SERVICE_ACCOUNT_JSON\s*=\s*\S+/gi, 'FIREBASE_SERVICE_ACCOUNT_JSON=[REDACTED]')
+    .slice(0, 300);
+}
+
+export type ResolvedAdminCredential =
+  | {
+      mode: 'service_account_json';
+      projectId: string;
+      serviceAccount: Record<string, any>;
+    }
+  | {
+      mode: 'service_account_env';
+      projectId: string;
+      clientEmail: string;
+      privateKey: string;
+    }
+  | {
+      mode: 'adc';
+      projectId: string;
+    };
+
+function makeAdminConfigError(message: string): Error {
+  const err = new Error(message);
+  (err as any).code = 'ADMIN_SDK_CONFIG_ERROR';
+  return err;
+}
+
+export function resolveAdminCredentialsFromEnv(
+  config: FirebaseAppletConfig = readFirebaseAppletConfig(),
+  env: Record<string, string | undefined> = process.env
+): ResolvedAdminCredential {
+  const serviceAccountJson = String(env.FIREBASE_SERVICE_ACCOUNT_JSON || '').trim();
+  const clientEmail = String(env.FIREBASE_CLIENT_EMAIL || '').trim();
+  const privateKeyRaw = String(env.FIREBASE_PRIVATE_KEY || '').trim();
+  const effectivePrivateKey =
+    privateKeyRaw && privateKeyRaw.toLowerCase() !== 'undefined' && privateKeyRaw.toLowerCase() !== 'null'
+      ? privateKeyRaw
+      : '';
+
+  // 1. Validate FIREBASE_SERVICE_ACCOUNT_JSON first (takes precedence over individual fallback env vars)
+  if (serviceAccountJson) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(serviceAccountJson);
+    } catch {
+      throw makeAdminConfigError(
+        'Invalid FIREBASE_SERVICE_ACCOUNT_JSON credential format. Expected valid service account JSON.'
+      );
+    }
+
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw makeAdminConfigError(
+        'Invalid FIREBASE_SERVICE_ACCOUNT_JSON credential structure. Expected a JSON object.'
+      );
+    }
+
+    const sa = parsed as Record<string, any>;
+    if (sa.type && String(sa.type).trim() !== 'service_account') {
+      throw makeAdminConfigError(
+        'Invalid FIREBASE_SERVICE_ACCOUNT_JSON credential type. Expected "service_account".'
+      );
+    }
+
+    const saEmail = String(sa.client_email || '').trim();
+    const saKey = String(sa.private_key || '').trim();
+    if (!isValidServiceAccountEmail(saEmail) || !isValidPemPrivateKey(saKey)) {
+      throw makeAdminConfigError(
+        'FIREBASE_SERVICE_ACCOUNT_JSON is missing a valid client_email or PEM private_key.'
+      );
+    }
+
+    return {
+      mode: 'service_account_json',
+      projectId:
+        String(sa.project_id || env.FIREBASE_PROJECT_ID || config.projectId).trim() || config.projectId,
+      serviceAccount: sa,
+    };
+  }
+
+  // 2. Fallback to individual FIREBASE_CLIENT_EMAIL + FIREBASE_PRIVATE_KEY only if valid PEM;
+  // ignore blank fallback (use ADC) and reject invalid non-blank key without crashing cert().
+  if (effectivePrivateKey) {
+    if (!isValidPemPrivateKey(effectivePrivateKey)) {
+      throw makeAdminConfigError(
+        'Invalid FIREBASE_PRIVATE_KEY fallback: expected a valid PEM private key (-----BEGIN PRIVATE KEY-----...). Configure FIREBASE_SERVICE_ACCOUNT_JSON or remove the invalid key.'
+      );
+    }
+    if (!isValidServiceAccountEmail(clientEmail)) {
+      throw makeAdminConfigError(
+        'FIREBASE_CLIENT_EMAIL is missing or invalid while FIREBASE_PRIVATE_KEY is configured.'
+      );
+    }
+
+    const envProjectId = String(env.FIREBASE_PROJECT_ID || config.projectId).trim() || config.projectId;
+    return {
+      mode: 'service_account_env',
+      projectId: envProjectId,
+      clientEmail,
+      privateKey: effectivePrivateKey.replace(/\\n/g, '\n'),
+    };
+  }
+
+  // 3. Application Default Credentials (Google AI Studio Preview / GCP host)
+  return {
+    mode: 'adc',
+    projectId: String(env.FIREBASE_PROJECT_ID || config.projectId).trim() || config.projectId,
+  };
+}
+
 /**
  * Verifies whether the Firebase Admin SDK has already been initialized in memory.
  * Initialization is strictly deferred until an authorized owner-admin operation executes.
  */
 export function isFirebaseAdminInitialized(): boolean {
-  return cachedAdminApp !== null || getApps().length > 0;
+  return cachedAdminApp !== null;
 }
 
-function getOrInitAdminApp(): AdminApp {
+async function getOrInitAdminApp(): Promise<AdminApp> {
   if (cachedAdminApp) return cachedAdminApp;
-  if (getApps().length > 0) {
-    cachedAdminApp = getApp();
-    return cachedAdminApp;
-  }
+  if (cachedAdminInitPromise) return cachedAdminInitPromise;
 
-  const config = readFirebaseAppletConfig();
-  const serviceAccountJson = String(process.env.FIREBASE_SERVICE_ACCOUNT_JSON || '').trim();
-  const clientEmail = String(process.env.FIREBASE_CLIENT_EMAIL || '').trim();
-  const privateKeyRaw = String(process.env.FIREBASE_PRIVATE_KEY || '').trim();
+  cachedAdminInitPromise = (async () => {
+    const { cert, getApp, getApps, initializeApp } = await loadFirebaseAdminAppModule();
 
-  if (serviceAccountJson) {
-    let parsed: Record<string, any>;
-    try {
-      parsed = JSON.parse(serviceAccountJson);
-    } catch {
-      throw new Error('Invalid FIREBASE_SERVICE_ACCOUNT_JSON server credential format.');
+    if (getApps().length > 0) {
+      cachedAdminApp = getApp();
+      return cachedAdminApp;
     }
-    cachedCredentialMode = 'service_account_json';
+
+    const config = readFirebaseAppletConfig();
+    const resolved = resolveAdminCredentialsFromEnv(config, process.env);
+
+    if (resolved.mode === 'service_account_json') {
+      cachedCredentialMode = 'service_account_json';
+      cachedAdminApp = initializeApp({
+        credential: cert(resolved.serviceAccount),
+        projectId: resolved.projectId,
+      });
+      return cachedAdminApp;
+    }
+
+    if (resolved.mode === 'service_account_env') {
+      cachedCredentialMode = 'service_account_env';
+      cachedAdminApp = initializeApp({
+        credential: cert({
+          projectId: resolved.projectId,
+          clientEmail: resolved.clientEmail,
+          privateKey: resolved.privateKey,
+        }),
+        projectId: resolved.projectId,
+      });
+      return cachedAdminApp;
+    }
+
+    cachedCredentialMode = 'adc';
     cachedAdminApp = initializeApp({
-      credential: cert(parsed),
-      projectId: String(parsed.project_id || config.projectId),
+      projectId: resolved.projectId,
     });
     return cachedAdminApp;
-  }
+  })();
 
-  if (clientEmail && privateKeyRaw) {
-    const envProjectId = String(process.env.FIREBASE_PROJECT_ID || config.projectId).trim();
-    cachedCredentialMode = 'service_account_env';
-    cachedAdminApp = initializeApp({
-      credential: cert({
-        projectId: envProjectId,
-        clientEmail,
-        privateKey: privateKeyRaw.replace(/\\n/g, '\n'),
-      }),
-      projectId: envProjectId,
-    });
-    return cachedAdminApp;
+  try {
+    return await cachedAdminInitPromise;
+  } catch (err) {
+    cachedAdminInitPromise = null;
+    throw err;
   }
-
-  cachedCredentialMode = 'adc';
-  cachedAdminApp = initializeApp({
-    projectId: config.projectId,
-  });
-  return cachedAdminApp;
 }
 
-export function getAdminAuthService(): Auth {
-  return getAuth(getOrInitAdminApp());
+export async function getAdminAuthService(): Promise<Auth> {
+  const [app, { getAuth }] = await Promise.all([
+    getOrInitAdminApp(),
+    loadFirebaseAdminAuthModule(),
+  ]);
+  return getAuth(app);
 }
 
-export function getAdminDbService(): Firestore {
-  const app = getOrInitAdminApp();
+export async function getAdminDbService(): Promise<Firestore> {
+  const [app, { getFirestore }] = await Promise.all([
+    getOrInitAdminApp(),
+    loadFirebaseAdminFirestoreModule(),
+  ]);
   const config = readFirebaseAppletConfig();
   const dbId = config.firestoreDatabaseId;
   return dbId && dbId !== '(default)' ? getFirestore(app, dbId) : getFirestore(app);
@@ -169,6 +344,22 @@ export function classifyFirebaseAdminError(err: unknown): {
   const rawCode = String((err as any)?.code || '').toLowerCase();
   const rawMsg = String((err as any)?.message || err || 'Unknown Firebase Admin error');
   const lower = rawMsg.toLowerCase();
+
+  if (
+    rawCode === 'admin_sdk_config_error' ||
+    lower.includes('firebase_service_account_json') ||
+    lower.includes('firebase_private_key') ||
+    lower.includes('firebase_client_email') ||
+    lower.includes('failed to parse private key') ||
+    lower.includes('invalid pem') ||
+    lower.includes('service account object must contain')
+  ) {
+    return {
+      status: 503,
+      code: 'ADMIN_SDK_CONFIG_ERROR',
+      message: sanitizeAdminErrorMessage(rawMsg),
+    };
+  }
 
   if (
     rawCode.includes('permission-denied') ||
@@ -200,7 +391,7 @@ export function classifyFirebaseAdminError(err: unknown): {
   return {
     status: 500,
     code: 'ADMIN_SDK_OPERATION_FAILED',
-    message: sanitizeProviderSecretText(rawMsg).slice(0, 300),
+    message: sanitizeAdminErrorMessage(rawMsg),
   };
 }
 
@@ -378,8 +569,7 @@ async function writeOwnerAuditLog(
 }
 
 export async function listMergedOwnerUsers(): Promise<OwnerManagedUser[]> {
-  const auth = getAdminAuthService();
-  const db = getAdminDbService();
+  const [auth, db] = await Promise.all([getAdminAuthService(), getAdminDbService()]);
 
   const [authMap, usersSnap, analyticsSnap] = await Promise.all([
     listAllFirebaseAuthUsers(auth),
@@ -449,8 +639,7 @@ export async function getMergedOwnerUserDetail(rawUid: string): Promise<{
   timeline: UserTimelineEvent[];
 }> {
   const uid = safeSafeDocId(rawUid);
-  const auth = getAdminAuthService();
-  const db = getAdminDbService();
+  const [auth, db] = await Promise.all([getAdminAuthService(), getAdminDbService()]);
 
   let authUser: UserRecord | null = null;
   try {
@@ -543,8 +732,7 @@ export async function applyOwnerProfileUpdate(
   actor: { uid: string; email: string }
 ): Promise<{ user: OwnerManagedUser; auditLog: OwnerAuditLogRecord }> {
   const uid = safeSafeDocId(rawUid);
-  const auth = getAdminAuthService();
-  const db = getAdminDbService();
+  const [auth, db] = await Promise.all([getAdminAuthService(), getAdminDbService()]);
 
   let authUser: UserRecord | null = null;
   try {
@@ -620,8 +808,7 @@ export async function applyOwnerStreakUpdate(
   actor: { uid: string; email: string }
 ): Promise<{ user: OwnerManagedUser; auditLog: OwnerAuditLogRecord }> {
   const uid = safeSafeDocId(rawUid);
-  const auth = getAdminAuthService();
-  const db = getAdminDbService();
+  const [auth, db] = await Promise.all([getAdminAuthService(), getAdminDbService()]);
 
   let authUser: UserRecord | null = null;
   try {
@@ -697,7 +884,7 @@ export async function applyOwnerStreakUpdate(
 
 export async function listOwnerUserConversations(rawUid: string) {
   const uid = safeSafeDocId(rawUid);
-  const db = getAdminDbService();
+  const db = await getAdminDbService();
   const snap = await db
     .collection('users')
     .doc(uid)
@@ -740,7 +927,7 @@ export async function inspectUserConversationMessagesAudit(params: {
     throw err;
   }
 
-  const db = getAdminDbService();
+  const db = await getAdminDbService();
   const msgSnap = await db
     .collection('users')
     .doc(uid)
@@ -787,7 +974,7 @@ export async function listOwnerAuditLogs(filters?: {
   action?: OwnerAuditAction | string;
   limit?: number;
 }): Promise<OwnerAuditLogRecord[]> {
-  const db = getAdminDbService();
+  const db = await getAdminDbService();
   const maxItems = Math.min(250, Math.max(1, Number(filters?.limit || 150) || 150));
 
   const snap = await db
