@@ -24,5 +24,6 @@
     "allowImportingTsExtensions": true,
     "noEmit": true
   },
-  "exclude": ["dist", "server.js"]
+  "exclude": ["dist", "server.js"],
+  "include": ["src/**/*", "server.ts"]
 }

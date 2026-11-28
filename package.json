@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test": "tsx --test tests/bugfixes.test.ts src/tests/firestore.test.ts src/tests/providers.test.ts src/tests/isolatedRestore.test.ts src/tests/ownerAdmin.test.ts src/tests/backupAndTrends.test.ts"
+    "test": "tsx --test tests/bugfixes.test.ts src/tests/firestore.test.ts src/tests/providers.test.ts src/tests/isolatedRestore.test.ts src/tests/ownerAdmin.test.ts src/tests/backupAndTrends.test.ts src/tests/health.test.ts"
   },
   "dependencies": {
     "@google/genai": "^3.0.0",
