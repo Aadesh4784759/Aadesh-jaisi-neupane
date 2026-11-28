@@ -1460,6 +1460,8 @@ export async function saveSingleMessageToFirestore(
       if (msg.attachmentName) payload.attachmentName = msg.attachmentName.slice(0, 256);
       if (msg.imageUrl && msg.imageUrl.length <= 950) payload.imageUrl = msg.imageUrl;
       if (typeof msg.isVoiceInput === 'boolean') payload.isVoice = msg.isVoiceInput;
+      if (msg.provider) payload.provider = msg.provider;
+      if (msg.modelUsed) payload.modelUsed = msg.modelUsed.slice(0, 120);
       if (msg.editedAt) payload.editedAt = new Date(msg.editedAt).toISOString();
       await setDoc(msgRef, payload);
     } else {
@@ -1639,6 +1641,47 @@ export async function fetchUserUsageDatesFromFirestore(
   };
 }
 
+export interface UserActivityAnalyticsRecord {
+  id: string;
+  eventType: string;
+  language?: string;
+  latencyMs?: number;
+  dateKey?: string;
+  timestamp?: string;
+}
+
+export async function fetchUserActivityAnalyticsEvents(
+  userId: string
+): Promise<UserActivityAnalyticsRecord[]> {
+  if (!db || !auth?.currentUser || auth.currentUser.uid !== userId) {
+    return [];
+  }
+  const uid = safeDocId(userId);
+  const analyticsPath = 'usage_analytics';
+  try {
+    const analyticsSnap = await getDocs(
+      query(collection(db, analyticsPath), where('userId', '==', uid), limit(500))
+    );
+    return analyticsSnap.docs.map((d) => {
+      const data = d.data();
+      return {
+        id: String(data.id || d.id),
+        eventType: String(data.eventType || 'chat'),
+        language: typeof data.language === 'string' ? data.language : undefined,
+        latencyMs: typeof data.latencyMs === 'number' ? data.latencyMs : 0,
+        dateKey: typeof data.dateKey === 'string' ? data.dateKey : undefined,
+        timestamp: typeof data.timestamp === 'string' ? data.timestamp : undefined,
+      };
+    });
+  } catch (err) {
+    if (err instanceof Error && err.message.toLowerCase().includes('permission')) {
+      handleFirestoreError(err, OperationType.LIST, analyticsPath);
+    }
+    console.warn('Firestore usage_analytics trend fetch warning:', err);
+    return [];
+  }
+}
+
 // ---------------- OWNER ADMIN FIRESTORE QUERIES ----------------
 
 export async function fetchAdminUsersFromFirestore(): Promise<AdminUserRecord[]> {
@@ -1728,6 +1771,8 @@ export async function fetchAdminConversationMessages(
         isPinned: Boolean(data.isPinned),
         pinnedAt: data.pinnedAt ? new Date(data.pinnedAt).getTime() : undefined,
         attachmentName: data.attachmentName,
+        provider: data.provider,
+        modelUsed: data.modelUsed,
         timestamp: data.timestamp ? new Date(data.timestamp).getTime() : Date.now(),
       };
     });

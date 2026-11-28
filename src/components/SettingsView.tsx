@@ -72,9 +72,15 @@ import {
   getLastStreakReminderDate,
   getStoredLoginActivity,
   getStoredMemories,
+  getStoredMetrics,
+  OWNER_ADMIN_EMAIL,
   saveStoredMemories,
   saveUserLocalExtras,
 } from '../utils/storage';
+import {
+  downloadFullOwnerBackupFile,
+  FullOwnerBackupDownloadResult,
+} from '../utils/fullOwnerBackup';
 import { containsSecretOrCredential, extractMemoryKeywords } from '../utils/powerMemory';
 import { voiceAssistant } from '../utils/speech';
 import { downloadChatHistoryFile } from '../utils/exportHistory';
@@ -186,6 +192,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   user,
   settings,
   sessions,
+  mediaItems,
   metrics,
   aiHealth,
   providersStatus = null,
@@ -243,6 +250,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     messageCount: number;
     kbLabel: string;
   } | null>(null);
+  const [isExportingOwnerBackup, setIsExportingOwnerBackup] = useState(false);
+  const [ownerBackupProgress, setOwnerBackupProgress] = useState('');
+  const [ownerBackupResult, setOwnerBackupResult] = useState<FullOwnerBackupDownloadResult | null>(null);
+  const [ownerBackupError, setOwnerBackupError] = useState<string | null>(null);
   const [biometricHardwareAvailable, setBiometricHardwareAvailable] = useState<boolean | null>(null);
   const [loginActivity, setLoginActivity] = useState<LoginActivityEntry[]>(() =>
     getStoredLoginActivity(user.id)
@@ -614,6 +625,43 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       kbLabel,
     });
     showToast(`Exported ${result.sessionCount} chat sessions as ${format.toUpperCase()}.`);
+  };
+
+  const verifiedOwnerEmail = (fbAuthUser?.email || user.email || '').trim().toLowerCase();
+  const canDownloadOwnerBackup = Boolean(
+    isOwnerAdmin &&
+      verifiedOwnerEmail === OWNER_ADMIN_EMAIL &&
+      (!fbAuthUser || fbAuthUser.emailVerified)
+  );
+
+  const handleDownloadOwnerFullDataBackup = async () => {
+    if (!canDownloadOwnerBackup || isExportingOwnerBackup) return;
+    setIsExportingOwnerBackup(true);
+    setOwnerBackupError(null);
+    setOwnerBackupProgress('Aggregating conversations, memories, media history, and activity metrics...');
+
+    try {
+      const effectiveMetrics = metrics || getStoredMetrics();
+      const result = await downloadFullOwnerBackupFile({
+        ownerEmail: verifiedOwnerEmail,
+        isOwnerAdmin: canDownloadOwnerBackup,
+        isOnline,
+        user,
+        settings,
+        sessions,
+        memories: effectiveMemories,
+        mediaItems,
+        metrics: effectiveMetrics,
+        onProgress: (txt) => setOwnerBackupProgress(txt),
+      });
+      setOwnerBackupResult(result);
+      showToast('Full owner data backup JSON downloaded.');
+    } catch (err: any) {
+      setOwnerBackupError(err?.message || 'Unable to generate full owner data backup.');
+    } finally {
+      setIsExportingOwnerBackup(false);
+      setOwnerBackupProgress('');
+    }
   };
 
   const applyVoiceSpeed = (rawSpeed: number) => {
@@ -1597,6 +1645,90 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 </div>
               )}
             </div>
+
+            {canDownloadOwnerBackup && (
+              <div
+                aria-label="Owner Full Data Backup"
+                className="p-4 rounded-2xl v2-neu-inset border border-sky-400/30 space-y-3"
+              >
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="space-y-1 min-w-0">
+                    <div className="flex items-center gap-2 text-xs font-bold text-white">
+                      <ShieldCheck className="w-4 h-4 text-sky-300 shrink-0" />
+                      <span>Owner Full Data Backup</span>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-purple-200/75 tabular-nums">
+                      <span>{sessions.length} conversations</span>
+                      <span aria-hidden="true">·</span>
+                      <span>{effectiveMemories.length} memories</span>
+                      <span aria-hidden="true">·</span>
+                      <span>{mediaItems.length} saved media + Image Studio history</span>
+                      <span aria-hidden="true">·</span>
+                      <span>{(metrics?.totalQueries ?? getStoredMetrics().totalQueries).toLocaleString()} activity queries</span>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => void handleDownloadOwnerFullDataBackup()}
+                    disabled={isExportingOwnerBackup}
+                    className="min-h-[42px] px-4 py-2 rounded-xl electric-purple-btn text-white text-xs font-bold flex items-center gap-2 cursor-pointer whitespace-nowrap shrink-0 disabled:opacity-50"
+                  >
+                    {isExportingOwnerBackup ? (
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <Download className="w-4 h-4" />
+                    )}
+                    <span>
+                      {isExportingOwnerBackup ? 'Preparing Backup...' : 'Download Full Data Backup'}
+                    </span>
+                  </button>
+                </div>
+
+                {ownerBackupProgress && (
+                  <div className="text-[11px] text-sky-300 flex items-center gap-2">
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin shrink-0" />
+                    <span>{ownerBackupProgress}</span>
+                  </div>
+                )}
+
+                {ownerBackupError && (
+                  <div
+                    role="alert"
+                    className="p-2.5 rounded-xl bg-rose-950/40 border border-rose-400/40 text-rose-200 text-[11px] flex items-center gap-2"
+                  >
+                    <AlertTriangle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                    <span>{ownerBackupError}</span>
+                  </div>
+                )}
+
+                {ownerBackupResult && (
+                  <div
+                    role="status"
+                    className="p-2.5 rounded-xl bg-emerald-950/40 border border-emerald-400/40 text-emerald-200 text-[11px] flex flex-wrap items-center gap-x-2 gap-y-1 tabular-nums"
+                  >
+                    <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                    <span>
+                      Downloaded <strong>{ownerBackupResult.filename}</strong>
+                    </span>
+                    <span aria-hidden="true">·</span>
+                    <span>
+                      {ownerBackupResult.payload.metadata.summary.totalConversations} chats,{' '}
+                      {ownerBackupResult.payload.metadata.summary.totalMemories} memories,{' '}
+                      {ownerBackupResult.payload.metadata.summary.totalGeotaggedMedia +
+                        ownerBackupResult.payload.metadata.summary.totalGeneratedImages}{' '}
+                      media assets
+                    </span>
+                    <span aria-hidden="true">·</span>
+                    <span>
+                      {ownerBackupResult.byteSize >= 1024
+                        ? `${(ownerBackupResult.byteSize / 1024).toFixed(1)} KB`
+                        : `${ownerBackupResult.byteSize} B`}
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Real Login Activity Panel */}
             <div className="p-3.5 rounded-2xl v2-neu-inset border border-white/10 space-y-2.5">

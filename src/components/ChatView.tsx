@@ -3346,7 +3346,13 @@ export const ChatView: React.FC<ChatViewProps> = ({
                           </span>
                           {isAI && (msg.provider || msg.modelUsed) && (
                             <span
-                              title={msg.modelUsed ? `Model: ${msg.modelUsed}` : undefined}
+                              title={
+                                msg.failoverOccurred && msg.fallbackFromProvider
+                                  ? `Auto-failover from ${AI_PROVIDER_METADATA[msg.fallbackFromProvider]?.name || msg.fallbackFromProvider}${msg.modelUsed ? ` · Model: ${msg.modelUsed}` : ''}`
+                                  : msg.modelUsed
+                                  ? `Model: ${msg.modelUsed}`
+                                  : undefined
+                              }
                               className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-[#090a0f]/80 border border-purple-400/25 text-[10px] font-mono text-purple-200/85 shrink-0"
                             >
                               <span>
@@ -3354,6 +3360,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
                                   ? AI_PROVIDER_METADATA[msg.provider]?.shortName || msg.provider
                                   : 'AI'}
                               </span>
+                              {msg.failoverOccurred && msg.fallbackFromProvider && (
+                                <span className="text-amber-300 font-sans font-semibold">
+                                  (Failover from {AI_PROVIDER_METADATA[msg.fallbackFromProvider]?.shortName || msg.fallbackFromProvider})
+                                </span>
+                              )}
                               {msg.modelUsed && (
                                 <span className="text-gray-400 truncate max-w-[120px]">
                                   · {msg.modelUsed}

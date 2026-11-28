@@ -109,6 +109,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   aiProvider: 'gemini',
   aiModel: 'gemini-3.1-flash-lite',
   openRouterModel: 'openrouter/free',
+  autoFailover: true,
   fontSize: 'normal',
   handsFreeMode: false,
   offlineModeForce: false,

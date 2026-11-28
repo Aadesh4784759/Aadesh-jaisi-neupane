@@ -16,6 +16,12 @@ import {
   Megaphone,
   Check,
   Server,
+  HardDriveDownload,
+  Zap,
+  Edit3,
+  Flame,
+  History,
+  FileText,
 } from 'lucide-react';
 import {
   AdminConversationSummary,
@@ -23,6 +29,8 @@ import {
   ChatMessage,
   UserProfile,
 } from '../types';
+import type { FailoverEventRecord } from '../utils/aiProviders';
+import { isValidSafePhotoUrl, type OwnerAuditLogRecord, type OwnerManagedUser } from '../utils/ownerAdmin';
 import {
   fetchAdminAnalyticsEvents,
   fetchAdminConversationMessages,
@@ -35,6 +43,8 @@ import {
 import { OWNER_ADMIN_EMAIL } from '../utils/storage';
 import { buildApiUrl } from '../utils/apiConfig';
 import { AdminAnalyticsChart } from './AdminAnalyticsChart';
+import { FailoverActivityTab } from './FailoverActivityTab';
+import { OwnerControlPanel, OwnerControlSection } from './OwnerControlPanel';
 import { SecureBackupCenter } from './SecureBackupCenter';
 import { SecureRestoreCenter } from './SecureRestoreCenter';
 
@@ -61,16 +71,47 @@ interface ServerStatusPayload {
   recentErrors?: ServerErrorRecord[];
 }
 
+type AdminTabId =
+  | 'overview'
+  | 'directory'
+  | 'editor'
+  | 'streaks'
+  | 'messages'
+  | 'timeline'
+  | 'audit'
+  | 'failover'
+  | 'backup';
+
+const OWNER_TABS: Array<{ id: AdminTabId; label: string; icon: React.ComponentType<{ className?: string }> }> = [
+  { id: 'overview', label: 'Overview', icon: Activity },
+  { id: 'directory', label: 'Registered Users', icon: Users },
+  { id: 'editor', label: 'User Profile Editor', icon: Edit3 },
+  { id: 'streaks', label: 'Streak Manager', icon: Flame },
+  { id: 'messages', label: 'Messages & Activity', icon: MessageSquare },
+  { id: 'timeline', label: 'User Timeline', icon: History },
+  { id: 'audit', label: 'Security & Audit Logs', icon: FileText },
+  { id: 'failover', label: 'Failover Activity', icon: Zap },
+  { id: 'backup', label: 'Backup & Restore', icon: HardDriveDownload },
+];
+
 export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   currentUser,
   onOpenAuth,
 }) => {
+  const [activeTab, setActiveTab] = useState<AdminTabId>('overview');
   const [verifying, setVerifying] = useState(true);
   const [authorized, setAuthorized] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [serverStatus, setServerStatus] = useState<ServerStatusPayload | null>(null);
+  const [failoverEvents, setFailoverEvents] = useState<FailoverEventRecord[]>([]);
+  const [refreshingFailover, setRefreshingFailover] = useState(false);
 
   const [users, setUsers] = useState<AdminUserRecord[]>([]);
+  const [ownerUsers, setOwnerUsers] = useState<OwnerManagedUser[]>([]);
+  const [ownerAuditLogs, setOwnerAuditLogs] = useState<OwnerAuditLogRecord[]>([]);
+  const [ownerSelectedUid, setOwnerSelectedUid] = useState<string | null>(null);
+  const [ownerControlLoading, setOwnerControlLoading] = useState(false);
+  const [ownerSdkError, setOwnerSdkError] = useState<{ code?: string; message: string } | null>(null);
   const [analyticsEvents, setAnalyticsEvents] = useState<
     Array<{ id: string; userId: string; eventType: string; language?: string; dateKey: string; timestamp: string }>
   >([]);
@@ -85,6 +126,54 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   const [maintenanceMode, setMaintenanceMode] = useState(false);
   const [savingAnnouncement, setSavingAnnouncement] = useState(false);
   const [saveToast, setSaveToast] = useState<string | null>(null);
+
+  const loadOwnerAdminSdkData = async (idTokenOverride?: string) => {
+    setOwnerControlLoading(true);
+    setOwnerSdkError(null);
+    try {
+      const idToken = idTokenOverride || (await getCurrentIdToken());
+      if (!idToken) return;
+
+      const [usersRes, logsRes] = await Promise.all([
+        fetch(buildApiUrl('/api/admin/owner/users'), {
+          headers: { Authorization: `Bearer ${idToken}` },
+        }),
+        fetch(buildApiUrl('/api/admin/owner/audit-logs'), {
+          headers: { Authorization: `Bearer ${idToken}` },
+        }),
+      ]);
+
+      const usersData = await usersRes.json();
+      if (!usersRes.ok || !usersData.ok) {
+        setOwnerSdkError({
+          code: usersData.code,
+          message: usersData.error || 'Failed to load Firebase Admin directory.',
+        });
+        return;
+      }
+
+      const loadedUsers: OwnerManagedUser[] = Array.isArray(usersData.users) ? usersData.users : [];
+      setOwnerUsers(loadedUsers);
+      if (loadedUsers.length > 0) {
+        setOwnerSelectedUid((prev) =>
+          prev && loadedUsers.some((u) => u.uid === prev) ? prev : loadedUsers[0].uid
+        );
+      }
+
+      if (logsRes.ok) {
+        const logsData = await logsRes.json();
+        if (Array.isArray(logsData.logs)) {
+          setOwnerAuditLogs(logsData.logs);
+        }
+      }
+    } catch (err: any) {
+      setOwnerSdkError({
+        message: err?.message || 'Unable to reach Firebase Admin Owner API.',
+      });
+    } finally {
+      setOwnerControlLoading(false);
+    }
+  };
 
   const loadOwnerDashboard = async () => {
     setVerifying(true);
@@ -112,6 +201,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
 
       setAuthorized(true);
       setServerStatus(data.serverStatus || null);
+      setFailoverEvents(Array.isArray(data.failoverEvents) ? data.failoverEvents : []);
 
       const [userList, events] = await Promise.all([
         fetchAdminUsersFromFirestore(),
@@ -119,11 +209,33 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
       ]);
       setUsers(userList);
       setAnalyticsEvents(events);
+      void loadOwnerAdminSdkData(idToken);
     } catch (err: any) {
       setAuthorized(false);
       setAuthError(err?.message || 'Failed to verify owner authorization.');
     } finally {
       setVerifying(false);
+    }
+  };
+
+  const refreshFailoverEvents = async () => {
+    setRefreshingFailover(true);
+    try {
+      const idToken = await getCurrentIdToken();
+      if (!idToken) return;
+      const res = await fetch(buildApiUrl('/api/admin/failover-events'), {
+        headers: { Authorization: `Bearer ${idToken}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.events)) {
+          setFailoverEvents(data.events);
+        }
+      }
+    } catch {
+      // keep existing state cleanly
+    } finally {
+      setRefreshingFailover(false);
     }
   };
 
@@ -306,6 +418,112 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
         </div>
       )}
 
+      {/* Admin Dashboard Tabs */}
+      <div
+        role="tablist"
+        aria-label="Admin Dashboard Sections"
+        className="flex items-center gap-2 overflow-x-auto pb-1"
+      >
+        {OWNER_TABS.map((tab) => {
+          const Icon = tab.icon;
+          const badgeCount =
+            tab.id === 'directory'
+              ? ownerUsers.length || users.length
+              : tab.id === 'audit'
+              ? ownerAuditLogs.length
+              : tab.id === 'failover'
+              ? failoverEvents.length
+              : null;
+          return (
+            <button
+              key={tab.id}
+              type="button"
+              role="tab"
+              aria-selected={activeTab === tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={`inline-flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                activeTab === tab.id
+                  ? 'electric-purple-btn text-white border-purple-400/50'
+                  : 'v2-neu-inset border-white/10 text-gray-300 hover:text-white hover:border-purple-400/35'
+              }`}
+            >
+              <Icon className="w-3.5 h-3.5 shrink-0" />
+              <span>{tab.label}</span>
+              {badgeCount !== null && (
+                <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-black/30 tabular-nums">
+                  {badgeCount}
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+
+      {(activeTab === 'directory' ||
+        activeTab === 'editor' ||
+        activeTab === 'streaks' ||
+        activeTab === 'messages' ||
+        activeTab === 'timeline' ||
+        activeTab === 'audit') && (
+        <OwnerControlPanel
+          section={activeTab as OwnerControlSection}
+          users={ownerUsers}
+          auditLogs={ownerAuditLogs}
+          loading={ownerControlLoading}
+          adminSdkError={ownerSdkError}
+          selectedUid={ownerSelectedUid}
+          ownerTimezone={currentUser.timezone}
+          onSelectUid={(uid) => setOwnerSelectedUid(uid)}
+          onSwitchSection={(nextSec, uid) => {
+            if (uid) setOwnerSelectedUid(uid);
+            setActiveTab(nextSec);
+          }}
+          onRefreshAll={() => loadOwnerAdminSdkData()}
+          onUserUpdated={(updatedUser, newLog) => {
+            setOwnerUsers((prev) =>
+              prev.map((u) => (u.uid === updatedUser.uid ? updatedUser : u))
+            );
+            setUsers((prev) =>
+              prev.map((u) =>
+                u.userId === updatedUser.uid
+                  ? {
+                      ...u,
+                      displayName: updatedUser.displayName,
+                      username: updatedUser.username,
+                      photoURL: updatedUser.photoURL,
+                      status: updatedUser.status,
+                    }
+                  : u
+              )
+            );
+            if (newLog) {
+              setOwnerAuditLogs((prev) => [newLog, ...prev]);
+            }
+          }}
+          onAuditLogAdded={(newLog) => {
+            setOwnerAuditLogs((prev) => [newLog, ...prev]);
+          }}
+        />
+      )}
+
+      {activeTab === 'failover' && (
+        <FailoverActivityTab
+          events={failoverEvents}
+          userTimezone={currentUser.timezone}
+          onRefresh={refreshFailoverEvents}
+          isRefreshing={refreshingFailover}
+        />
+      )}
+
+      {activeTab === 'backup' && (
+        <div className="space-y-6">
+          <SecureBackupCenter userEmail={currentUser.email || OWNER_ADMIN_EMAIL} />
+          <SecureRestoreCenter userEmail={currentUser.email || OWNER_ADMIN_EMAIL} />
+        </div>
+      )}
+
+      {activeTab === 'overview' && (
+        <>
       {/* KPI Cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-5">
         <div className="v2-neu-card rounded-2xl p-4 sm:p-5 border border-purple-500/30 space-y-1.5">
@@ -420,12 +638,6 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
         totalApiRequests={serverStatus?.totalApiRequests || 0}
       />
 
-      {/* Secure Backup Center */}
-      <SecureBackupCenter userEmail={currentUser.email || OWNER_ADMIN_EMAIL} />
-
-      {/* Secure Restore Center */}
-      <SecureRestoreCenter userEmail={currentUser.email || OWNER_ADMIN_EMAIL} />
-
       {/* Daily Registrations + Owner Broadcast Banner */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div className="v2-neu-card rounded-3xl p-5 border border-purple-500/30 space-y-4">
@@ -533,7 +745,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                   >
                     <td className="py-2.5 pr-3">
                       <div className="flex items-center gap-2.5">
-                        {u.photoURL ? (
+                        {u.photoURL && isValidSafePhotoUrl(u.photoURL) ? (
                           <img src={u.photoURL} alt={u.displayName} className="w-7 h-7 rounded-full object-cover" />
                         ) : (
                           <div className="w-7 h-7 rounded-full bg-purple-900/70 flex items-center justify-center text-white font-bold">
@@ -661,6 +873,8 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
           )}
         </div>
       </div>
+        </>
+      )}
     </div>
   );
 };

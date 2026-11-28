@@ -820,3 +820,351 @@ export function resolveProviderHealthDisplay(
   };
 }
 
+/**
+ * Priority order for automatic AI provider failover:
+ * 1. Google Gemini (primary/default)
+ * 2. Groq (first fallback)
+ * 3. OpenRouter (second fallback)
+ */
+export const AI_PROVIDER_FAILOVER_PRIORITY: AIProviderId[] = ['gemini', 'groq', 'openrouter'];
+
+export function getFailoverProviderChain(
+  preferredProvider: AIProviderId,
+  autoFailoverEnabled: boolean = true
+): AIProviderId[] {
+  const norm = normalizeAIProviderId(preferredProvider);
+  if (!autoFailoverEnabled) {
+    return [norm];
+  }
+  const idx = AI_PROVIDER_FAILOVER_PRIORITY.indexOf(norm);
+  if (idx === -1) {
+    return AI_PROVIDER_FAILOVER_PRIORITY;
+  }
+  return AI_PROVIDER_FAILOVER_PRIORITY.slice(idx);
+}
+
+/**
+ * Detects whether an error qualifies for automatic provider failover:
+ * Returns true ONLY for:
+ * - HTTP 429, quota exhaustion, rate limiting, RESOURCE_EXHAUSTED
+ * - HTTP 503, 504, temporary server overload, high demand, or request timeout
+ * Returns false for:
+ * - User errors, malformed prompts, validation errors (HTTP 400)
+ * - Authentication/authorization errors (HTTP 401, 403, invalid API key, permission denied)
+ * - Safety blocks or content moderation refusals
+ */
+export function isProviderFailoverEligibleError(err: unknown): boolean {
+  if (isNonFallbackClientError(err)) {
+    return false;
+  }
+
+  const status = Number(
+    (err as any)?.status || (err as any)?.statusCode || (err as any)?.code || 0
+  );
+  const msg = sanitizeProviderSecretText(err).toLowerCase();
+
+  // Explicit safety or client refusal blocks must never trigger failover
+  if (
+    status === 400 ||
+    status === 401 ||
+    status === 403 ||
+    msg.includes('safety') ||
+    msg.includes('blocked') ||
+    msg.includes('harm') ||
+    msg.includes('invalid_argument') ||
+    msg.includes('permission_denied') ||
+    msg.includes('unauthorized') ||
+    msg.includes('forbidden')
+  ) {
+    return false;
+  }
+
+  // Rate limits & quota exhaustion
+  if (
+    status === 429 ||
+    msg.includes('429') ||
+    msg.includes('resource_exhausted') ||
+    msg.includes('quota') ||
+    msg.includes('rate limit') ||
+    msg.includes('rate_limit') ||
+    msg.includes('too many requests') ||
+    msg.includes('exhausted')
+  ) {
+    return true;
+  }
+
+  // Temporary server overload, high demand, service unavailable, or timeouts
+  if (
+    status === 503 ||
+    status === 504 ||
+    msg.includes('503') ||
+    msg.includes('504') ||
+    msg.includes('overload') ||
+    msg.includes('temporarily unavailable') ||
+    msg.includes('service unavailable') ||
+    msg.includes('high demand') ||
+    msg.includes('timed out') ||
+    msg.includes('timeout')
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+export interface FailoverEventRecord {
+  id: string;
+  timestamp: string;
+  failedProvider: AIProviderId;
+  failedModel?: string;
+  reasonCode: string;
+  errorMessage: string;
+  fallbackProvider: AIProviderId | null;
+  fallbackModel?: string;
+  success: boolean;
+  endpoint: '/api/chat' | '/api/chat/stream' | string;
+  latencyMs?: number;
+}
+
+export function extractFailoverReasonCode(err: unknown): string {
+  const status = Number(
+    (err as any)?.status || (err as any)?.statusCode || (err as any)?.code || 0
+  );
+  const providerCode = String((err as any)?.providerCode || '').trim();
+  const msg = sanitizeProviderSecretText(err).toLowerCase();
+
+  if (status === 429 || msg.includes('429')) return '429';
+  if (msg.includes('resource_exhausted')) return 'RESOURCE_EXHAUSTED';
+  if (msg.includes('quota')) return 'QUOTA_EXCEEDED';
+  if (msg.includes('rate limit') || msg.includes('rate_limit') || msg.includes('too many requests')) {
+    return 'RATE_LIMITED';
+  }
+  if (status === 503 || msg.includes('503')) return '503';
+  if (status === 504 || msg.includes('504') || msg.includes('timed out') || msg.includes('timeout')) {
+    return '504';
+  }
+  if (providerCode) return providerCode;
+  if (status >= 400 && status < 600) return String(status);
+  return 'UNAVAILABLE';
+}
+
+export function resolveOrderedFailoverCandidates(params: {
+  preferredProvider: AIProviderId;
+  autoFailoverEnabled: boolean;
+  isConfigured: (provider: AIProviderId) => boolean;
+  cooldowns?: Map<AIProviderId, number>;
+  nowMs?: number;
+}): {
+  orderedCandidates: AIProviderId[];
+  skippedDueToCooldown: AIProviderId[];
+} {
+  const now = params.nowMs ?? Date.now();
+  const baseChain = getFailoverProviderChain(
+    params.preferredProvider,
+    params.autoFailoverEnabled
+  ).filter((p) => params.isConfigured(p));
+
+  if (!params.autoFailoverEnabled || !params.cooldowns || baseChain.length <= 1) {
+    return {
+      orderedCandidates: baseChain,
+      skippedDueToCooldown: [],
+    };
+  }
+
+  const ready: AIProviderId[] = [];
+  const cooling: AIProviderId[] = [];
+  for (const p of baseChain) {
+    const until = params.cooldowns.get(p) ?? 0;
+    if (until > now) {
+      cooling.push(p);
+    } else {
+      if (until > 0) params.cooldowns.delete(p);
+      ready.push(p);
+    }
+  }
+
+  return {
+    orderedCandidates: [...ready, ...cooling],
+    skippedDueToCooldown: ready.length > 0 ? cooling : [],
+  };
+}
+
+export async function executeWithProviderFailover<T>(params: {
+  preferredProvider: AIProviderId;
+  autoFailoverEnabled: boolean;
+  isConfigured: (provider: AIProviderId) => boolean;
+  cooldowns?: Map<AIProviderId, number>;
+  cooldownMs?: number;
+  nowMs?: number;
+  hasEmittedChunks?: () => boolean;
+  attemptProvider: (provider: AIProviderId) => Promise<T>;
+  onFailoverSwitch?: (event: {
+    failedProvider: AIProviderId;
+    reasonCode: string;
+    errorMessage: string;
+    fallbackProvider: AIProviderId | null;
+    success: boolean;
+  }) => void;
+}): Promise<{
+  result: T;
+  providerUsed: AIProviderId;
+  failoverOccurred: boolean;
+  originalProvider: AIProviderId;
+  reasonCode?: string;
+}> {
+  const now = params.nowMs ?? Date.now();
+  const cooldownMs = params.cooldownMs ?? 60_000;
+  const normPreferred = normalizeAIProviderId(params.preferredProvider);
+  const { orderedCandidates, skippedDueToCooldown } = resolveOrderedFailoverCandidates({
+    preferredProvider: normPreferred,
+    autoFailoverEnabled: params.autoFailoverEnabled,
+    isConfigured: params.isConfigured,
+    cooldowns: params.cooldowns,
+    nowMs: now,
+  });
+
+  if (orderedCandidates.length === 0) {
+    const err: any = new Error(
+      `${AI_PROVIDER_METADATA[normPreferred].name} is not configured on the server.`
+    );
+    err.status = 400;
+    err.providerNotConfigured = true;
+    throw err;
+  }
+
+  let lastFailedProvider: AIProviderId | null = null;
+  let lastReasonCode: string | undefined = undefined;
+  let lastErrorMsg = '';
+  let lastErr: any = null;
+
+  for (let i = 0; i < orderedCandidates.length; i++) {
+    const provider = orderedCandidates[i];
+    try {
+      const result = await params.attemptProvider(provider);
+      params.cooldowns?.delete(provider);
+      const failoverOccurred = provider !== normPreferred;
+      if (failoverOccurred && lastFailedProvider) {
+        params.onFailoverSwitch?.({
+          failedProvider: lastFailedProvider,
+          reasonCode: lastReasonCode || '429',
+          errorMessage: lastErrorMsg,
+          fallbackProvider: provider,
+          success: true,
+        });
+      } else if (failoverOccurred && skippedDueToCooldown.includes(normPreferred)) {
+        params.onFailoverSwitch?.({
+          failedProvider: normPreferred,
+          reasonCode: 'COOLDOWN_ACTIVE',
+          errorMessage: 'Preferred provider temporarily in rate-limit cooldown.',
+          fallbackProvider: provider,
+          success: true,
+        });
+      }
+      return {
+        result,
+        providerUsed: provider,
+        failoverOccurred,
+        originalProvider: normPreferred,
+        reasonCode: lastReasonCode,
+      };
+    } catch (err: any) {
+      lastErr = err;
+      const emitted = params.hasEmittedChunks ? params.hasEmittedChunks() : false;
+      const eligible = !emitted && isProviderFailoverEligibleError(err);
+
+      if (!eligible || !params.autoFailoverEnabled) {
+        throw err;
+      }
+
+      lastFailedProvider = provider;
+      lastReasonCode = extractFailoverReasonCode(err);
+      lastErrorMsg = sanitizeProviderSecretText(err);
+      params.cooldowns?.set(provider, now + cooldownMs);
+
+      if (i === orderedCandidates.length - 1) {
+        params.onFailoverSwitch?.({
+          failedProvider: provider,
+          reasonCode: lastReasonCode,
+          errorMessage: lastErrorMsg,
+          fallbackProvider: null,
+          success: false,
+        });
+        const allErr: any = new Error(
+          'All configured AI providers are temporarily unavailable due to rate limits or high demand. Please try again shortly.'
+        );
+        allErr.status = 429;
+        allErr.code = 'ALL_PROVIDERS_UNAVAILABLE';
+        allErr.cause = lastErr;
+        throw allErr;
+      }
+    }
+  }
+
+  throw lastErr;
+}
+
+export function formatFailoverLocalTimestamp(isoTimestamp: string, timezone?: string): string {
+  try {
+    const date = new Date(isoTimestamp);
+    if (Number.isNaN(date.getTime())) return isoTimestamp;
+    return new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+      year: 'numeric',
+      month: 'short',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: true,
+      timeZoneName: 'short',
+    }).format(date);
+  } catch {
+    return new Date(isoTimestamp).toLocaleString();
+  }
+}
+
+function escapeCsvCell(value: unknown): string {
+  let str = String(value ?? '');
+  if (/^[=+\-@\t\r]/.test(str)) {
+    str = `'${str}`;
+  }
+  if (/[",\n\r]/.test(str)) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
+
+export function buildFailoverCsv(events: FailoverEventRecord[], timezone?: string): string {
+  const headers = [
+    'Event ID',
+    'UTC Timestamp',
+    'Local Time',
+    'Failed Provider',
+    'Failed Model',
+    'Reason Code',
+    'Fallback Provider',
+    'Fallback Model',
+    'Status',
+    'Endpoint',
+    'Latency (ms)',
+    'Details',
+  ];
+  const rows = events.map((ev) => [
+    ev.id,
+    ev.timestamp,
+    formatFailoverLocalTimestamp(ev.timestamp, timezone),
+    AI_PROVIDER_METADATA[ev.failedProvider]?.name || ev.failedProvider,
+    ev.failedModel || '',
+    ev.reasonCode,
+    ev.fallbackProvider ? (AI_PROVIDER_METADATA[ev.fallbackProvider]?.name || ev.fallbackProvider) : 'None',
+    ev.fallbackModel || '',
+    ev.success ? 'Switched' : 'All Unavailable',
+    ev.endpoint,
+    ev.latencyMs ?? '',
+    sanitizeProviderSecretText(ev.errorMessage || ''),
+  ]);
+  return [
+    headers.map(escapeCsvCell).join(','),
+    ...rows.map((r) => r.map(escapeCsvCell).join(',')),
+  ].join('\n');
+}

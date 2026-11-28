@@ -174,6 +174,38 @@ export const AIProviderSelector: React.FC<AIProviderSelectorProps> = ({
         </div>
       </div>
 
+      {/* Automatic Provider Failover Control */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-900/60">
+        <div className="space-y-0.5 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-extrabold text-slate-900 dark:text-slate-100">
+              Automatic AI Provider Failover
+            </span>
+            <span className="text-[10px] font-mono font-semibold text-purple-600 dark:text-purple-300 px-1.5 py-0.5 rounded bg-purple-500/10 border border-purple-500/25">
+              Gemini → Groq → OpenRouter
+            </span>
+          </div>
+          <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-snug">
+            When enabled, quota or rate-limit errors (HTTP 429 / temporary overload) automatically fall back along the priority chain while keeping your preferred provider unchanged.
+          </p>
+        </div>
+
+        <label className="inline-flex items-center gap-2.5 shrink-0 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            role="switch"
+            aria-label="Automatic AI Provider Failover"
+            checked={settings.autoFailover !== false}
+            onChange={(e) => onUpdateSettings({ autoFailover: e.target.checked })}
+            className="sr-only peer"
+          />
+          <span className="relative w-10 h-5.5 rounded-full bg-slate-300 dark:bg-slate-700 peer-checked:bg-purple-600 transition-colors after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:w-4.5 after:h-4.5 after:rounded-full after:bg-white after:transition-transform peer-checked:after:translate-x-4.5" />
+          <span className="text-xs font-bold text-slate-700 dark:text-slate-200 tabular-nums">
+            {settings.autoFailover !== false ? 'Enabled' : 'Disabled'}
+          </span>
+        </label>
+      </div>
+
       {/* Real Measured Provider Response Time Comparison */}
       <div
         aria-label="Provider Response Time Comparison"

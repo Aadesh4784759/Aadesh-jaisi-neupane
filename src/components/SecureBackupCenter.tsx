@@ -66,8 +66,23 @@ export const SecureBackupCenter: React.FC<SecureBackupCenterProps> = ({ userEmai
       const nowIso = new Date().toISOString();
       setLastBackupDate(nowIso);
       localStorage.setItem('aadesh_last_backup_date', nowIso);
+
+      // 3. Immediately prompt downloading the JSON snapshot
+      const dateStr = nowIso.slice(0, 10);
+      const fileName = `aadesh-ai-backup-${dateStr}.json`;
+      const jsonStr = JSON.stringify(payload, null, 2);
+      const blob = new Blob([jsonStr], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
       setSuccessMessage(
-        `Successfully generated secure backup containing ${payload.metadata.totalDocuments} documents across ${payload.collectionManifest.length} collections.`
+        `Successfully generated full secure backup containing ${payload.metadata.totalDocuments} documents across ${payload.collectionManifest.length} collections. JSON snapshot download initiated.`
       );
     } catch (err: any) {
       setErrorMessage(err?.message || 'Backup generation failed.');
@@ -171,10 +186,10 @@ export const SecureBackupCenter: React.FC<SecureBackupCenterProps> = ({ userEmai
           <div className="space-y-2">
             <h4 className="text-sm font-bold text-white flex items-center gap-2">
               <Download className="w-4 h-4 text-sky-400" />
-              <span>Create Manual Backup</span>
+              <span>Perform Full Backup</span>
             </h4>
             <p className="text-xs text-gray-300 leading-relaxed">
-              Discovers and exports all application-owned collections (`users`, conversations, messages, memories, tasks, analytics, settings, leaderboard). All API keys and credentials are automatically scrubbed.
+              Discovers and exports all application-owned collections (`users`, conversations, messages, memories, tasks, analytics, settings, leaderboard) via verified admin endpoint and downloads the clean JSON snapshot.
             </p>
           </div>
 
@@ -198,7 +213,7 @@ export const SecureBackupCenter: React.FC<SecureBackupCenterProps> = ({ userEmai
                 className="electric-purple-btn px-4 py-2.5 rounded-xl text-xs font-bold text-white flex items-center gap-2 cursor-pointer disabled:opacity-50"
               >
                 {backingUp ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Database className="w-3.5 h-3.5" />}
-                <span>{backingUp ? 'Exporting...' : 'Create Manual Backup'}</span>
+                <span>{backingUp ? 'Exporting Full Backup...' : 'Perform Full Backup'}</span>
               </button>
 
               {lastBackupPayload && (

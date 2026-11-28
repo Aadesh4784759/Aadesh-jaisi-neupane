@@ -3,25 +3,34 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
+  AI_PROVIDER_FAILOVER_PRIORITY,
   AI_PROVIDER_METADATA,
   GEMINI_QUOTA_FALLBACK_MODEL,
   GEMINI_QUOTA_FALLBACK_NOTICE,
   GEMINI_SUPPORTED_MODELS,
   GROQ_CURATED_MODELS,
   OPENROUTER_FALLBACK_MODELS,
+  buildFailoverCsv,
   classifyOpenRouterModel,
   classifyProviderError,
+  executeWithProviderFailover,
+  extractFailoverReasonCode,
+  formatFailoverLocalTimestamp,
+  getFailoverProviderChain,
   getProviderDisplayName,
   getProviderSelectorOptionLabel,
   getProviderStatusLabel,
   getStaticCatalogForProvider,
   isGeminiQuotaOrRateLimitError,
   isNonFallbackClientError,
+  isProviderFailoverEligibleError,
   normalizeAIProviderId,
   normalizeProviderStatusInfo,
+  resolveOrderedFailoverCandidates,
   resolveProviderHealthDisplay,
   resolveSafeModelForProvider,
   sanitizeProviderSecretText,
+  type FailoverEventRecord,
 } from '../utils/aiProviders';
 import {
   DEFAULT_SETTINGS,
@@ -29,6 +38,10 @@ import {
   saveStoredSettings,
 } from '../utils/storage';
 import { buildLiveAIMonitoringSnapshot } from '../components/LiveAIControlCenter';
+import {
+  filterFailoverEvents,
+  sortFailoverEvents,
+} from '../components/FailoverActivityTab';
 import { sanitizeAnalyticsPayload, trackAnalyticsEvent } from '../utils/analytics';
 import {
   POWER_MEMORY_CATEGORIES,
@@ -1098,4 +1111,300 @@ test('P29: Groq and OpenRouter API providers are correctly configured with exact
   assert.match(serverTs, /Authorization:\s*`Bearer \$\{apiKey\}`/);
   assert.match(serverTs, /app\.post\('\/api\/providers\/test'/);
 });
+
+test('P30: Automatic provider failover switches Gemini -> Groq and Gemini -> Groq -> OpenRouter on 429/503 without duplicating calls', async () => {
+  assert.deepEqual(AI_PROVIDER_FAILOVER_PRIORITY, ['gemini', 'groq', 'openrouter']);
+  assert.deepEqual(getFailoverProviderChain('gemini', true), ['gemini', 'groq', 'openrouter']);
+  assert.deepEqual(getFailoverProviderChain('groq', true), ['groq', 'openrouter']);
+  assert.deepEqual(getFailoverProviderChain('gemini', false), ['gemini']);
+
+  // 1. Gemini -> Groq on HTTP 429
+  const calls1: string[] = [];
+  const switches1: any[] = [];
+  const res1 = await executeWithProviderFailover({
+    preferredProvider: 'gemini',
+    autoFailoverEnabled: true,
+    isConfigured: () => true,
+    attemptProvider: async (provider) => {
+      calls1.push(provider);
+      if (provider === 'gemini') {
+        const err: any = new Error('RESOURCE_EXHAUSTED: Quota exceeded (429)');
+        err.status = 429;
+        throw err;
+      }
+      return `ok-${provider}`;
+    },
+    onFailoverSwitch: (ev) => switches1.push(ev),
+  });
+  assert.deepEqual(calls1, ['gemini', 'groq']);
+  assert.equal(res1.result, 'ok-groq');
+  assert.equal(res1.providerUsed, 'groq');
+  assert.equal(res1.failoverOccurred, true);
+  assert.equal(res1.originalProvider, 'gemini');
+  assert.equal(switches1.length, 1);
+  assert.equal(switches1[0].failedProvider, 'gemini');
+  assert.equal(switches1[0].fallbackProvider, 'groq');
+  assert.equal(switches1[0].reasonCode, '429');
+  assert.equal(switches1[0].success, true);
+
+  // 2. Gemini -> Groq -> OpenRouter when both Gemini and Groq hit 429/503
+  const calls2: string[] = [];
+  const cooldowns2 = new Map<'gemini' | 'groq' | 'openrouter', number>();
+  const now = 1_800_000_000_000;
+  const res2 = await executeWithProviderFailover({
+    preferredProvider: 'gemini',
+    autoFailoverEnabled: true,
+    isConfigured: () => true,
+    cooldowns: cooldowns2,
+    cooldownMs: 60_000,
+    nowMs: now,
+    attemptProvider: async (provider) => {
+      calls2.push(provider);
+      if (provider === 'gemini') {
+        const err: any = new Error('Too many requests');
+        err.status = 429;
+        throw err;
+      }
+      if (provider === 'groq') {
+        const err: any = new Error('Service unavailable overloaded');
+        err.status = 503;
+        throw err;
+      }
+      return `ok-${provider}`;
+    },
+  });
+  assert.deepEqual(calls2, ['gemini', 'groq', 'openrouter']);
+  assert.equal(res2.providerUsed, 'openrouter');
+  assert.equal(res2.failoverOccurred, true);
+
+  // 3. Cooldown skips cooling preferred provider temporarily, then retries preferred provider once cooldown expires
+  const candidatesDuringCooldown = resolveOrderedFailoverCandidates({
+    preferredProvider: 'gemini',
+    autoFailoverEnabled: true,
+    isConfigured: () => true,
+    cooldowns: cooldowns2,
+    nowMs: now + 10_000,
+  });
+  assert.equal(candidatesDuringCooldown.orderedCandidates[0], 'openrouter');
+  assert.deepEqual(candidatesDuringCooldown.skippedDueToCooldown, ['gemini', 'groq']);
+
+  const candidatesAfterExpiry = resolveOrderedFailoverCandidates({
+    preferredProvider: 'gemini',
+    autoFailoverEnabled: true,
+    isConfigured: () => true,
+    cooldowns: cooldowns2,
+    nowMs: now + 61_000,
+  });
+  assert.deepEqual(candidatesAfterExpiry.orderedCandidates, ['gemini', 'groq', 'openrouter']);
+  assert.deepEqual(candidatesAfterExpiry.skippedDueToCooldown, []);
+});
+
+test('P31: Failover rejects all-unavailable cleanly, skips unconfigured providers, never triggers on 400/401/403/safety or after streaming begins, and respects disabled autoFailover', async () => {
+  // 1. All configured providers unavailable
+  const callsAllDown: string[] = [];
+  await assert.rejects(
+    () =>
+      executeWithProviderFailover({
+        preferredProvider: 'gemini',
+        autoFailoverEnabled: true,
+        // Groq not configured -> only try Gemini and OpenRouter
+        isConfigured: (p) => p !== 'groq',
+        attemptProvider: async (p) => {
+          callsAllDown.push(p);
+          const err: any = new Error('429 Rate limit reached');
+          err.status = 429;
+          throw err;
+        },
+      }),
+    (err: any) => err?.code === 'ALL_PROVIDERS_UNAVAILABLE' && err?.status === 429
+  );
+  assert.deepEqual(callsAllDown, ['gemini', 'openrouter']);
+
+  // 2. Auth errors (401/403) and normal user errors (400/safety) NEVER trigger failover
+  assert.equal(isProviderFailoverEligibleError({ status: 401, message: 'Invalid API key' }), false);
+  assert.equal(isProviderFailoverEligibleError({ status: 403, message: 'PERMISSION_DENIED' }), false);
+  assert.equal(isProviderFailoverEligibleError({ status: 400, message: 'INVALID_ARGUMENT' }), false);
+  assert.equal(isProviderFailoverEligibleError({ message: 'Response blocked due to safety policy' }), false);
+  assert.equal(isProviderFailoverEligibleError({ status: 429, message: 'RESOURCE_EXHAUSTED' }), true);
+  assert.equal(isProviderFailoverEligibleError({ status: 504, message: 'Request timed out' }), true);
+  assert.equal(extractFailoverReasonCode({ status: 429, message: '429 Too Many Requests' }), '429');
+
+  const authCalls: string[] = [];
+  await assert.rejects(
+    () =>
+      executeWithProviderFailover({
+        preferredProvider: 'gemini',
+        autoFailoverEnabled: true,
+        isConfigured: () => true,
+        attemptProvider: async (p) => {
+          authCalls.push(p);
+          const err: any = new Error('Invalid API key');
+          err.status = 401;
+          throw err;
+        },
+      }),
+    (err: any) => err?.status === 401
+  );
+  assert.deepEqual(authCalls, ['gemini']);
+
+  // 3. Mid-stream guard: once chunks are emitted, never silently restart with another provider
+  const midStreamCalls: string[] = [];
+  let emitted = false;
+  await assert.rejects(
+    () =>
+      executeWithProviderFailover({
+        preferredProvider: 'gemini',
+        autoFailoverEnabled: true,
+        isConfigured: () => true,
+        hasEmittedChunks: () => emitted,
+        attemptProvider: async (p) => {
+          midStreamCalls.push(p);
+          emitted = true;
+          const err: any = new Error('429 stream interrupted');
+          err.status = 429;
+          throw err;
+        },
+      }),
+    (err: any) => err?.status === 429
+  );
+  assert.deepEqual(midStreamCalls, ['gemini']);
+
+  // 4. Manual provider selection / autoFailover disabled tries only the selected provider once
+  const manualCalls: string[] = [];
+  await assert.rejects(
+    () =>
+      executeWithProviderFailover({
+        preferredProvider: 'groq',
+        autoFailoverEnabled: false,
+        isConfigured: () => true,
+        attemptProvider: async (p) => {
+          manualCalls.push(p);
+          const err: any = new Error('429 rate limit');
+          err.status = 429;
+          throw err;
+        },
+      }),
+    (err: any) => err?.status === 429
+  );
+  assert.deepEqual(manualCalls, ['groq']);
+});
+
+test('P32: Settings autoFailover defaults true, Live AI shows runtime failover provider without mutating preferred provider, and ChatView shows failover origin', () => {
+  assert.equal(DEFAULT_SETTINGS.autoFailover, true);
+
+  const snapshot = buildLiveAIMonitoringSnapshot({
+    isNetworkOnline: true,
+    settings: {
+      aiProvider: 'gemini',
+      aiModel: 'gemini-3.1-flash-lite',
+      aiResponseLanguage: 'en',
+      autoFailover: true,
+    },
+    aiHealth: {
+      state: 'connected',
+      checkedAt: Date.now(),
+      lastConnectedAt: Date.now(),
+      latencyMs: 180,
+      model: 'llama-3.3-70b-versatile',
+      activeProvider: 'groq',
+      backendConnected: true,
+      geminiConnected: true,
+      activeProviderConfigured: true,
+      activeProviderVerified: true,
+    },
+    providersStatus: {
+      groq: normalizeProviderStatusInfo('groq', {
+        configured: true,
+        status: 'connected',
+        generationVerified: true,
+        latencyMs: 180,
+        lastTestedAt: '2026-11-28T00:00:00.000Z',
+      }),
+    },
+  });
+  assert.equal(snapshot.activeProvider, 'groq');
+  assert.equal(snapshot.providerName, 'Groq');
+  assert.equal(snapshot.currentModel, 'llama-3.3-70b-versatile');
+
+  const selectorSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/components/AIProviderSelector.tsx'), 'utf8');
+  const chatViewSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/components/ChatView.tsx'), 'utf8');
+  const appSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/App.tsx'), 'utf8');
+  assert.match(selectorSrc, /Automatic AI Provider Failover/);
+  assert.match(selectorSrc, /autoFailover/);
+  assert.match(chatViewSrc, /Failover from/);
+  assert.match(appSrc, /applyProviderFailoverNotice/);
+  assert.match(appSrc, /autoFailover:/);
+});
+
+test('P33: Failover Activity tab filters, sorts, formats user local time, exports sanitized CSV, and integrates Perform Full Backup', () => {
+  const sampleEvents: FailoverEventRecord[] = [
+    {
+      id: 'fo-1',
+      timestamp: '2026-11-28T06:15:30.000Z',
+      failedProvider: 'gemini',
+      failedModel: 'gemini-3.1-flash-lite',
+      reasonCode: '429',
+      errorMessage: 'RESOURCE_EXHAUSTED with key AIzaSySecretKeyTest12345',
+      fallbackProvider: 'groq',
+      fallbackModel: 'llama-3.3-70b-versatile',
+      success: true,
+      endpoint: '/api/chat/stream',
+      latencyMs: 410,
+    },
+    {
+      id: 'fo-2',
+      timestamp: '2026-11-28T08:00:00.000Z',
+      failedProvider: 'groq',
+      failedModel: 'llama-3.3-70b-versatile',
+      reasonCode: '503',
+      errorMessage: '=CMD("calc") Service overloaded',
+      fallbackProvider: 'openrouter',
+      fallbackModel: 'openrouter/free',
+      success: true,
+      endpoint: '/api/chat',
+      latencyMs: 620,
+    },
+  ];
+
+  // Filter checks
+  assert.equal(filterFailoverEvents(sampleEvents, 'all').length, 2);
+  assert.equal(filterFailoverEvents(sampleEvents, 'gemini_failed').length, 1);
+  assert.equal(filterFailoverEvents(sampleEvents, 'groq_failed').length, 1);
+  assert.equal(filterFailoverEvents(sampleEvents, 'openrouter_fallback').length, 1);
+  assert.equal(filterFailoverEvents(sampleEvents, 'groq').length, 2);
+
+  // Sort checks
+  const sortedAsc = sortFailoverEvents(sampleEvents, 'timestamp', 'asc');
+  assert.equal(sortedAsc[0].id, 'fo-1');
+  const sortedDesc = sortFailoverEvents(sampleEvents, 'timestamp', 'desc');
+  assert.equal(sortedDesc[0].id, 'fo-2');
+
+  // Local time formatting in user timezone
+  const nepalTime = formatFailoverLocalTimestamp('2026-11-28T06:15:30.000Z', 'Asia/Kathmandu');
+  assert.match(nepalTime, /12:00:30/);
+  assert.match(nepalTime, /2026/);
+
+  // CSV export includes Local Time, redacts keys, and neutralizes CSV injection
+  const csv = buildFailoverCsv(sortedDesc, 'Asia/Kathmandu');
+  assert.match(csv, /UTC Timestamp,Local Time,Failed Provider/);
+  assert.equal(csv.includes('AIzaSySecretKeyTest12345'), false);
+  assert.match(csv, /\[REDACTED_API_KEY\]/);
+  assert.match(csv, /'=CMD/);
+
+  // UI & backend checks for Failover Activity & Perform Full Backup
+  const adminSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/components/AdminDashboardView.tsx'), 'utf8');
+  const failoverTabSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/components/FailoverActivityTab.tsx'), 'utf8');
+  const backupCenterSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/components/SecureBackupCenter.tsx'), 'utf8');
+  const serverSrc = fs.readFileSync(path.resolve(process.cwd(), 'server.ts'), 'utf8');
+
+  assert.match(adminSrc, /Failover Activity/);
+  assert.match(adminSrc, /\/api\/admin\/failover-events/);
+  assert.match(failoverTabSrc, /Download CSV/);
+  assert.match(failoverTabSrc, /Local Time/);
+  assert.match(failoverTabSrc, /Filter failover logs by provider/);
+  assert.match(backupCenterSrc, /Perform Full Backup/);
+  assert.match(backupCenterSrc, /\/api\/admin\/backup/);
+  assert.match(serverSrc, /app\.get\('\/api\/admin\/failover-events',\s*requireAadeshAdmin/);
+});
+
 

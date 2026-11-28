@@ -1762,6 +1762,44 @@ export default function App() {
     }
   };
 
+  const applyProviderFailoverNotice = (params: {
+    fromProvider: AIProviderId;
+    toProvider: AIProviderId;
+    toModel?: string;
+    reasonCode?: string;
+  }) => {
+    const fromName = AI_PROVIDER_METADATA[params.fromProvider]?.name || params.fromProvider;
+    const toName = AI_PROVIDER_METADATA[params.toProvider]?.name || params.toProvider;
+    const targetModel = params.toModel || AI_PROVIDER_METADATA[params.toProvider]?.defaultModel;
+    setAiHealth((prev) => ({
+      ...prev,
+      activeProvider: params.toProvider,
+      model: targetModel,
+      state: 'connected',
+      activeProviderConfigured: true,
+      activeProviderVerified: true,
+      error: undefined,
+    }));
+
+    const transitionKey = `provider:${params.fromProvider}->${params.toProvider}:${params.reasonCode || '429'}`;
+    if (lastNotifiedFallbackKeyRef.current !== transitionKey) {
+      lastNotifiedFallbackKeyRef.current = transitionKey;
+      setModelFallbackNotice(
+        `${fromName} hit a temporary limit (${params.reasonCode || '429'}). Switched automatically to ${toName} while keeping ${fromName} as your preferred provider.`
+      );
+      void trackAnalyticsEvent(
+        'model_switched',
+        {
+          provider: params.toProvider,
+          from_model: params.fromProvider,
+          to_model: targetModel,
+          reason: params.reasonCode || 'failover',
+        },
+        Boolean(settingsRef.current.analyticsConsent)
+      );
+    }
+  };
+
   const handleAddPowerMemory = (input: {
     category: MemoryCategory;
     content: string;
@@ -2148,6 +2186,9 @@ export default function App() {
       let geotagInsights: string | undefined = undefined;
       let modelUsed: string | undefined = activeRequestedModel;
       let latencyMs = 280;
+      let actualProviderUsed: AIProviderId = activeProviderId;
+      let failoverOccurred = false;
+      let fallbackFromProvider: AIProviderId | undefined = undefined;
 
       const shouldStream =
         isOnline &&
@@ -2243,6 +2284,7 @@ export default function App() {
             memoryContext,
             aiProvider: activeProviderId,
             aiModel: activeRequestedModel,
+            autoFailover: settingsRef.current.autoFailover !== false,
             isVoice: Boolean(params.isVoice),
           }),
         });
@@ -2278,6 +2320,22 @@ export default function App() {
               if (payload.error) {
                 throw new Error(payload.error);
               }
+              if (payload.provider) {
+                actualProviderUsed = normalizeAIProviderId(payload.provider);
+              }
+              if (payload.modelUsed) {
+                modelUsed = payload.modelUsed;
+              }
+              if (payload.failoverOccurred && payload.provider) {
+                failoverOccurred = true;
+                fallbackFromProvider = normalizeAIProviderId(payload.originalProvider || activeProviderId);
+                applyProviderFailoverNotice({
+                  fromProvider: fallbackFromProvider,
+                  toProvider: actualProviderUsed,
+                  toModel: payload.modelUsed,
+                  reasonCode: payload.failoverReasonCode,
+                });
+              }
               if (typeof payload.chunk === 'string' && payload.chunk.length > 0) {
                 reply += payload.chunk;
                 setSessions((prev) =>
@@ -2286,15 +2344,23 @@ export default function App() {
                       ? {
                           ...s,
                           messages: s.messages.map((m) =>
-                            m.id === modelMsgId ? { ...m, content: reply, isStreaming: true } : m
+                            m.id === modelMsgId
+                              ? {
+                                  ...m,
+                                  content: reply,
+                                  isStreaming: true,
+                                  provider: actualProviderUsed,
+                                  modelUsed: modelUsed || activeRequestedModel,
+                                  ...(failoverOccurred
+                                    ? { failoverOccurred: true, fallbackFromProvider }
+                                    : {}),
+                                }
+                              : m
                           ),
                         }
                       : s
                   )
                 );
-              }
-              if (payload.modelUsed) {
-                modelUsed = payload.modelUsed;
               }
               if (payload.fallbackSwitched || payload.fallbackUsed) {
                 applyGeminiFallbackSwitch({
@@ -2320,6 +2386,20 @@ export default function App() {
             try {
               const payload = JSON.parse(jsonStr);
               if (payload.error) throw new Error(payload.error);
+              if (payload.provider) {
+                actualProviderUsed = normalizeAIProviderId(payload.provider);
+              }
+              if (payload.modelUsed) modelUsed = payload.modelUsed;
+              if (payload.failoverOccurred && payload.provider) {
+                failoverOccurred = true;
+                fallbackFromProvider = normalizeAIProviderId(payload.originalProvider || activeProviderId);
+                applyProviderFailoverNotice({
+                  fromProvider: fallbackFromProvider,
+                  toProvider: actualProviderUsed,
+                  toModel: payload.modelUsed,
+                  reasonCode: payload.failoverReasonCode,
+                });
+              }
               if (typeof payload.chunk === 'string' && payload.chunk.length > 0) {
                 reply += payload.chunk;
                 setSessions((prev) =>
@@ -2328,14 +2408,24 @@ export default function App() {
                       ? {
                           ...s,
                           messages: s.messages.map((m) =>
-                            m.id === modelMsgId ? { ...m, content: reply, isStreaming: true } : m
+                            m.id === modelMsgId
+                              ? {
+                                  ...m,
+                                  content: reply,
+                                  isStreaming: true,
+                                  provider: actualProviderUsed,
+                                  modelUsed: modelUsed || activeRequestedModel,
+                                  ...(failoverOccurred
+                                    ? { failoverOccurred: true, fallbackFromProvider }
+                                    : {}),
+                                }
+                              : m
                           ),
                         }
                       : s
                   )
                 );
               }
-              if (payload.modelUsed) modelUsed = payload.modelUsed;
               if (payload.fallbackSwitched || payload.fallbackUsed) {
                 applyGeminiFallbackSwitch({
                   fromModel: payload.fallbackFromModel || activeRequestedModel,
@@ -2367,7 +2457,7 @@ export default function App() {
                 text: reply,
                 sourceLang: detectedLanguage || 'auto',
                 targetLang: autoTransTarget,
-                aiProvider: activeProviderId,
+                aiProvider: actualProviderUsed,
                 aiModel: modelUsed || activeRequestedModel,
               }),
             });
@@ -2386,8 +2476,8 @@ export default function App() {
           ...prev,
           state: 'connected',
           backendConnected: true,
-          geminiConnected: activeProviderId === 'gemini' ? true : prev.geminiConnected,
-          activeProvider: activeProviderId,
+          geminiConnected: actualProviderUsed === 'gemini' ? true : prev.geminiConnected,
+          activeProvider: actualProviderUsed,
           activeProviderConfigured: true,
           model: modelUsed || prev.model,
           checkedAt: Date.now(),
@@ -2433,6 +2523,7 @@ export default function App() {
             location: params.location,
             aiProvider: activeProviderId,
             aiModel: activeRequestedModel,
+            autoFailover: settingsRef.current.autoFailover !== false,
             mode: 'chat',
             isVoice: Boolean(params.isVoice),
           }),
@@ -2455,6 +2546,20 @@ export default function App() {
         geotagInsights = data.geotagInsights;
         modelUsed = data.modelUsed;
         latencyMs = data.latencyMs || Date.now() - startTime;
+        if (data.provider) {
+          actualProviderUsed = normalizeAIProviderId(data.provider);
+        }
+
+        if (data.failoverOccurred && data.provider) {
+          failoverOccurred = true;
+          fallbackFromProvider = normalizeAIProviderId(data.originalProvider || activeProviderId);
+          applyProviderFailoverNotice({
+            fromProvider: fallbackFromProvider,
+            toProvider: actualProviderUsed,
+            toModel: data.modelUsed,
+            reasonCode: data.failoverReasonCode,
+          });
+        }
 
         if (data.fallbackUsed) {
           applyGeminiFallbackSwitch({
@@ -2469,8 +2574,8 @@ export default function App() {
             ...prev,
             state: 'connected',
             backendConnected: true,
-            geminiConnected: activeProviderId === 'gemini' ? true : prev.geminiConnected,
-            activeProvider: activeProviderId,
+            geminiConnected: actualProviderUsed === 'gemini' ? true : prev.geminiConnected,
+            activeProvider: actualProviderUsed,
             activeProviderConfigured: true,
             model: modelUsed || prev.model,
             checkedAt: Date.now(),
@@ -2483,9 +2588,9 @@ export default function App() {
             ...prev,
             state: 'error',
             backendConnected: true,
-            activeProvider: activeProviderId,
+            activeProvider: actualProviderUsed,
             checkedAt: Date.now(),
-            error: `${AI_PROVIDER_METADATA[activeProviderId].name} returned a non-live fallback response.`,
+            error: `${AI_PROVIDER_METADATA[actualProviderUsed].name} returned a non-live fallback response.`,
           }));
         }
       }
@@ -2505,8 +2610,9 @@ export default function App() {
         sentiment,
         suggestedQuestions,
         geotagInsights,
-        provider: activeProviderId,
+        provider: actualProviderUsed,
         modelUsed,
+        ...(failoverOccurred ? { failoverOccurred: true, fallbackFromProvider } : {}),
         timestamp: Date.now(),
         isOffline: !isOnline,
         isStreaming: false,
@@ -2521,7 +2627,7 @@ export default function App() {
 
       if (isOnline && !cachedResponse && cachePromptKey && reply.trim()) {
         cacheAIResponse(
-          String(activeProviderId),
+          String(actualProviderUsed),
           String(modelUsed || activeRequestedModel || DEFAULT_SETTINGS.aiModel),
           String(cachePromptKey || ''),
           String(params.targetLanguage || 'en'),
@@ -2567,8 +2673,8 @@ export default function App() {
             location: params.location,
             hasImage: Boolean(params.imageData),
             preferredSuggestionPatterns: summarizeTopSuggestionPatterns(suggestionAnalyticsRef.current, 5),
-            aiProvider: activeProviderId,
-            aiModel: activeRequestedModel,
+            aiProvider: actualProviderUsed,
+            aiModel: modelUsed || activeRequestedModel,
           }),
         })
           .then((suggRes) => (suggRes.ok ? suggRes.json() : null))

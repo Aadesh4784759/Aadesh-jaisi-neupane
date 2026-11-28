@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   BarChart3,
@@ -23,12 +23,18 @@ import {
   RefreshCw,
   AlertCircle,
   Lightbulb,
+  TrendingUp,
 } from 'lucide-react';
 import { AppSettings, ChatSession, EngagementMetrics, UserProfile } from '../types';
 import { SUPPORTED_LANGUAGES } from '../data/languages';
-import { getAuthHeaders } from '../utils/firebase';
+import {
+  fetchUserActivityAnalyticsEvents,
+  getAuthHeaders,
+  UserActivityAnalyticsRecord,
+} from '../utils/firebase';
 import { buildApiUrl } from '../utils/apiConfig';
 import { MarkdownRenderer } from './MarkdownRenderer';
+import { ActivityTrendsTab } from './ActivityTrendsTab';
 
 interface AnalyticsDashboardProps {
   metrics: EngagementMetrics;
@@ -57,6 +63,9 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
   settings,
   isOnline = true,
 }) => {
+  const [activeAnalyticsTab, setActiveAnalyticsTab] = useState<'overview' | 'trends'>('overview');
+  const [analyticsEvents, setAnalyticsEvents] = useState<UserActivityAnalyticsRecord[]>([]);
+  const [isLoadingTrendsEvents, setIsLoadingTrendsEvents] = useState(false);
   const [analysisMode, setAnalysisMode] = useState<AnalysisMode>('deep');
   const [analysisInput, setAnalysisInput] = useState('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -65,6 +74,28 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
   const [analysisResult, setAnalysisResult] = useState<DeepAnalysisResult | null>(null);
   const [showExpandedDetails, setShowExpandedDetails] = useState(false);
   const [copiedResult, setCopiedResult] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    if (!isOnline || !user?.isLoggedIn || !user.id || user.id === 'unauthenticated') {
+      setAnalyticsEvents([]);
+      return;
+    }
+    setIsLoadingTrendsEvents(true);
+    fetchUserActivityAnalyticsEvents(user.id)
+      .then((records) => {
+        if (active) setAnalyticsEvents(records);
+      })
+      .catch(() => {
+        if (active) setAnalyticsEvents([]);
+      })
+      .finally(() => {
+        if (active) setIsLoadingTrendsEvents(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [isOnline, user?.id, user?.isLoggedIn]);
 
   const conversationInsights = useMemo(() => {
     let totalMessages = 0;
@@ -345,6 +376,52 @@ ${trimmed}`;
         </button>
       </div>
 
+      {/* Analytics View Tabs */}
+      <div
+        role="tablist"
+        aria-label="Analytics Dashboard Views"
+        className="inline-flex flex-wrap items-center gap-1.5 p-1.5 rounded-2xl v2-neu-card border border-white/10"
+      >
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeAnalyticsTab === 'overview'}
+          onClick={() => setActiveAnalyticsTab('overview')}
+          className={`px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition-all cursor-pointer whitespace-nowrap shrink-0 ${
+            activeAnalyticsTab === 'overview'
+              ? 'electric-purple-btn text-white'
+              : 'text-purple-200/80 hover:text-white'
+          }`}
+        >
+          <BarChart3 className="w-3.5 h-3.5" />
+          <span>Overview &amp; Deep Analysis</span>
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeAnalyticsTab === 'trends'}
+          onClick={() => setActiveAnalyticsTab('trends')}
+          className={`px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition-all cursor-pointer whitespace-nowrap shrink-0 ${
+            activeAnalyticsTab === 'trends'
+              ? 'electric-purple-btn text-white'
+              : 'text-purple-200/80 hover:text-white'
+          }`}
+        >
+          <TrendingUp className="w-3.5 h-3.5" />
+          <span>Activity Trends</span>
+        </button>
+      </div>
+
+      {activeAnalyticsTab === 'trends' ? (
+        <ActivityTrendsTab
+          sessions={sessions}
+          metrics={metrics}
+          user={user}
+          analyticsEvents={analyticsEvents}
+          isLoadingEvents={isLoadingTrendsEvents}
+        />
+      ) : (
+        <>
       {/* Interactive Deep Analysis & Step-by-Step Problem Solver */}
       <section className="v2-neu-card rounded-3xl p-5 sm:p-6 border border-sky-400/30 space-y-4">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-white/10 pb-3.5">
@@ -792,6 +869,8 @@ ${trimmed}`;
           </div>
         </div>
       </div>
+        </>
+      )}
     </div>
   );
 };

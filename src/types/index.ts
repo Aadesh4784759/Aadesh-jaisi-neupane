@@ -40,6 +40,8 @@ export interface ChatMessage {
   sources?: GroundingSource[];
   modelUsed?: string;
   provider?: AIProviderId;
+  failoverOccurred?: boolean;
+  fallbackFromProvider?: AIProviderId;
   latencyMs?: number;
 }
 
@@ -292,6 +294,7 @@ export interface AppSettings {
   aiProvider?: AIProviderId;
   aiModel?: string;
   openRouterModel?: string;
+  autoFailover?: boolean;
   fontSize: 'normal' | 'large' | 'xlarge';
   handsFreeMode: boolean;
   offlineModeForce: boolean;

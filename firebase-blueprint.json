@@ -359,6 +359,16 @@
           "type": "boolean",
           "description": "Whether message originated via voice"
         },
+        "provider": {
+          "type": "string",
+          "description": "AI provider that generated this response",
+          "enum": ["gemini", "groq", "openrouter"]
+        },
+        "modelUsed": {
+          "type": "string",
+          "description": "Exact AI model identifier used to generate this message",
+          "maxLength": 120
+        },
         "timestamp": {
           "type": "string",
           "description": "ISO timestamp",
@@ -657,6 +667,27 @@
         "email": { "type": "string", "maxLength": 160 }
       },
       "required": ["uid"]
+    },
+    "OwnerAuditLog": {
+      "title": "OwnerAuditLog",
+      "description": "Immutable append-only audit log for owner actions (profile edits, streak adjustments, status changes, conversation inspections)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "timestamp": { "type": "string", "maxLength": 50 },
+        "actorUid": { "type": "string", "maxLength": 128 },
+        "actorEmail": { "type": "string", "maxLength": 160 },
+        "targetUid": { "type": "string", "maxLength": 128 },
+        "targetEmail": { "type": "string", "maxLength": 160 },
+        "action": {
+          "type": "string",
+          "enum": ["profile_update", "streak_update", "status_change", "conversation_inspect", "country_timezone_update"]
+        },
+        "reason": { "type": "string", "maxLength": 500 },
+        "beforeSnapshot": { "type": "object" },
+        "afterSnapshot": { "type": "object" }
+      },
+      "required": ["id", "timestamp", "actorUid", "actorEmail", "targetUid", "action", "reason"]
     }
   },
   "firestore": {
@@ -719,6 +750,10 @@
     "/streak_leaderboard/{userId}": {
       "schema": "StreakLeaderboardEntry",
       "description": "Non-PII global streak leaderboard readable by authenticated users for top-10 streak rankings and writable only by the owning user"
+    },
+    "/owner_audit_logs/{logId}": {
+      "schema": "OwnerAuditLog",
+      "description": "Append-only owner control panel audit logs strictly readable and writable only by verified platform owner aadeshjaisi6@gmail.com"
     }
   }
 }

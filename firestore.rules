@@ -207,7 +207,7 @@ service cloud.firestore {
           'senderName', 'senderAvatarUrl',
           'translation', 'translationLanguage', 'feedback',
           'reactions', 'userReactions', 'isPinned', 'pinnedAt',
-          'attachmentName', 'imageUrl', 'isVoice', 'timestamp', 'editedAt'
+          'attachmentName', 'imageUrl', 'isVoice', 'provider', 'modelUsed', 'timestamp', 'editedAt'
         ])
         && data.id == messageId
         && data.userId == userId
@@ -239,6 +239,8 @@ service cloud.firestore {
         && (!('attachmentName' in data) || (data.attachmentName is string && data.attachmentName.size() <= 256))
         && (!('imageUrl' in data) || (data.imageUrl is string && data.imageUrl.size() <= 1000))
         && (!('isVoice' in data) || data.isVoice is bool)
+        && (!('provider' in data) || data.provider in ['gemini', 'groq', 'openrouter'])
+        && (!('modelUsed' in data) || (data.modelUsed is string && data.modelUsed.size() <= 120))
         && (!('timestamp' in data) || (data.timestamp is string && data.timestamp.size() <= 50))
         && (!('editedAt' in data) || (data.editedAt is string && data.editedAt.size() <= 50));
     }
@@ -433,6 +435,26 @@ service cloud.firestore {
         && (!('lastActiveDate' in data) || (data.lastActiveDate is string && data.lastActiveDate.size() <= 20))
         && (!('level' in data) || (data.level is number && data.level >= 1 && data.level <= 100))
         && data.updatedAt is string && data.updatedAt.size() <= 50;
+    }
+
+    function isValidOwnerAuditLogDoc(data, logId) {
+      return data.keys().hasAll([
+          'id', 'timestamp', 'actorUid', 'actorEmail', 'targetUid', 'action', 'reason'
+        ])
+        && data.keys().hasOnly([
+          'id', 'timestamp', 'actorUid', 'actorEmail', 'targetUid', 'targetEmail',
+          'action', 'reason', 'beforeSnapshot', 'afterSnapshot'
+        ])
+        && data.id == logId
+        && data.timestamp is string && data.timestamp.size() <= 50
+        && data.actorUid is string && data.actorUid.size() <= 128
+        && data.actorEmail is string && data.actorEmail.lower() == 'aadeshjaisi6@gmail.com'
+        && data.targetUid is string && data.targetUid.size() <= 128
+        && (!('targetEmail' in data) || (data.targetEmail is string && data.targetEmail.size() <= 160))
+        && data.action in ['profile_update', 'streak_update', 'status_change', 'conversation_inspect', 'country_timezone_update']
+        && data.reason is string && data.reason.size() >= 3 && data.reason.size() <= 500
+        && (!('beforeSnapshot' in data) || data.beforeSnapshot is map)
+        && (!('afterSnapshot' in data) || data.afterSnapshot is map);
     }
 
     // User Profiles & Private Account Data
@@ -705,6 +727,15 @@ service cloud.firestore {
     match /admins/{adminUid} {
       allow get: if isSignedIn() && request.auth.uid == adminUid;
       allow write: if false;
+    }
+
+    // Owner Control Panel Audit Logs (append-only, owner-only read/create, immutable)
+    match /owner_audit_logs/{logId} {
+      allow get, list: if isAdmin();
+      allow create: if isValidId(logId)
+        && isAdmin()
+        && isValidOwnerAuditLogDoc(incoming(), logId);
+      allow update, delete: if false;
     }
   }
 }

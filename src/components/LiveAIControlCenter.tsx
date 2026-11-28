@@ -112,18 +112,24 @@ export function buildLiveAIMonitoringSnapshot(params: {
   } = params;
 
   const activeProvider: AIProviderId = normalizeAIProviderId(
-    settings?.aiProvider || aiHealth?.activeProvider
+    aiHealth?.activeProvider || settings?.aiProvider
   );
   const providerMeta = AI_PROVIDER_METADATA[activeProvider];
   const mergedProviders = providersStatus || aiHealth?.providers || {};
   const activeStatus = normalizeProviderStatusInfo(activeProvider, mergedProviders[activeProvider]);
+  const isRuntimeFailover = Boolean(
+    aiHealth?.activeProvider &&
+      settings?.aiProvider &&
+      normalizeAIProviderId(aiHealth.activeProvider) !== normalizeAIProviderId(settings.aiProvider)
+  );
 
-  const currentModel =
-    (activeProvider === 'openrouter' ? settings?.openRouterModel : undefined) ||
-    settings?.aiModel ||
-    activeStatus.activeModel ||
-    aiHealth?.model ||
-    providerMeta.defaultModel;
+  const currentModel = isRuntimeFailover
+    ? aiHealth?.model || activeStatus.activeModel || providerMeta.defaultModel
+    : (activeProvider === 'openrouter' ? settings?.openRouterModel : undefined) ||
+      settings?.aiModel ||
+      activeStatus.activeModel ||
+      aiHealth?.model ||
+      providerMeta.defaultModel;
 
   const isTestingActive = testingProviderId === activeProvider;
   const isChecking = Boolean(isRefreshing || isTestingActive || aiHealth?.state === 'connecting');

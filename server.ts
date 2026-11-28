@@ -7,6 +7,7 @@ import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import crypto from 'crypto';
 import mammoth from 'mammoth';
 import {
+  AI_PROVIDER_FAILOVER_PRIORITY,
   AI_PROVIDER_METADATA,
   AIModelOption,
   AIProviderId,
@@ -14,20 +15,36 @@ import {
   classifyOpenRouterModel,
   classifyProviderError,
   ConnectionHistoryEntry,
+  extractFailoverReasonCode,
+  FailoverEventRecord,
   GEMINI_QUOTA_FALLBACK_MODEL,
   GEMINI_SUPPORTED_MODELS,
+  getFailoverProviderChain,
   getStaticCatalogForProvider,
   GROQ_CURATED_MODELS,
   isGeminiQuotaOrRateLimitError,
   isNonFallbackClientError,
+  isProviderFailoverEligibleError,
   normalizeAIProviderId,
   OPENROUTER_FALLBACK_MODELS,
   ProviderConnectionState,
   ProviderErrorLogEntry,
+  resolveOrderedFailoverCandidates,
   resolveSafeModelForProvider,
   sanitizeProviderSecretText,
 } from './src/utils/aiProviders';
 import { validateRestoreBackupPayload } from './src/utils/backupValidation';
+import {
+  applyOwnerProfileUpdate,
+  applyOwnerStreakUpdate,
+  classifyFirebaseAdminError,
+  getAdminConfigSummary,
+  getMergedOwnerUserDetail,
+  inspectUserConversationMessagesAudit,
+  listMergedOwnerUsers,
+  listOwnerAuditLogs,
+  listOwnerUserConversations,
+} from './server/firebaseAdmin';
 
 dotenv.config();
 
@@ -222,7 +239,8 @@ async function verifyOwnerFromRequest(req: Request): Promise<{
     };
   }
 
-  if (!result.user.isOwnerAdmin) {
+  const emailLower = (result.user.email || '').trim().toLowerCase();
+  if (!result.user.isOwnerAdmin || emailLower !== 'aadeshjaisi6@gmail.com' || !result.user.emailVerified) {
     return {
       ok: false,
       status: 403,
@@ -699,6 +717,31 @@ const getGeminiClient = () => {
 
 const getGroqApiKey = () => readCleanServerEnvKey('GROQ_API_KEY');
 const getOpenRouterApiKey = () => readCleanServerEnvKey('OPENROUTER_API_KEY');
+
+function isProviderConfiguredOnServer(provider: AIProviderId): boolean {
+  if (provider === 'gemini') return Boolean(getGeminiClient());
+  if (provider === 'groq') return Boolean(getGroqApiKey());
+  if (provider === 'openrouter') return Boolean(getOpenRouterApiKey());
+  return false;
+}
+
+const PROVIDER_FAILOVER_COOLDOWN_MS = 60 * 1000;
+const providerFailoverCooldowns = new Map<AIProviderId, number>();
+const MAX_FAILOVER_ACTIVITY_LOG = 500;
+const failoverActivityLog: FailoverEventRecord[] = [];
+
+function recordFailoverEvent(entry: Omit<FailoverEventRecord, 'id' | 'timestamp'>): void {
+  const record: FailoverEventRecord = {
+    id: `fo_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    timestamp: new Date().toISOString(),
+    ...entry,
+    errorMessage: sanitizeProviderSecretText(entry.errorMessage).slice(0, 320),
+  };
+  failoverActivityLog.unshift(record);
+  if (failoverActivityLog.length > MAX_FAILOVER_ACTIVITY_LOG) {
+    failoverActivityLog.length = MAX_FAILOVER_ACTIVITY_LOG;
+  }
+}
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number = 15000): Promise<T> {
   return Promise.race([
@@ -2497,35 +2540,68 @@ Tone requirement: ${personaInstruction}${memoryBlock}`;
       promptText += `\n[Geotag Location Context: ${location.name}]`;
     }
 
-    // ---- Groq & OpenRouter official API dispatch (never falls back across providers) ----
-    if (requestedProvider === 'groq' || requestedProvider === 'openrouter') {
-      const apiKey = requestedProvider === 'groq' ? getGroqApiKey() : getOpenRouterApiKey();
+    // ---- Provider execution loop with automatic failover (Gemini -> Groq -> OpenRouter) ----
+    const isAutoFailover = req.body?.autoFailover !== false;
+    const { orderedCandidates, skippedDueToCooldown } = resolveOrderedFailoverCandidates({
+      preferredProvider: requestedProvider,
+      autoFailoverEnabled: isAutoFailover,
+      isConfigured: isProviderConfiguredOnServer,
+      cooldowns: providerFailoverCooldowns,
+    });
+
+    if (orderedCandidates.length === 0) {
       const meta = AI_PROVIDER_METADATA[requestedProvider];
-      if (!apiKey) {
-        res.status(400).json({
-          error: `${meta.name} is not configured on the server. Set ${meta.envVarName} in environment variables.`,
-          provider: requestedProvider,
-          providerNotConfigured: true,
-          isLiveAI: false,
-          retryable: false,
-        });
-        return;
-      }
-
-      const catalogResult =
-        requestedProvider === 'groq'
-          ? await fetchGroqModelsCached(apiKey)
-          : await fetchOpenRouterCatalogCached();
-      const resolvedModel = resolveSafeModelForProvider(requestedProvider, catalogResult.models, requestedModel, {
-        allowPaidExplicit: true,
-        requireInCatalog: catalogResult.source === 'live',
+      res.status(400).json({
+        error: `${meta.name} is not configured on the server. Set ${meta.envVarName} in environment variables.`,
+        provider: requestedProvider,
+        providerNotConfigured: true,
+        isLiveAI: false,
+        retryable: false,
       });
-      const supportsVision = Boolean(
-        resolvedModel.modelInfo?.supportsVision ||
-          /vision|vl|scout|maverick|gemma-3|gemma-4|mistral-small-3|gemini|gpt-4o|claude-3|claude-4|openrouter\/free/i.test(resolvedModel.modelId)
-      );
+      return;
+    }
 
-      const jsonSystemInstruction = `${systemInstruction}
+    let lastFailoverError: any = null;
+    let firstFailedInfo: {
+      failedProvider: AIProviderId;
+      failedModel?: string;
+      reasonCode: string;
+      errorMessage: string;
+    } | null = skippedDueToCooldown.includes(requestedProvider)
+      ? {
+          failedProvider: requestedProvider,
+          failedModel: requestedModel || AI_PROVIDER_METADATA[requestedProvider].defaultModel,
+          reasonCode: 'COOLDOWN_ACTIVE',
+          errorMessage: 'Preferred provider temporarily in cooldown after rate limit/overload.',
+        }
+      : null;
+
+    for (let pIdx = 0; pIdx < orderedCandidates.length; pIdx++) {
+      const activeProviderToTry = orderedCandidates[pIdx];
+
+      // 1. Groq or OpenRouter execution
+      if (activeProviderToTry === 'groq' || activeProviderToTry === 'openrouter') {
+        const apiKey = activeProviderToTry === 'groq' ? getGroqApiKey() : getOpenRouterApiKey();
+        if (!apiKey) continue;
+        let attemptedModel = AI_PROVIDER_METADATA[activeProviderToTry].defaultModel;
+
+        try {
+          const catalogResult =
+            activeProviderToTry === 'groq'
+              ? await fetchGroqModelsCached(apiKey)
+              : await fetchOpenRouterCatalogCached();
+          const targetModelParam = activeProviderToTry === requestedProvider ? requestedModel : undefined;
+          const resolvedModel = resolveSafeModelForProvider(activeProviderToTry, catalogResult.models, targetModelParam, {
+            allowPaidExplicit: true,
+            requireInCatalog: catalogResult.source === 'live',
+          });
+          attemptedModel = resolvedModel.modelId;
+          const supportsVision = Boolean(
+            resolvedModel.modelInfo?.supportsVision ||
+              /vision|vl|scout|maverick|gemma-3|gemma-4|mistral-small-3|gemini|gpt-4o|claude-3|claude-4|openrouter\/free/i.test(resolvedModel.modelId)
+          );
+
+          const jsonSystemInstruction = `${systemInstruction}
 
 Return valid JSON matching this schema:
 {
@@ -2536,36 +2612,302 @@ Return valid JSON matching this schema:
   "suggestedQuestions": ["short follow-up 1", "short follow-up 2", "short follow-up 3"]
 }`;
 
-      const oaiMessages = buildOpenAICompatibleMessages({
-        provider: requestedProvider,
-        modelId: resolvedModel.modelId,
-        supportsVision,
-        systemInstruction: jsonSystemInstruction,
-        messages,
-        currentTextPrompt: promptText,
-        imageData,
-        imageMimeType,
-      });
+          const oaiMessages = buildOpenAICompatibleMessages({
+            provider: activeProviderToTry,
+            modelId: resolvedModel.modelId,
+            supportsVision,
+            systemInstruction: jsonSystemInstruction,
+            messages,
+            currentTextPrompt: promptText,
+            imageData,
+            imageMimeType,
+          });
 
-      const { text: rawText, modelUsed } = await callOpenAICompatibleCompletion({
-        provider: requestedProvider,
-        apiKey,
-        model: resolvedModel.modelId,
-        messages: oaiMessages,
-        jsonMode: true,
-        timeoutMs: 25000,
-        allowFreeRouterFallback: requestedProvider === 'openrouter' && resolvedModel.isFree,
-      });
+          const { text: rawText, modelUsed } = await callOpenAICompatibleCompletion({
+            provider: activeProviderToTry,
+            apiKey,
+            model: resolvedModel.modelId,
+            messages: oaiMessages,
+            jsonMode: true,
+            timeoutMs: 25000,
+            allowFreeRouterFallback: activeProviderToTry === 'openrouter' && resolvedModel.isFree,
+          });
 
-      const latencyMs = Date.now() - startTime;
-      recordProviderGenerationResult(requestedProvider, {
-        verified: true,
-        model: modelUsed,
-        latencyMs,
-        source: 'chat',
-      });
+          const latencyMs = Date.now() - startTime;
+          recordProviderGenerationResult(activeProviderToTry, {
+            verified: true,
+            model: modelUsed,
+            latencyMs,
+            source: 'chat',
+          });
+          providerFailoverCooldowns.delete(activeProviderToTry);
+
+          const isFailover = activeProviderToTry !== requestedProvider;
+          if (isFailover && firstFailedInfo) {
+            recordFailoverEvent({
+              failedProvider: firstFailedInfo.failedProvider,
+              failedModel: firstFailedInfo.failedModel,
+              reasonCode: firstFailedInfo.reasonCode,
+              errorMessage: firstFailedInfo.errorMessage,
+              fallbackProvider: activeProviderToTry,
+              fallbackModel: modelUsed,
+              success: true,
+              endpoint: '/api/chat',
+              latencyMs,
+            });
+          }
+
+          let parsed: Record<string, any> = {};
+          try {
+            parsed = extractJsonText(rawText);
+          } catch {}
+
+          res.json({
+            reply: parsed.reply || rawText,
+            translation: shouldGenerateTranslation ? (parsed.translation || '') : '',
+            detectedLanguage: parsed.detectedLanguage || effectiveResponseLang,
+            sentiment: parsed.sentiment || 'positive',
+            suggestedQuestions:
+              Array.isArray(parsed.suggestedQuestions) && parsed.suggestedQuestions.length > 0
+                ? parsed.suggestedQuestions
+                : ['Explain in more detail', 'Give a practical example', 'Summarize the key points'],
+            geotagInsights: parsed.geotagInsights || undefined,
+            latencyMs,
+            isLiveAI: true,
+            provider: activeProviderToTry,
+            modelUsed,
+            ...(isFailover
+              ? {
+                  failoverOccurred: true,
+                  originalProvider: requestedProvider,
+                  failoverReasonCode: firstFailedInfo?.reasonCode || '429',
+                }
+              : {}),
+          });
+          return;
+        } catch (groqOrOrErr: any) {
+          lastFailoverError = groqOrOrErr;
+          const isEligible = isProviderFailoverEligibleError(groqOrOrErr);
+          const reasonCode = extractFailoverReasonCode(groqOrOrErr);
+          const safeErrText = sanitizeErrorMessage(groqOrOrErr);
+          recordProviderGenerationResult(activeProviderToTry, {
+            verified: false,
+            model: attemptedModel,
+            latencyMs: Date.now() - startTime,
+            error: safeErrText,
+            code: reasonCode,
+            source: 'chat',
+          });
+
+          if (!isEligible || !isAutoFailover) {
+            throw groqOrOrErr;
+          }
+
+          providerFailoverCooldowns.set(activeProviderToTry, Date.now() + PROVIDER_FAILOVER_COOLDOWN_MS);
+          if (!firstFailedInfo) {
+            firstFailedInfo = {
+              failedProvider: activeProviderToTry,
+              failedModel: attemptedModel,
+              reasonCode,
+              errorMessage: safeErrText,
+            };
+          }
+
+          if (pIdx === orderedCandidates.length - 1) {
+            recordFailoverEvent({
+              failedProvider: activeProviderToTry,
+              failedModel: attemptedModel,
+              reasonCode,
+              errorMessage: safeErrText,
+              fallbackProvider: null,
+              success: false,
+              endpoint: '/api/chat',
+              latencyMs: Date.now() - startTime,
+            });
+            break;
+          }
+          console.warn(`[Auto-Failover] ${activeProviderToTry} (${reasonCode}), attempting next fallback:`, safeErrText);
+          continue;
+        }
+      }
+
+      // 2. Google Gemini execution
+      const ai = getGeminiClient();
+      if (!ai) continue;
+
       try {
-        const parsed = extractJsonText(rawText);
+        const contents: Array<{ role: 'user' | 'model'; parts: Array<Record<string, any>> }> = [];
+        if (Array.isArray(messages)) {
+          for (const msg of messages.slice(-6)) {
+            if (!msg?.content || msg.isError) continue;
+            contents.push({
+              role: msg.role === 'user' ? 'user' : 'model',
+              parts: [{ text: String(msg.content) }],
+            });
+          }
+        }
+
+        const currentParts: Array<Record<string, any>> = [];
+        if (imageData && typeof imageData === 'string') {
+          const mimeMatch = imageData.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,/);
+          const detectedMime = mimeMatch ? mimeMatch[1] : imageMimeType;
+          const cleanBase64 = imageData.replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, '');
+          currentParts.push({
+            inlineData: {
+              mimeType: detectedMime,
+              data: cleanBase64,
+            },
+          });
+        }
+        currentParts.push({ text: promptText });
+
+        const lastContent = contents[contents.length - 1];
+        if (
+          lastContent &&
+          lastContent.role === 'user' &&
+          lastContent.parts?.[0]?.text === currentMessage
+        ) {
+          contents[contents.length - 1] = { role: 'user', parts: currentParts };
+        } else {
+          contents.push({ role: 'user', parts: currentParts });
+        }
+
+        const chatThinkingLevel =
+          isVoiceRequest || responseMode === 'fast'
+            ? ThinkingLevel.MINIMAL
+            : responseMode === 'detailed'
+            ? ThinkingLevel.MEDIUM
+            : ThinkingLevel.MINIMAL;
+
+        const targetGeminiModel =
+          activeProviderToTry === requestedProvider && requestedModel
+            ? requestedModel
+            : process.env.GEMINI_MODEL || GEMINI_RELIABLE_OVERLOAD_MODEL;
+        const configuredModel = sanitizeModelName(targetGeminiModel);
+        const chatController = new AbortController();
+        const chatTimer = setTimeout(() => chatController.abort(), 20000);
+        req.on('close', () => chatController.abort());
+
+        const schemaProperties: Record<string, any> = {
+          reply: {
+            type: Type.STRING,
+            description: 'Accurate, helpful response in clean markdown.',
+          },
+          detectedLanguage: {
+            type: Type.STRING,
+            description: 'ISO 639-1 code of the user input (e.g. en, ne, hi, es).',
+          },
+          sentiment: {
+            type: Type.STRING,
+            description: 'One of: positive, curious, inquiry, urgent, neutral.',
+          },
+          suggestedQuestions: {
+            type: Type.ARRAY,
+            items: { type: Type.STRING },
+            description: '2 or 3 short relevant follow-up questions.',
+          },
+          geotagInsights: {
+            type: Type.STRING,
+            description: 'Optional brief note if location or photo context is relevant.',
+          },
+        };
+        const requiredFields = ['reply', 'detectedLanguage', 'sentiment', 'suggestedQuestions'];
+        if (shouldGenerateTranslation) {
+          schemaProperties.translation = {
+            type: Type.STRING,
+            description: `Natural translation of reply into ${translationLangName}.`,
+          };
+          requiredFields.push('translation');
+        }
+
+        const executeChatWithModel = (targetModel: string) =>
+          ai.models.generateContent({
+            model: targetModel,
+            contents,
+            config: {
+              systemInstruction,
+              ...getGeminiThinkingConfig(targetModel, chatThinkingLevel),
+              abortSignal: chatController.signal,
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: schemaProperties,
+                required: requiredFields,
+              },
+            },
+          });
+
+        let modelUsed = configuredModel;
+        let fallbackUsed = false;
+        let fallbackFromModel: string | undefined = undefined;
+        let fallbackReason: 'quota' | 'overload' | undefined = undefined;
+        let response: Awaited<ReturnType<typeof ai.models.generateContent>>;
+        try {
+          try {
+            response = await executeChatWithModel(configuredModel);
+          } catch (primaryErr: any) {
+            if (isNonFallbackClientError(primaryErr)) {
+              throw primaryErr;
+            }
+            const isQuotaErr = isGeminiQuotaOrRateLimitError(primaryErr);
+            const isOverloadErr = isTransientOverloadError(primaryErr);
+
+            if (
+              configuredModel !== GEMINI_QUOTA_FALLBACK_MODEL &&
+              (isQuotaErr || isOverloadErr) &&
+              !chatController.signal.aborted
+            ) {
+              await sleepAbortable(250, chatController.signal);
+              modelUsed = GEMINI_QUOTA_FALLBACK_MODEL;
+              fallbackUsed = true;
+              fallbackFromModel = configuredModel;
+              fallbackReason = isQuotaErr ? 'quota' : 'overload';
+              response = await executeChatWithModel(GEMINI_QUOTA_FALLBACK_MODEL);
+            } else {
+              throw primaryErr;
+            }
+          }
+        } catch (err: any) {
+          if (err?.name === 'AbortError') {
+            const timeoutErr: any = new Error(`Google Gemini (${modelUsed}) request timed out.`);
+            timeoutErr.status = 504;
+            throw timeoutErr;
+          }
+          throw err;
+        } finally {
+          clearTimeout(chatTimer);
+        }
+
+        const latencyMs = Date.now() - startTime;
+        const rawText = response.text || '';
+        recordProviderGenerationResult('gemini', {
+          verified: true,
+          model: modelUsed,
+          latencyMs,
+          source: 'chat',
+        });
+        providerFailoverCooldowns.delete('gemini');
+
+        const isFailover = activeProviderToTry !== requestedProvider;
+        if (isFailover && firstFailedInfo) {
+          recordFailoverEvent({
+            failedProvider: firstFailedInfo.failedProvider,
+            failedModel: firstFailedInfo.failedModel,
+            reasonCode: firstFailedInfo.reasonCode,
+            errorMessage: firstFailedInfo.errorMessage,
+            fallbackProvider: 'gemini',
+            fallbackModel: modelUsed,
+            success: true,
+            endpoint: '/api/chat',
+            latencyMs,
+          });
+        }
+
+        let parsed: Record<string, any> = {};
+        try {
+          parsed = extractJsonText(rawText);
+        } catch {}
+
         res.json({
           reply: parsed.reply || rawText,
           translation: shouldGenerateTranslation ? (parsed.translation || '') : '',
@@ -2578,226 +2920,81 @@ Return valid JSON matching this schema:
           geotagInsights: parsed.geotagInsights || undefined,
           latencyMs,
           isLiveAI: true,
-          provider: requestedProvider,
+          provider: 'gemini',
           modelUsed,
+          ...(isFailover
+            ? {
+                failoverOccurred: true,
+                originalProvider: requestedProvider,
+                failoverReasonCode: firstFailedInfo?.reasonCode || '429',
+              }
+            : {}),
+          ...(fallbackUsed
+            ? { fallbackSwitched: true, fallbackUsed: true, fallbackFromModel, fallbackReason }
+            : {}),
         });
-      } catch {
-        res.json({
-          reply: rawText || 'Response received.',
-          translation: '',
-          detectedLanguage: effectiveResponseLang,
-          sentiment: 'neutral',
-          suggestedQuestions: ['Explain in more detail', 'Give a practical example', 'Summarize the key points'],
-          latencyMs,
-          isLiveAI: true,
-          provider: requestedProvider,
-          modelUsed,
+        return;
+      } catch (geminiErr: any) {
+        lastFailoverError = geminiErr;
+        const isEligible = isProviderFailoverEligibleError(geminiErr);
+        const reasonCode = extractFailoverReasonCode(geminiErr);
+        const safeErrText = sanitizeErrorMessage(geminiErr);
+        const attemptedGemModel = sanitizeModelName(
+          activeProviderToTry === requestedProvider && requestedModel
+            ? requestedModel
+            : process.env.GEMINI_MODEL || GEMINI_RELIABLE_OVERLOAD_MODEL
+        );
+
+        recordProviderGenerationResult('gemini', {
+          verified: false,
+          model: attemptedGemModel,
+          latencyMs: Date.now() - startTime,
+          error: safeErrText,
+          code: reasonCode,
+          source: 'chat',
         });
-      }
-      return;
-    }
 
-    // ---- Default: Google Gemini dispatch ----
-    const ai = getGeminiClient();
-    if (!ai) {
-      res.status(400).json({
-        error: 'Google Gemini is not configured on the server. Set GEMINI_API_KEY in environment variables.',
-        provider: 'gemini',
-        providerNotConfigured: true,
-        isLiveAI: false,
-        retryable: false,
-      });
-      return;
-    }
-
-    const contents: Array<{ role: 'user' | 'model'; parts: Array<Record<string, any>> }> = [];
-    if (Array.isArray(messages)) {
-      for (const msg of messages.slice(-6)) {
-        if (!msg?.content || msg.isError) continue;
-        contents.push({
-          role: msg.role === 'user' ? 'user' : 'model',
-          parts: [{ text: String(msg.content) }],
-        });
-      }
-    }
-
-    const currentParts: Array<Record<string, any>> = [];
-    if (imageData && typeof imageData === 'string') {
-      const mimeMatch = imageData.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,/);
-      const detectedMime = mimeMatch ? mimeMatch[1] : imageMimeType;
-      const cleanBase64 = imageData.replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, '');
-      currentParts.push({
-        inlineData: {
-          mimeType: detectedMime,
-          data: cleanBase64,
-        },
-      });
-    }
-    currentParts.push({ text: promptText });
-
-    const lastContent = contents[contents.length - 1];
-    if (
-      lastContent &&
-      lastContent.role === 'user' &&
-      lastContent.parts?.[0]?.text === currentMessage
-    ) {
-      contents[contents.length - 1] = { role: 'user', parts: currentParts };
-    } else {
-      contents.push({ role: 'user', parts: currentParts });
-    }
-
-    const chatThinkingLevel =
-      isVoiceRequest || responseMode === 'fast'
-        ? ThinkingLevel.MINIMAL
-        : responseMode === 'detailed'
-        ? ThinkingLevel.MEDIUM
-        : ThinkingLevel.MINIMAL;
-
-    const configuredModel = sanitizeModelName(
-      requestedModel || process.env.GEMINI_MODEL || GEMINI_RELIABLE_OVERLOAD_MODEL
-    );
-    const chatController = new AbortController();
-    const chatTimer = setTimeout(() => chatController.abort(), 20000);
-    req.on('close', () => chatController.abort());
-
-    const schemaProperties: Record<string, any> = {
-      reply: {
-        type: Type.STRING,
-        description: 'Accurate, helpful response in clean markdown.',
-      },
-      detectedLanguage: {
-        type: Type.STRING,
-        description: 'ISO 639-1 code of the user input (e.g. en, ne, hi, es).',
-      },
-      sentiment: {
-        type: Type.STRING,
-        description: 'One of: positive, curious, inquiry, urgent, neutral.',
-      },
-      suggestedQuestions: {
-        type: Type.ARRAY,
-        items: { type: Type.STRING },
-        description: '2 or 3 short relevant follow-up questions.',
-      },
-      geotagInsights: {
-        type: Type.STRING,
-        description: 'Optional brief note if location or photo context is relevant.',
-      },
-    };
-    const requiredFields = ['reply', 'detectedLanguage', 'sentiment', 'suggestedQuestions'];
-    if (shouldGenerateTranslation) {
-      schemaProperties.translation = {
-        type: Type.STRING,
-        description: `Natural translation of reply into ${translationLangName}.`,
-      };
-      requiredFields.push('translation');
-    }
-
-    const executeChatWithModel = (targetModel: string) =>
-      ai.models.generateContent({
-        model: targetModel,
-        contents,
-        config: {
-          systemInstruction,
-          ...getGeminiThinkingConfig(targetModel, chatThinkingLevel),
-          abortSignal: chatController.signal,
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: schemaProperties,
-            required: requiredFields,
-          },
-        },
-      });
-
-    let modelUsed = configuredModel;
-    let fallbackUsed = false;
-    let fallbackFromModel: string | undefined = undefined;
-    let fallbackReason: 'quota' | 'overload' | undefined = undefined;
-    let response: Awaited<ReturnType<typeof ai.models.generateContent>>;
-    try {
-      try {
-        response = await executeChatWithModel(configuredModel);
-      } catch (primaryErr: any) {
-        if (isNonFallbackClientError(primaryErr)) {
-          throw primaryErr;
+        if (!isEligible || !isAutoFailover) {
+          throw geminiErr;
         }
-        const isQuotaErr = isGeminiQuotaOrRateLimitError(primaryErr);
-        const isOverloadErr = isTransientOverloadError(primaryErr);
 
-        if (
-          configuredModel !== GEMINI_QUOTA_FALLBACK_MODEL &&
-          (isQuotaErr || isOverloadErr) &&
-          !chatController.signal.aborted
-        ) {
-          await sleepAbortable(250, chatController.signal);
-          modelUsed = GEMINI_QUOTA_FALLBACK_MODEL;
-          fallbackUsed = true;
-          fallbackFromModel = configuredModel;
-          fallbackReason = isQuotaErr ? 'quota' : 'overload';
-          response = await executeChatWithModel(GEMINI_QUOTA_FALLBACK_MODEL);
-        } else if (
-          configuredModel === GEMINI_QUOTA_FALLBACK_MODEL &&
-          (isQuotaErr || isOverloadErr) &&
-          !chatController.signal.aborted
-        ) {
-          await sleepAbortable(350, chatController.signal);
-          response = await executeChatWithModel(GEMINI_QUOTA_FALLBACK_MODEL);
-        } else {
-          throw primaryErr;
+        providerFailoverCooldowns.set('gemini', Date.now() + PROVIDER_FAILOVER_COOLDOWN_MS);
+        if (!firstFailedInfo) {
+          firstFailedInfo = {
+            failedProvider: 'gemini',
+            failedModel: attemptedGemModel,
+            reasonCode,
+            errorMessage: safeErrText,
+          };
         }
+
+        if (pIdx === orderedCandidates.length - 1) {
+          recordFailoverEvent({
+            failedProvider: 'gemini',
+            failedModel: attemptedGemModel,
+            reasonCode,
+            errorMessage: safeErrText,
+            fallbackProvider: null,
+            success: false,
+            endpoint: '/api/chat',
+            latencyMs: Date.now() - startTime,
+          });
+          break;
+        }
+        console.warn(`[Auto-Failover] Gemini (${reasonCode}), attempting next fallback provider:`, safeErrText);
+        continue;
       }
-    } catch (err: any) {
-      if (err?.name === 'AbortError') {
-        const timeoutErr: any = new Error(`Google Gemini (${modelUsed}) request timed out.`);
-        timeoutErr.status = 504;
-        throw timeoutErr;
-      }
-      throw err;
-    } finally {
-      clearTimeout(chatTimer);
     }
 
-    const latencyMs = Date.now() - startTime;
-    const rawText = response.text || '';
-    recordProviderGenerationResult('gemini', {
-      verified: true,
-      model: modelUsed,
-      latencyMs,
-      source: 'chat',
+    res.status(429).json({
+      error: 'All configured AI providers are temporarily unavailable due to rate limits or high demand. Please try again shortly.',
+      code: 'ALL_PROVIDERS_UNAVAILABLE',
+      provider: requestedProvider,
+      latencyMs: Date.now() - startTime,
+      isLiveAI: false,
+      retryable: true,
     });
-
-    try {
-      const parsed = extractJsonText(rawText);
-      res.json({
-        reply: parsed.reply || rawText,
-        translation: shouldGenerateTranslation ? (parsed.translation || '') : '',
-        detectedLanguage: parsed.detectedLanguage || effectiveResponseLang,
-        sentiment: parsed.sentiment || 'positive',
-        suggestedQuestions:
-          Array.isArray(parsed.suggestedQuestions) && parsed.suggestedQuestions.length > 0
-            ? parsed.suggestedQuestions
-            : ['Explain in more detail', 'Give a practical example', 'Summarize the key points'],
-        geotagInsights: parsed.geotagInsights || undefined,
-        latencyMs,
-        isLiveAI: true,
-        provider: 'gemini',
-        modelUsed,
-        ...(fallbackUsed ? { fallbackUsed: true, fallbackFromModel, fallbackReason } : {}),
-      });
-    } catch {
-      res.json({
-        reply: rawText || 'Response received.',
-        translation: '',
-        detectedLanguage: effectiveResponseLang,
-        sentiment: 'neutral',
-        suggestedQuestions: ['Explain in more detail', 'Give a practical example', 'Summarize the key points'],
-        latencyMs,
-        isLiveAI: true,
-        provider: 'gemini',
-        modelUsed,
-        ...(fallbackUsed ? { fallbackUsed: true, fallbackFromModel, fallbackReason } : {}),
-      });
-    }
+    return;
   } catch (err: any) {
     const safeError = sanitizeErrorMessage(err);
     recordServerError('/api/chat', safeError);
@@ -2897,95 +3094,20 @@ Tone: ${personaInstruction}${memoryBlock}`;
     }
     if (location?.name) promptText += `\n[Geotag: ${location.name}]`;
 
-    // Pre-flight server configuration check BEFORE switching headers to SSE
-    if (requestedProvider === 'groq' || requestedProvider === 'openrouter') {
-      const apiKey = requestedProvider === 'groq' ? getGroqApiKey() : getOpenRouterApiKey();
+    // ---- Streaming Provider execution loop with automatic failover (Gemini -> Groq -> OpenRouter) ----
+    const isAutoFailover = req.body?.autoFailover !== false;
+    const { orderedCandidates, skippedDueToCooldown } = resolveOrderedFailoverCandidates({
+      preferredProvider: requestedProvider,
+      autoFailoverEnabled: isAutoFailover,
+      isConfigured: isProviderConfiguredOnServer,
+      cooldowns: providerFailoverCooldowns,
+    });
+
+    if (orderedCandidates.length === 0) {
       const meta = AI_PROVIDER_METADATA[requestedProvider];
-      if (!apiKey) {
-        res.status(400).json({
-          error: `${meta.name} is not configured on the server. Set ${meta.envVarName} in environment variables.`,
-          provider: requestedProvider,
-          providerNotConfigured: true,
-          isLiveAI: false,
-        });
-        return;
-      }
-
-      const catalogResult =
-        requestedProvider === 'groq'
-          ? await fetchGroqModelsCached(apiKey)
-          : await fetchOpenRouterCatalogCached();
-      const resolvedModel = resolveSafeModelForProvider(requestedProvider, catalogResult.models, requestedModel, {
-        allowPaidExplicit: true,
-        requireInCatalog: catalogResult.source === 'live',
-      });
-      const supportsVision = Boolean(
-        resolvedModel.modelInfo?.supportsVision ||
-          /vision|vl|scout|maverick|gemma-3|gemma-4|mistral-small-3|gemini|gpt-4o|claude-3|claude-4|openrouter\/free/i.test(resolvedModel.modelId)
-      );
-
-      const oaiMessages = buildOpenAICompatibleMessages({
-        provider: requestedProvider,
-        modelId: resolvedModel.modelId,
-        supportsVision,
-        systemInstruction,
-        messages,
-        currentTextPrompt: promptText,
-        imageData,
-        imageMimeType,
-      });
-
-      let clientAborted = false;
-      req.on('close', () => {
-        clientAborted = true;
-      });
-
-      res.setHeader('Content-Type', 'text/event-stream');
-      res.setHeader('Cache-Control', 'no-cache, no-transform');
-      res.setHeader('Connection', 'keep-alive');
-      res.setHeader('X-Accel-Buffering', 'no');
-      res.flushHeaders?.();
-
-      const { modelUsed, totalChars } = await streamOpenAICompatibleCompletion({
-        provider: requestedProvider,
-        apiKey,
-        model: resolvedModel.modelId,
-        messages: oaiMessages,
-        allowFreeRouterFallback: requestedProvider === 'openrouter' && resolvedModel.isFree,
-        onChunk: (chunk) => {
-          if (!clientAborted) {
-            res.write(`data: ${JSON.stringify({ chunk })}\n\n`);
-          }
-        },
-        isAborted: () => clientAborted,
-      });
-
-      if (clientAborted) {
-        res.end();
-        return;
-      }
-
-      if (totalChars === 0) {
-        throw new Error(`${meta.name} returned an empty stream response.`);
-      }
-
-      recordProviderGenerationResult(requestedProvider, {
-        verified: true,
-        model: modelUsed,
-        latencyMs: Date.now() - startTime,
-        source: 'chat',
-      });
-      res.write(`data: ${JSON.stringify({ done: true, modelUsed, provider: requestedProvider })}\n\n`);
-      res.end();
-      return;
-    }
-
-    // ---- Default: Google Gemini Streaming ----
-    const ai = getGeminiClient();
-    if (!ai) {
       res.status(400).json({
-        error: 'Google Gemini is not configured on the server. Set GEMINI_API_KEY in environment variables.',
-        provider: 'gemini',
+        error: `${meta.name} is not configured on the server. Set ${meta.envVarName} in environment variables.`,
+        provider: requestedProvider,
         providerNotConfigured: true,
         isLiveAI: false,
       });
@@ -2997,169 +3119,429 @@ Tone: ${personaInstruction}${memoryBlock}`;
       clientAborted = true;
     });
 
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache, no-transform');
-    res.setHeader('Connection', 'keep-alive');
-    res.setHeader('X-Accel-Buffering', 'no');
-    res.flushHeaders?.();
-
-    const contents: Array<{ role: 'user' | 'model'; parts: Array<Record<string, any>> }> = [];
-    if (Array.isArray(messages)) {
-      for (const msg of messages.slice(-6)) {
-        if (!msg?.content || msg.isError) continue;
-        contents.push({
-          role: msg.role === 'user' ? 'user' : 'model',
-          parts: [{ text: String(msg.content) }],
-        });
-      }
-    }
-
-    const currentParts: Array<Record<string, any>> = [];
-    if (imageData && typeof imageData === 'string') {
-      const mimeMatch = imageData.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,/);
-      const detectedMime = mimeMatch ? mimeMatch[1] : imageMimeType;
-      const cleanBase64 = imageData.replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, '');
-      currentParts.push({ inlineData: { mimeType: detectedMime, data: cleanBase64 } });
-    }
-    currentParts.push({ text: promptText });
-
-    const lastContent = contents[contents.length - 1];
-    if (lastContent && lastContent.role === 'user' && lastContent.parts?.[0]?.text === currentMessage) {
-      contents[contents.length - 1] = { role: 'user', parts: currentParts };
-    } else {
-      contents.push({ role: 'user', parts: currentParts });
-    }
-
-    const streamThinkingLevel =
-      isVoiceRequest || responseMode === 'fast'
-        ? ThinkingLevel.MINIMAL
-        : responseMode === 'detailed'
-        ? ThinkingLevel.MEDIUM
-        : ThinkingLevel.MINIMAL;
-    const configuredModel = sanitizeModelName(
-      requestedModel || process.env.GEMINI_MODEL || GEMINI_RELIABLE_OVERLOAD_MODEL
-    );
-    const streamAbortController = new AbortController();
-    const streamTimer = setTimeout(() => streamAbortController.abort(), 25000);
-    req.on('close', () => {
-      clientAborted = true;
-      streamAbortController.abort();
-    });
-
-    let streamed = false;
-    let totalStreamedChars = 0;
-    let usedModel = configuredModel;
-    let fallbackUsed = false;
-    let fallbackFromModel: string | undefined = undefined;
-    let fallbackReason: 'quota' | 'overload' | undefined = undefined;
-
-    const runStreamWithModel = async (targetModel: string) => {
-      const stream = await ai.models.generateContentStream({
-        model: targetModel,
-        contents,
-        config: {
-          systemInstruction,
-          ...getGeminiThinkingConfig(targetModel, streamThinkingLevel),
-          abortSignal: streamAbortController.signal,
-        },
-      });
-      for await (const chunk of stream) {
-        if (clientAborted) break;
-        const text = chunk.text || '';
-        if (text) {
-          totalStreamedChars += text.length;
-          res.write(`data: ${JSON.stringify({ chunk: text })}\n\n`);
-        }
+    const ensureSseHeaders = () => {
+      if (!res.headersSent) {
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache, no-transform');
+        res.setHeader('Connection', 'keep-alive');
+        res.setHeader('X-Accel-Buffering', 'no');
+        res.flushHeaders?.();
       }
     };
 
-    try {
-      try {
-        await runStreamWithModel(configuredModel);
-      } catch (primaryErr: any) {
-        if (isNonFallbackClientError(primaryErr)) {
-          throw primaryErr;
+    let totalStreamedChars = 0;
+    let firstFailedInfo: {
+      failedProvider: AIProviderId;
+      failedModel?: string;
+      reasonCode: string;
+      errorMessage: string;
+    } | null = skippedDueToCooldown.includes(requestedProvider)
+      ? {
+          failedProvider: requestedProvider,
+          failedModel: requestedModel || AI_PROVIDER_METADATA[requestedProvider].defaultModel,
+          reasonCode: 'COOLDOWN_ACTIVE',
+          errorMessage: 'Preferred provider temporarily in cooldown after rate limit/overload.',
         }
-        const isQuotaErr = isGeminiQuotaOrRateLimitError(primaryErr);
-        const isOverloadErr = isTransientOverloadError(primaryErr);
+      : null;
 
-        if (
-          !clientAborted &&
-          totalStreamedChars === 0 &&
-          configuredModel !== GEMINI_QUOTA_FALLBACK_MODEL &&
-          (isQuotaErr || isOverloadErr) &&
-          !streamAbortController.signal.aborted
-        ) {
-          await sleepAbortable(250, streamAbortController.signal);
-          usedModel = GEMINI_QUOTA_FALLBACK_MODEL;
-          fallbackUsed = true;
-          fallbackFromModel = configuredModel;
-          fallbackReason = isQuotaErr ? 'quota' : 'overload';
+    for (let pIdx = 0; pIdx < orderedCandidates.length; pIdx++) {
+      const activeProviderToTry = orderedCandidates[pIdx];
+      const isFailover = activeProviderToTry !== requestedProvider;
+
+      // 1. Groq or OpenRouter Streaming
+      if (activeProviderToTry === 'groq' || activeProviderToTry === 'openrouter') {
+        const apiKey = activeProviderToTry === 'groq' ? getGroqApiKey() : getOpenRouterApiKey();
+        if (!apiKey) continue;
+        let attemptedModel = AI_PROVIDER_METADATA[activeProviderToTry].defaultModel;
+
+        try {
+          const catalogResult =
+            activeProviderToTry === 'groq'
+              ? await fetchGroqModelsCached(apiKey)
+              : await fetchOpenRouterCatalogCached();
+          const targetModelParam = activeProviderToTry === requestedProvider ? requestedModel : undefined;
+          const resolvedModel = resolveSafeModelForProvider(activeProviderToTry, catalogResult.models, targetModelParam, {
+            allowPaidExplicit: true,
+            requireInCatalog: catalogResult.source === 'live',
+          });
+          attemptedModel = resolvedModel.modelId;
+          const supportsVision = Boolean(
+            resolvedModel.modelInfo?.supportsVision ||
+              /vision|vl|scout|maverick|gemma-3|gemma-4|mistral-small-3|gemini|gpt-4o|claude-3|claude-4|openrouter\/free/i.test(resolvedModel.modelId)
+          );
+
+          const oaiMessages = buildOpenAICompatibleMessages({
+            provider: activeProviderToTry,
+            modelId: resolvedModel.modelId,
+            supportsVision,
+            systemInstruction,
+            messages,
+            currentTextPrompt: promptText,
+            imageData,
+            imageMimeType,
+          });
+
+          let sentFailoverNoticeInStream = false;
+          const { modelUsed, totalChars } = await streamOpenAICompatibleCompletion({
+            provider: activeProviderToTry,
+            apiKey,
+            model: resolvedModel.modelId,
+            messages: oaiMessages,
+            allowFreeRouterFallback: activeProviderToTry === 'openrouter' && resolvedModel.isFree,
+            onChunk: (chunk) => {
+              if (clientAborted) return;
+              ensureSseHeaders();
+              if (isFailover && !sentFailoverNoticeInStream) {
+                sentFailoverNoticeInStream = true;
+                res.write(
+                  `data: ${JSON.stringify({
+                    failoverOccurred: true,
+                    originalProvider: requestedProvider,
+                    provider: activeProviderToTry,
+                    failoverReasonCode: firstFailedInfo?.reasonCode || '429',
+                    modelUsed: resolvedModel.modelId,
+                  })}\n\n`
+                );
+              }
+              totalStreamedChars += chunk.length;
+              res.write(`data: ${JSON.stringify({ chunk })}\n\n`);
+            },
+            isAborted: () => clientAborted,
+          });
+
+          if (clientAborted) {
+            if (res.headersSent) res.end();
+            return;
+          }
+
+          if (totalChars === 0) {
+            throw new Error(`${AI_PROVIDER_METADATA[activeProviderToTry].name} returned an empty stream response.`);
+          }
+
+          const latencyMs = Date.now() - startTime;
+          recordProviderGenerationResult(activeProviderToTry, {
+            verified: true,
+            model: modelUsed,
+            latencyMs,
+            source: 'chat',
+          });
+          providerFailoverCooldowns.delete(activeProviderToTry);
+
+          if (isFailover && firstFailedInfo) {
+            recordFailoverEvent({
+              failedProvider: firstFailedInfo.failedProvider,
+              failedModel: firstFailedInfo.failedModel,
+              reasonCode: firstFailedInfo.reasonCode,
+              errorMessage: firstFailedInfo.errorMessage,
+              fallbackProvider: activeProviderToTry,
+              fallbackModel: modelUsed,
+              success: true,
+              endpoint: '/api/chat/stream',
+              latencyMs,
+            });
+          }
+
+          ensureSseHeaders();
           res.write(
             `data: ${JSON.stringify({
-              fallbackSwitched: true,
-              fallbackFromModel,
-              fallbackReason,
-              modelUsed: usedModel,
+              done: true,
+              modelUsed,
+              provider: activeProviderToTry,
+              ...(isFailover
+                ? {
+                    failoverOccurred: true,
+                    originalProvider: requestedProvider,
+                    failoverReasonCode: firstFailedInfo?.reasonCode || '429',
+                  }
+                : {}),
             })}\n\n`
           );
-          await runStreamWithModel(GEMINI_QUOTA_FALLBACK_MODEL);
-        } else if (
-          !clientAborted &&
-          totalStreamedChars === 0 &&
-          configuredModel === GEMINI_QUOTA_FALLBACK_MODEL &&
-          (isQuotaErr || isOverloadErr) &&
-          !streamAbortController.signal.aborted
-        ) {
-          await sleepAbortable(350, streamAbortController.signal);
-          await runStreamWithModel(GEMINI_QUOTA_FALLBACK_MODEL);
-        } else {
-          throw primaryErr;
+          res.end();
+          return;
+        } catch (err: any) {
+          if (clientAborted) {
+            if (res.headersSent) res.end();
+            return;
+          }
+          const safeErrText = sanitizeErrorMessage(err);
+          const reasonCode = extractFailoverReasonCode(err);
+          recordProviderGenerationResult(activeProviderToTry, {
+            verified: false,
+            model: attemptedModel,
+            latencyMs: Date.now() - startTime,
+            error: safeErrText,
+            code: reasonCode,
+            source: 'chat',
+          });
+
+          // CRITICAL: If streaming chunks ALREADY started reaching client, never silently restart with another provider
+          if (totalStreamedChars > 0 || !isProviderFailoverEligibleError(err) || !isAutoFailover) {
+            throw err;
+          }
+
+          providerFailoverCooldowns.set(activeProviderToTry, Date.now() + PROVIDER_FAILOVER_COOLDOWN_MS);
+          if (!firstFailedInfo) {
+            firstFailedInfo = {
+              failedProvider: activeProviderToTry,
+              failedModel: attemptedModel,
+              reasonCode,
+              errorMessage: safeErrText,
+            };
+          }
+          if (pIdx === orderedCandidates.length - 1) {
+            recordFailoverEvent({
+              failedProvider: activeProviderToTry,
+              failedModel: attemptedModel,
+              reasonCode,
+              errorMessage: safeErrText,
+              fallbackProvider: null,
+              success: false,
+              endpoint: '/api/chat/stream',
+              latencyMs: Date.now() - startTime,
+            });
+            break;
+          }
+          console.warn(`[Auto-Failover Stream] ${activeProviderToTry} (${reasonCode}), trying next fallback:`, safeErrText);
+          continue;
         }
       }
-      if (totalStreamedChars > 0) {
-        streamed = true;
+
+      // 2. Google Gemini Streaming
+      const ai = getGeminiClient();
+      if (!ai) continue;
+
+      const contents: Array<{ role: 'user' | 'model'; parts: Array<Record<string, any>> }> = [];
+      if (Array.isArray(messages)) {
+        for (const msg of messages.slice(-6)) {
+          if (!msg?.content || msg.isError) continue;
+          contents.push({
+            role: msg.role === 'user' ? 'user' : 'model',
+            parts: [{ text: String(msg.content) }],
+          });
+        }
       }
-    } catch (err: any) {
-      if (clientAborted) {
+
+      const currentParts: Array<Record<string, any>> = [];
+      if (imageData && typeof imageData === 'string') {
+        const mimeMatch = imageData.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,/);
+        const detectedMime = mimeMatch ? mimeMatch[1] : imageMimeType;
+        const cleanBase64 = imageData.replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, '');
+        currentParts.push({ inlineData: { mimeType: detectedMime, data: cleanBase64 } });
+      }
+      currentParts.push({ text: promptText });
+
+      const lastContent = contents[contents.length - 1];
+      if (lastContent && lastContent.role === 'user' && lastContent.parts?.[0]?.text === currentMessage) {
+        contents[contents.length - 1] = { role: 'user', parts: currentParts };
+      } else {
+        contents.push({ role: 'user', parts: currentParts });
+      }
+
+      const streamThinkingLevel =
+        isVoiceRequest || responseMode === 'fast'
+          ? ThinkingLevel.MINIMAL
+          : responseMode === 'detailed'
+          ? ThinkingLevel.MEDIUM
+          : ThinkingLevel.MINIMAL;
+      const targetGemModel =
+        activeProviderToTry === requestedProvider && requestedModel
+          ? requestedModel
+          : process.env.GEMINI_MODEL || GEMINI_RELIABLE_OVERLOAD_MODEL;
+      const configuredModel = sanitizeModelName(targetGemModel);
+      const streamAbortController = new AbortController();
+      const streamTimer = setTimeout(() => streamAbortController.abort(), 25000);
+      req.on('close', () => {
+        clientAborted = true;
+        streamAbortController.abort();
+      });
+
+      let streamed = false;
+      let usedModel = configuredModel;
+      let fallbackUsed = false;
+      let fallbackFromModel: string | undefined = undefined;
+      let fallbackReason: 'quota' | 'overload' | undefined = undefined;
+      let sentFailoverNoticeInStream = false;
+
+      const runStreamWithModel = async (targetModel: string) => {
+        const stream = await ai.models.generateContentStream({
+          model: targetModel,
+          contents,
+          config: {
+            systemInstruction,
+            ...getGeminiThinkingConfig(targetModel, streamThinkingLevel),
+            abortSignal: streamAbortController.signal,
+          },
+        });
+        for await (const chunk of stream) {
+          if (clientAborted) break;
+          const text = chunk.text || '';
+          if (text) {
+            ensureSseHeaders();
+            if (isFailover && !sentFailoverNoticeInStream) {
+              sentFailoverNoticeInStream = true;
+              res.write(
+                `data: ${JSON.stringify({
+                  failoverOccurred: true,
+                  originalProvider: requestedProvider,
+                  provider: 'gemini',
+                  failoverReasonCode: firstFailedInfo?.reasonCode || '429',
+                  modelUsed: targetModel,
+                })}\n\n`
+              );
+            }
+            totalStreamedChars += text.length;
+            res.write(`data: ${JSON.stringify({ chunk: text })}\n\n`);
+          }
+        }
+      };
+
+      try {
+        try {
+          try {
+            await runStreamWithModel(configuredModel);
+          } catch (primaryErr: any) {
+            if (isNonFallbackClientError(primaryErr)) {
+              throw primaryErr;
+            }
+            const isQuotaErr = isGeminiQuotaOrRateLimitError(primaryErr);
+            const isOverloadErr = isTransientOverloadError(primaryErr);
+
+            if (
+              !clientAborted &&
+              totalStreamedChars === 0 &&
+              configuredModel !== GEMINI_QUOTA_FALLBACK_MODEL &&
+              (isQuotaErr || isOverloadErr) &&
+              !streamAbortController.signal.aborted
+            ) {
+              await sleepAbortable(250, streamAbortController.signal);
+              usedModel = GEMINI_QUOTA_FALLBACK_MODEL;
+              fallbackUsed = true;
+              fallbackFromModel = configuredModel;
+              fallbackReason = isQuotaErr ? 'quota' : 'overload';
+              await runStreamWithModel(GEMINI_QUOTA_FALLBACK_MODEL);
+            } else {
+              throw primaryErr;
+            }
+          }
+          if (totalStreamedChars > 0) {
+            streamed = true;
+          }
+        } catch (err: any) {
+          if (clientAborted) {
+            if (res.headersSent) res.end();
+            return;
+          }
+          if (err?.name === 'AbortError') {
+            const timeoutErr: any = new Error(`Google Gemini (${usedModel}) stream timed out.`);
+            timeoutErr.status = 504;
+            throw timeoutErr;
+          }
+          throw err;
+        } finally {
+          clearTimeout(streamTimer);
+        }
+
+        if (clientAborted) {
+          if (res.headersSent) res.end();
+          return;
+        }
+
+        if (!streamed) {
+          throw new Error(`Google Gemini (${usedModel}) returned an empty stream response.`);
+        }
+
+        const latencyMs = Date.now() - startTime;
+        recordProviderGenerationResult('gemini', {
+          verified: true,
+          model: usedModel,
+          latencyMs,
+          source: 'chat',
+        });
+        providerFailoverCooldowns.delete('gemini');
+
+        if (isFailover && firstFailedInfo) {
+          recordFailoverEvent({
+            failedProvider: firstFailedInfo.failedProvider,
+            failedModel: firstFailedInfo.failedModel,
+            reasonCode: firstFailedInfo.reasonCode,
+            errorMessage: firstFailedInfo.errorMessage,
+            fallbackProvider: 'gemini',
+            fallbackModel: usedModel,
+            success: true,
+            endpoint: '/api/chat/stream',
+            latencyMs,
+          });
+        }
+
+        ensureSseHeaders();
+        res.write(
+          `data: ${JSON.stringify({
+            done: true,
+            modelUsed: usedModel,
+            provider: 'gemini',
+            ...(isFailover
+              ? {
+                  failoverOccurred: true,
+                  originalProvider: requestedProvider,
+                  failoverReasonCode: firstFailedInfo?.reasonCode || '429',
+                }
+              : {}),
+            ...(fallbackUsed
+              ? { fallbackSwitched: true, fallbackUsed: true, fallbackFromModel, fallbackReason }
+              : {}),
+          })}\n\n`
+        );
         res.end();
         return;
+      } catch (gemStreamErr: any) {
+        const safeErrText = sanitizeErrorMessage(gemStreamErr);
+        const reasonCode = extractFailoverReasonCode(gemStreamErr);
+        recordProviderGenerationResult('gemini', {
+          verified: false,
+          model: usedModel,
+          latencyMs: Date.now() - startTime,
+          error: safeErrText,
+          code: reasonCode,
+          source: 'chat',
+        });
+
+        if (totalStreamedChars > 0 || !isProviderFailoverEligibleError(gemStreamErr) || !isAutoFailover) {
+          throw gemStreamErr;
+        }
+
+        providerFailoverCooldowns.set('gemini', Date.now() + PROVIDER_FAILOVER_COOLDOWN_MS);
+        if (!firstFailedInfo) {
+          firstFailedInfo = {
+            failedProvider: 'gemini',
+            failedModel: usedModel,
+            reasonCode,
+            errorMessage: safeErrText,
+          };
+        }
+        if (pIdx === orderedCandidates.length - 1) {
+          recordFailoverEvent({
+            failedProvider: 'gemini',
+            failedModel: usedModel,
+            reasonCode,
+            errorMessage: safeErrText,
+            fallbackProvider: null,
+            success: false,
+            endpoint: '/api/chat/stream',
+            latencyMs: Date.now() - startTime,
+          });
+          break;
+        }
+        console.warn(`[Auto-Failover Stream] Gemini (${reasonCode}), attempting next fallback provider:`, safeErrText);
+        continue;
       }
-      if (err?.name === 'AbortError') {
-        const timeoutErr: any = new Error(`Google Gemini (${usedModel}) stream timed out.`);
-        timeoutErr.status = 504;
-        throw timeoutErr;
-      }
-      throw err;
-    } finally {
-      clearTimeout(streamTimer);
     }
 
-    if (clientAborted) {
-      res.end();
-      return;
-    }
-
-    if (!streamed) {
-      throw new Error(`Google Gemini (${usedModel}) returned an empty stream response.`);
-    }
-
-    recordProviderGenerationResult('gemini', {
-      verified: true,
-      model: usedModel,
-      latencyMs: Date.now() - startTime,
-      source: 'chat',
+    res.status(429).json({
+      error: 'All configured AI providers are temporarily unavailable due to rate limits or high demand. Please try again shortly.',
+      code: 'ALL_PROVIDERS_UNAVAILABLE',
+      provider: requestedProvider,
     });
-
-    res.write(
-      `data: ${JSON.stringify({
-        done: true,
-        modelUsed: usedModel,
-        provider: 'gemini',
-        ...(fallbackUsed ? { fallbackUsed: true, fallbackFromModel, fallbackReason } : {}),
-      })}\n\n`
-    );
-    res.end();
+    return;
   } catch (err: any) {
     const safeError = sanitizeErrorMessage(err);
     recordServerError('/api/chat/stream', safeError);
@@ -3901,6 +4283,17 @@ app.get('/api/admin/overview', async (req: Request, res: Response): Promise<void
       failedApiRequests: serverTelemetry.failedApiRequests,
       recentErrors: serverTelemetry.recentErrors,
     },
+    failoverEvents: failoverActivityLog,
+  });
+});
+
+app.get('/api/admin/failover-events', requireAadeshAdmin, async (_req: Request, res: Response): Promise<void> => {
+  res.json({
+    ok: true,
+    authorized: true,
+    events: failoverActivityLog,
+    total: failoverActivityLog.length,
+    timestamp: new Date().toISOString(),
   });
 });
 
@@ -3940,6 +4333,202 @@ app.post(
     });
   }
 );
+
+// 4B. OWNER CONTROL PANEL (Firebase Admin SDK - Strictly restricted to verified aadeshjaisi6@gmail.com)
+app.get('/api/admin/owner/users', requireAadeshAdmin, async (_req: Request, res: Response): Promise<void> => {
+  try {
+    const users = await listMergedOwnerUsers();
+    const summary = getAdminConfigSummary();
+    res.json({
+      ok: true,
+      authorized: true,
+      users,
+      total: users.length,
+      adminConfig: summary,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err: any) {
+    const classified = classifyFirebaseAdminError(err);
+    res.status(classified.status).json({
+      ok: false,
+      code: classified.code,
+      error: classified.message,
+    });
+  }
+});
+
+app.get('/api/admin/owner/users/:uid', requireAadeshAdmin, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const detail = await getMergedOwnerUserDetail(String(req.params.uid || ''));
+    res.json({
+      ok: true,
+      authorized: true,
+      ...detail,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err: any) {
+    if (err?.message?.includes('Invalid Firebase UID')) {
+      res.status(400).json({ ok: false, code: 'INVALID_UID', error: err.message });
+      return;
+    }
+    const classified = classifyFirebaseAdminError(err);
+    res.status(classified.status).json({
+      ok: false,
+      code: classified.code,
+      error: classified.message,
+    });
+  }
+});
+
+app.patch(
+  '/api/admin/owner/users/:uid/profile',
+  requireAadeshAdmin,
+  async (req: Request, res: Response): Promise<void> => {
+    const authUser = (req as Request & { authUser?: AuthenticatedFirebaseUser }).authUser!;
+    try {
+      const result = await applyOwnerProfileUpdate(String(req.params.uid || ''), req.body || {}, {
+        uid: authUser.uid,
+        email: authUser.email,
+      });
+      res.json({
+        ok: true,
+        authorized: true,
+        user: result.user,
+        auditLog: result.auditLog,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (err: any) {
+      if (err?.statusCode === 400 || err?.message?.includes('Invalid Firebase UID')) {
+        res.status(400).json({ ok: false, code: 'VALIDATION_ERROR', error: err.message });
+        return;
+      }
+      const classified = classifyFirebaseAdminError(err);
+      res.status(classified.status).json({
+        ok: false,
+        code: classified.code,
+        error: classified.message,
+      });
+    }
+  }
+);
+
+app.patch(
+  '/api/admin/owner/users/:uid/streak',
+  requireAadeshAdmin,
+  async (req: Request, res: Response): Promise<void> => {
+    const authUser = (req as Request & { authUser?: AuthenticatedFirebaseUser }).authUser!;
+    try {
+      const result = await applyOwnerStreakUpdate(String(req.params.uid || ''), req.body || {}, {
+        uid: authUser.uid,
+        email: authUser.email,
+      });
+      res.json({
+        ok: true,
+        authorized: true,
+        user: result.user,
+        auditLog: result.auditLog,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (err: any) {
+      if (err?.statusCode === 400 || err?.message?.includes('Invalid Firebase UID')) {
+        res.status(400).json({ ok: false, code: 'VALIDATION_ERROR', error: err.message });
+        return;
+      }
+      const classified = classifyFirebaseAdminError(err);
+      res.status(classified.status).json({
+        ok: false,
+        code: classified.code,
+        error: classified.message,
+      });
+    }
+  }
+);
+
+app.get(
+  '/api/admin/owner/users/:uid/conversations',
+  requireAadeshAdmin,
+  async (req: Request, res: Response): Promise<void> => {
+    try {
+      const conversations = await listOwnerUserConversations(String(req.params.uid || ''));
+      res.json({
+        ok: true,
+        authorized: true,
+        conversations,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (err: any) {
+      if (err?.message?.includes('Invalid Firebase UID')) {
+        res.status(400).json({ ok: false, code: 'INVALID_UID', error: err.message });
+        return;
+      }
+      const classified = classifyFirebaseAdminError(err);
+      res.status(classified.status).json({
+        ok: false,
+        code: classified.code,
+        error: classified.message,
+      });
+    }
+  }
+);
+
+app.get(
+  '/api/admin/owner/users/:uid/conversations/:convId/messages',
+  requireAadeshAdmin,
+  async (req: Request, res: Response): Promise<void> => {
+    const authUser = (req as Request & { authUser?: AuthenticatedFirebaseUser }).authUser!;
+    try {
+      const reason = typeof req.query.reason === 'string' ? req.query.reason : undefined;
+      const result = await inspectUserConversationMessagesAudit({
+        rawUid: String(req.params.uid || ''),
+        rawConversationId: String(req.params.convId || ''),
+        actor: { uid: authUser.uid, email: authUser.email },
+        reason,
+      });
+      res.json({
+        ok: true,
+        authorized: true,
+        messages: result.messages,
+        auditLog: result.auditLog,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (err: any) {
+      if (err?.statusCode === 400 || err?.message?.includes('Invalid Firebase UID')) {
+        res.status(400).json({ ok: false, code: 'VALIDATION_ERROR', error: err.message });
+        return;
+      }
+      const classified = classifyFirebaseAdminError(err);
+      res.status(classified.status).json({
+        ok: false,
+        code: classified.code,
+        error: classified.message,
+      });
+    }
+  }
+);
+
+app.get('/api/admin/owner/audit-logs', requireAadeshAdmin, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const logs = await listOwnerAuditLogs({
+      targetUid: typeof req.query.targetUid === 'string' ? req.query.targetUid : undefined,
+      action: typeof req.query.action === 'string' ? req.query.action : undefined,
+      limit: req.query.limit ? Number(req.query.limit) : undefined,
+    });
+    res.json({
+      ok: true,
+      authorized: true,
+      logs,
+      total: logs.length,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err: any) {
+    const classified = classifyFirebaseAdminError(err);
+    res.status(classified.status).json({
+      ok: false,
+      code: classified.code,
+      error: classified.message,
+    });
+  }
+});
 
 // 5. IMAGE GENERATION & STUDIO ENDPOINTS
 const IMAGE_MODEL_CAPABILITIES = {
